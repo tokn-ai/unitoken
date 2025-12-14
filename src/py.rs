@@ -2,6 +2,7 @@
 mod _lib {
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
+use numpy::{IntoPyArray, PyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods};
 
@@ -344,17 +345,25 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_string")]
-  pub fn py_encode_string(&self, py: Python, s: &str) -> PyResult<Vec<Idx>> {
-    py.detach(||
+  pub fn py_encode_string<'py>(&self, py: Python<'py>, s: &str) -> PyResult<Bound<'py, PyArray1<Idx>>> {
+    let result = py.detach(|| {
       self.0.encode_string(s)
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    });
+    match result {
+      Ok(v) => Ok(v.into_pyarray(py)),
+      Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+    }
   }
 
   #[pyo3(name = "encode_file")]
-  pub fn py_encode_file(&self, py: Python, path: PathBuf, num_chunks: usize) -> PyResult<Vec<Idx>> {
-    py.detach(||
+  pub fn py_encode_file<'py>(&self, py: Python<'py>, path: PathBuf, num_chunks: usize) -> PyResult<Bound<'py, PyArray1<Idx>>> {
+    let result = py.detach(||
       self.0.encode_file(&path, num_chunks)
-    ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    );
+    match result {
+      Ok(v) => Ok(v.into_pyarray(py)),
+      Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+    }
   }
 }
 

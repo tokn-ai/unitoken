@@ -26,7 +26,9 @@ rgb = { version = "0.8.52", optional = true } # optional for textplots
 indicatif = "0.18.3"
 hotpath = "0.8.0"
 npyz = { version = "0.8.4" }
-pyo3 = { git = "https://github.com/PyO3/pyo3", optional = true, features = ["experimental-inspect"] }
+pyo3 = { version = "0.27", optional = true, features = ["experimental-inspect"] }
+ndarray = { version = "0.17.1", optional = true }
+numpy = { version = "0.27.1", optional = true }
 
 [profile.dev.package."*"]
 opt-level = 2
@@ -47,7 +49,11 @@ hotpath = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 fmt-npz = ["npyz/npz"]
 
 plot = ["dep:textplots", "dep:rgb"]
-py = ["dep:pyo3"]
+py = ["dep:pyo3", "dep:ndarray", "dep:numpy"]
 
 [dev-dependencies]
-pyo3-introspection = { git = "https://github.com/PyO3/pyo3" }
+pyo3-introspection = "0.27"
+
+[patch.crates-io]
+pyo3 = { git = 'https://github.com/PyO3/pyo3' } # for pyo3-introspection
+pyo3-introspection = { git = 'https://github.com/PyO3/pyo3' } # for https://github.com/PyO3/pyo3/issues/5137

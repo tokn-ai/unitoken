@@ -1,7 +1,11 @@
+from ast import TypeVar
 from collections.abc import Sequence
 from os import PathLike
 from typing import cast, TYPE_CHECKING
 from ._lib import BpeEncoderBase
+import numpy as np
+
+IdxArray = np.ndarray[tuple[int], np.dtype[np.uint32]]
 
 if TYPE_CHECKING:
   from .trainer import CharLevel, OutputFormat
@@ -43,8 +47,8 @@ class BpeEncoder:
   def encode_words(self, /, words: Sequence[str]) -> list[list[int]]:
     return self._encoder.encode_words(words)
 
-  def encode_string(self, /, s: str) -> list[int]:
+  def encode_string(self, /, s: str) -> IdxArray:
     return self._encoder.encode_string(s)
 
-  def encode_file(self, /, path: str | PathLike, num_chunks: int) -> list[int]:
+  def encode_file(self, /, path: str | PathLike, num_chunks: int) -> IdxArray:
     return self._encoder.encode_file(path, num_chunks)
