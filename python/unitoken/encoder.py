@@ -1,6 +1,6 @@
-from ast import TypeVar
 from collections.abc import Sequence
 from os import PathLike
+from pathlib import Path
 from typing import cast, TYPE_CHECKING
 from ._lib import BpeEncoderBase
 import numpy as np
@@ -14,31 +14,59 @@ class BpeEncoder:
   def __init__(
       self,
       char_level: "CharLevel" = "u8",
-      output_format: "OutputFormat | None" = None,
       *,
-      name: str | None = None,
-      merges_file: str | PathLike | None = None,
-      vocabs_file: str | PathLike | None = None,
       merges: list[tuple[bytes, bytes]] | None = None,
       vocabs: dict[bytes, int] | None = None,
+      _encoder: BpeEncoderBase | None = None,
   ) -> None:
     self.char_level = char_level
+    if _encoder is not None:
+      self._encoder = _encoder
+    else:
+      spec = "uni" if char_level == "char" else "gpt2"
+      self._encoder = BpeEncoderBase(
+        spec=spec,
+        char_level=char_level,
+        merges_filename=None,
+        vocab_filename=None,
+        merges=merges,
+        vocabs=cast(dict[Sequence[int], int], vocabs),
+      )
+
+  @classmethod
+  def load(
+    cls,
+    name: str | None = None,
+    *,
+    char_level: "CharLevel" = "u8",
+    output_format: "OutputFormat | None" = None,
+    input_dir: str | PathLike | None = None,
+    merges_file: str | PathLike | None = None,
+    vocabs_file: str | PathLike | None = None,
+  ) -> "BpeEncoder":
     spec = output_format
     if spec is None:
       spec = "uni" if char_level == "char" else "gpt2"
-    self.output_format = spec
     if name is not None:
-      if merges is None:
+      if merges_file is None:
         merges_file = f"merges.{name}[{char_level}].txt"
-      if vocabs is None:
+      if vocabs_file is None:
         vocabs_file = f"vocab.{name}[{char_level}].json"
-    self._encoder = BpeEncoderBase(
-      spec=spec,
+    if input_dir is not None:
+      if merges_file is not None:
+        merges_file = Path(input_dir) / merges_file
+      if vocabs_file is not None:
+        vocabs_file = Path(input_dir) / vocabs_file
+    return cls(
       char_level=char_level,
-      merges_filename=merges_file,
-      vocab_filename=vocabs_file,
-      merges=merges,
-      vocabs=cast(dict[Sequence[int], int], vocabs),
+      _encoder=BpeEncoderBase(
+        spec=spec,
+        char_level=char_level,
+        merges_filename=merges_file,
+        vocab_filename=vocabs_file,
+        merges=None,
+        vocabs=None,
+      ),
     )
 
   def encode_word(self, /, word: str) -> list[int]:
@@ -50,5 +78,5 @@ class BpeEncoder:
   def encode_string(self, /, s: str) -> IdxArray:
     return self._encoder.encode_string(s)
 
-  def encode_file(self, /, path: str | PathLike, num_chunks: int) -> IdxArray:
+  def encode_file(self, /, path: str | PathLike, num_chunks: int = 1024) -> IdxArray:
     return self._encoder.encode_file(path, num_chunks)
