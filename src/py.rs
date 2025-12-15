@@ -278,6 +278,7 @@ fn new_bpe<C>(
   merges: Option<Vec<(Vec<u8>, Vec<u8>)>>,
   vocab_filename: Option<PathBuf>,
   merges_filename: Option<PathBuf>,
+  special_tokens: Option<Vec<String>>,
   spec: &dyn Spec<C, Idx>,
 ) -> MyResult<BpeEncoderBase>
 where
@@ -298,6 +299,7 @@ where
   } else {
     return Err(MyError::BpeBuilder("Either merges_filename or merges must be provided".to_string()));
   }
+  builder= builder.set_special_tokens(special_tokens);
   let bpe = builder.build(spec)?;
   Ok(BpeEncoderBase(Arc::new(bpe)))
 }
@@ -312,12 +314,13 @@ impl BpeEncoderBase {
     merges: Option<Vec<(Vec<u8>, Vec<u8>)>>,
     vocab_filename: Option<PathBuf>,
     merges_filename: Option<PathBuf>,
+    special_tokens: Option<Vec<String>>,
   ) -> PyResult<Self> {
     py.detach(||
       match (spec, char_level) {
-        ("gpt2", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, &Gpt2Spec),
-        ("uni", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, &UniSpec),
-        ("uni", "char") => new_bpe::<Character>(vocabs, merges, vocab_filename, merges_filename, &UniSpec),
+        ("gpt2", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &Gpt2Spec),
+        ("uni", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &UniSpec),
+        ("uni", "char") => new_bpe::<Character>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &UniSpec),
         _ => Err(MyError::SpecError(format!("spec {spec} not compatibale with {char_level}"))),
       }
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))

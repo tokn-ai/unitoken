@@ -15,6 +15,7 @@ class BpeEncoder:
       self,
       ch: "CharLevel" = "u8",
       *,
+      special_tokens: Sequence[str] | None = None,
       merges: list[tuple[bytes, bytes]] | None = None,
       vocabs: dict[bytes, int] | None = None,
       _encoder: BpeEncoderBase | None = None,
@@ -31,6 +32,7 @@ class BpeEncoder:
         vocab_filename=None,
         merges=merges,
         vocabs=cast(dict[Sequence[int], int], vocabs),
+        special_tokens=special_tokens,
       )
 
   @classmethod
@@ -40,6 +42,7 @@ class BpeEncoder:
     *,
     ch: "CharLevel" = "u8",
     output_format: "OutputFormat | None" = None,
+    special_tokens: Sequence[str] | None = None,
     input_dir: str | PathLike | None = None,
     merges_file: str | PathLike | None = None,
     vocabs_file: str | PathLike | None = None,
@@ -66,6 +69,7 @@ class BpeEncoder:
         vocab_filename=vocabs_file,
         merges=None,
         vocabs=None,
+        special_tokens=special_tokens,
       ),
     )
 

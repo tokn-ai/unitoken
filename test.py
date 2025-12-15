@@ -21,13 +21,13 @@ bpe.save("test")
 # %%
 from unitoken import BpeEncoder
 import numpy as np
-encoder = BpeEncoder.load("test", char_level="char")
+encoder = BpeEncoder.load("test", ch="char")
 a = encoder.encode_string("Hello, world!")
 print(a)
 assert isinstance(a, np.ndarray)
 assert a.tolist() == [73, 102, 293, 112, 45, 261, 304, 341, 34]
 b = encoder.encode_file("fixtures/tinystories_sample_5M.txt", 100)
 print(len(b))
-assert len(b) == 2249369
+assert len(b) == 2184799
 
 # %%
