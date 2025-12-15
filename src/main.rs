@@ -328,7 +328,7 @@ where
   let bpe = BpeBuilder::new()
     .load_merges_file(merges_path, spec).unwrap()
     .load_vocab_file(vocab_path, spec).unwrap()
-    .special_tokens(special_tokens.unwrap_or_default())
+    .set_special_tokens(special_tokens)
     .set_vocab_size(vocab_size)
     .build(spec).unwrap();
   // (spec, vocab_path, merges_path, special_tokens, vocab_size).expect("create bpe encoder");

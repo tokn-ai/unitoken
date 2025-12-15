@@ -78,6 +78,14 @@ impl<S> BpeBuilder<S> {
       ..self
     }
   }
+
+  #[must_use]
+  pub fn set_special_tokens(self, sp: Option<Vec<String>>) -> Self {
+    Self {
+      special_tokens: sp,
+      ..self
+    }
+  }
 }
 
 impl BpeBuilder {
@@ -134,7 +142,8 @@ impl BpeBuilder {
     } else {
       Vec::new()
     };
-    BpeEncoder::new(vocab, merges, self.special_tokens.unwrap_or_default())
+    let special_tokens = self.special_tokens.unwrap_or_else(|| BpeEncoder::get_special_tokens_from_vocab(&vocab).unwrap_or_default());
+    BpeEncoder::new(vocab, merges, special_tokens)
   }
 }
 
@@ -549,7 +558,7 @@ where
 
 #[cfg(test)]
 mod tests {
-  use crate::{pretokenizer::DEFAULT_EOT, spec::{gpt2::Gpt2Spec, uni::UniSpec}, traits::CanEncode};
+  use crate::{spec::{gpt2::Gpt2Spec, uni::UniSpec}, traits::CanEncode};
 
   use super::*;
 
@@ -560,7 +569,7 @@ mod tests {
     let bpe = BpeBuilder::new()
       .load_merges_file(format!("fixtures/merges.{name}.txt"), spec).unwrap()
       .load_vocab_file(format!("fixtures/vocab.{name}.json"), spec).unwrap()
-      .special_tokens(vec![DEFAULT_EOT.to_string()])
+      // .special_tokens(vec![DEFAULT_EOT.to_string()])
       .build(spec).unwrap();
 
     // let vocab = BpeEncoder::_load_vocab(&spec, std::fs::File::open(format!("fixtures/vocab.{name}.json")).unwrap()).unwrap();

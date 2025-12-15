@@ -13,20 +13,20 @@ if TYPE_CHECKING:
 class BpeEncoder:
   def __init__(
       self,
-      char_level: "CharLevel" = "u8",
+      ch: "CharLevel" = "u8",
       *,
       merges: list[tuple[bytes, bytes]] | None = None,
       vocabs: dict[bytes, int] | None = None,
       _encoder: BpeEncoderBase | None = None,
   ) -> None:
-    self.char_level = char_level
+    self.char_level = ch
     if _encoder is not None:
       self._encoder = _encoder
     else:
-      spec = "uni" if char_level == "char" else "gpt2"
+      spec = "uni" if ch == "char" else "gpt2"
       self._encoder = BpeEncoderBase(
         spec=spec,
-        char_level=char_level,
+        char_level=ch,
         merges_filename=None,
         vocab_filename=None,
         merges=merges,
@@ -38,7 +38,7 @@ class BpeEncoder:
     cls,
     name: str | None = None,
     *,
-    char_level: "CharLevel" = "u8",
+    ch: "CharLevel" = "u8",
     output_format: "OutputFormat | None" = None,
     input_dir: str | PathLike | None = None,
     merges_file: str | PathLike | None = None,
@@ -46,22 +46,22 @@ class BpeEncoder:
   ) -> "BpeEncoder":
     spec = output_format
     if spec is None:
-      spec = "uni" if char_level == "char" else "gpt2"
+      spec = "uni" if ch == "char" else "gpt2"
     if name is not None:
       if merges_file is None:
-        merges_file = f"merges.{name}[{char_level}].txt"
+        merges_file = f"merges.{name}[{ch}].txt"
       if vocabs_file is None:
-        vocabs_file = f"vocab.{name}[{char_level}].json"
+        vocabs_file = f"vocab.{name}[{ch}].json"
     if input_dir is not None:
       if merges_file is not None:
         merges_file = Path(input_dir) / merges_file
       if vocabs_file is not None:
         vocabs_file = Path(input_dir) / vocabs_file
     return cls(
-      char_level=char_level,
+      ch=ch,
       _encoder=BpeEncoderBase(
         spec=spec,
-        char_level=char_level,
+        char_level=ch,
         merges_filename=merges_file,
         vocab_filename=vocabs_file,
         merges=None,
