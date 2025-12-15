@@ -31,3 +31,9 @@ print(len(b))
 assert len(b) == 2184799
 
 # %%
+encoder = BpeEncoder.load("test", ch="char", special_tokens=[])
+a1 = encoder.encode_string("<|endoftext|>")
+print(a1)
+assert a1.tolist() == [61, 125, 355, 112, 103, 117, 102, 121, 117, 125, 63]
+
+# %%

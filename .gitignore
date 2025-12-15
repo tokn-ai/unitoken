@@ -6,6 +6,7 @@ out/
 uv.lock
 
 _lib.*.so
+_lib.*.pyd
 __pycache__/
 merges.txt
 vocab.json
