@@ -234,8 +234,9 @@ pub use crate::pretokenizer::PreTokenizer;
 #[pymethods]
 impl PreTokenizer {
   #[new]
-  pub fn new_py(special_tokens: Vec<String>, eot_token: Option<String>) -> Self {
-    Self::new(&special_tokens, eot_token.as_deref())
+  pub fn new_py(special_tokens: Vec<String>, eot_token: Option<String>, pat: Option<String>) -> PyResult<Self> {
+    Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 
   #[pyo3(name = "find_chunk_boundaries")]

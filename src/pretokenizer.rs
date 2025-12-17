@@ -28,13 +28,27 @@ pub struct PreTokenizer {
 
 impl PreTokenizer {
   pub fn new(special_tokens: &[String], end_of_text: Option<&str>) -> Self {
+    // Infallible default constructor.
+    Self::try_new(special_tokens, end_of_text, None).expect("DEFAULT_PAT must be valid")
+  }
+
+  /// Create a pre-tokenizer with an optional custom regex pattern.
+  ///
+  /// When `pat` is `None`, uses `DEFAULT_PAT`.
+  pub fn try_new(
+    special_tokens: &[String], end_of_text: Option<&str>, pat: Option<&str>,
+  ) -> MyResult<Self> {
+    let re_pat = match pat {
+      Some(pat) => Regex::new(pat)?,
+      None => DEFAULT_PAT.clone(),
+    };
     let re_special_tokens = create_special_token_regex(special_tokens);
-    Self {
-      re_pat: DEFAULT_PAT.clone(),
+    Ok(Self {
+      re_pat,
       re_special_tokens,
       end_of_text: end_of_text.unwrap_or(DEFAULT_EOT).to_string(),
       metrics: true,
-    }
+    })
   }
 
   pub fn count_tokens<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
@@ -102,7 +116,7 @@ impl PreTokenizer {
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut words = BTreeMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
-      for (token, count) in _pretokenizer_counter(part.as_str(), &DEFAULT_PAT)? {
+      for (token, count) in _pretokenizer_counter(part.as_str(), &self.re_pat)? {
         *words.entry(token).or_default() += count;
       }
     }
@@ -412,5 +426,19 @@ mod tests {
     println!("the idxs length: {:?}", idxs.len());
     assert_ne!(idxs.len(), 0);
     assert_eq!(special_tokens_index.len(), 1)
+  }
+
+  #[test]
+  fn test_custom_pat_is_used_everywhere() {
+    // Split into single characters, ignoring whitespace.
+    let pat = r"[^\s]";
+    let t = PreTokenizer::try_new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT), Some(pat)).unwrap();
+
+    let s = "ab cd";
+    let counts = t.count_tokens(s).unwrap();
+    assert_eq!(counts.get("a").cloned().unwrap_or(0), 1);
+    assert_eq!(counts.get("b").cloned().unwrap_or(0), 1);
+    assert_eq!(counts.get("c").cloned().unwrap_or(0), 1);
+    assert_eq!(counts.get("d").cloned().unwrap_or(0), 1);
   }
 }
