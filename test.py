@@ -29,6 +29,11 @@ assert a.tolist() == [73, 102, 293, 112, 45, 261, 304, 341, 34]
 b = encoder.encode_file("fixtures/tinystories_sample_5M.txt", 100)
 print(len(b))
 assert len(b) == 2184799
+s = encoder.decode(b)
+# print(s[:100])
+with open("fixtures/tinystories_sample_5M.txt", "r", encoding="utf-8") as f:
+  original = f.read()
+assert s == original
 
 # %%
 encoder = BpeEncoder.load("test", ch="char", special_tokens=[])

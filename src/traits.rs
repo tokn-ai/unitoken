@@ -49,6 +49,15 @@ pub trait Encode<I> {
   fn encode_file(&self, file: &Path, chunks: usize) -> MyResult<Vec<I>>;
 }
 
+/// Decoding interface for trained tokenizers.
+pub trait Decode<I> {
+  /// Decode token ids back into a UTF-8 string.
+  fn decode(&self, idxs: &[I]) -> MyResult<String>;
+}
+
+pub trait Encoder<I>: Encode<I> + Decode<I> {}
+impl<I, T> Encoder<I> for T where T: Encode<I> + Decode<I> {}
+
 /// Marker trait indicating that `T` can be converted into a `Word<Self>`.
 pub trait CanToWord<T>: Sized
 where

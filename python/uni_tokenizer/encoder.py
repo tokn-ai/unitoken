@@ -128,3 +128,7 @@ class BpeEncoder:
       Number of chunks to split the file into (chunk boundaries are aligned on the end-of-text token).
     """
     return self._encoder.encode_file(path, num_chunks)
+
+  def decode(self, /, idxs: Sequence[int] | IdxArray) -> str:
+    """Decode token ids back into a UTF-8 string."""
+    return self._encoder.decode(idxs)

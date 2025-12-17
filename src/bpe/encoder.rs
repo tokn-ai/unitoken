@@ -6,7 +6,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use crate::{
   MyError, MyResult,
-  pretokenizer::{_read_file_to_buffer, PreTokenizer}, spec::Spec, traits::{CanEncode, CanStrToWord, Encode},
+  pretokenizer::{_read_file_to_buffer, PreTokenizer}, spec::Spec, traits::{CanEncode, CanStrToWord, Decode, Encode},
 };
 
 use super::*;
@@ -570,6 +570,16 @@ where
     &self, path: &Path, num_chunks: usize,
   ) -> MyResult<Vec<Idx>> {
     self.encode_file_impl(path, num_chunks)
+  }
+}
+
+impl<C> Decode<Idx> for BpeEncoder<C>
+where
+  BpeEncoder<C>: CanEncode<C, Idx>,
+  C: Clone,
+{
+  fn decode(&self, idxs: &[Idx]) -> MyResult<String> {
+    BpeEncoder::<C>::decode(self, idxs)
   }
 }
 

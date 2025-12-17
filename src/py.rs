@@ -2,11 +2,11 @@
 mod _lib {
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
-use pyo3::{prelude::*, pymethods};
+use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, CharIdx, CharSplit, Character, Idx, IdxLike, Word, encoder::BpeBuilder, utils::ToWord}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encode, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, CharIdx, CharSplit, Character, Idx, IdxLike, Word, encoder::BpeBuilder, utils::ToWord}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -309,13 +309,13 @@ impl PreTokenizer {
 }
 
 #[pyclass]
-pub struct BpeEncoderBase(Arc<dyn Encode<Idx> + Send + Sync>);
+pub struct BpeEncoderBase(Arc<dyn Encoder<Idx> + Send + Sync>);
 
 fn _arc_to_vec<I: Copy>(i: Arc<[I]>) -> Vec<I> {
   i.iter().copied().collect()
 }
 
-fn new_bpe<C>(
+fn new_bpe<C: Clone>(
   vocabs: Option<BTreeMap<Vec<u8>, Idx>>,
   merges: Option<Vec<(Vec<u8>, Vec<u8>)>>,
   vocab_filename: Option<PathBuf>,
@@ -418,6 +418,25 @@ impl BpeEncoderBase {
       Ok(v) => Ok(v.into_pyarray(py)),
       Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
     }
+  }
+
+  #[pyo3(name = "decode")]
+  /// Decode token ids back into a UTF-8 string.
+  ///
+  /// Accepts either a Python sequence of ints or a NumPy `uint32` array.
+  pub fn py_decode(&self, py: Python, idxs: &Bound<PyAny>) -> PyResult<String> {
+    let vec: Vec<Idx> = if let Ok(v) = idxs.extract::<Vec<Idx>>() {
+      v
+    } else if let Ok(arr) = idxs.extract::<PyReadonlyArray1<Idx>>() {
+      arr.as_array().iter().copied().collect()
+    } else {
+      return Err(pyo3::exceptions::PyTypeError::new_err(
+        "idxs must be a sequence[int] or a numpy.ndarray[uint32]",
+      ));
+    };
+
+    py.detach(|| self.0.decode(&vec))
+      .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 }
 
