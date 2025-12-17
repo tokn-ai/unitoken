@@ -53,6 +53,11 @@ py = ["dep:pyo3", "dep:ndarray", "dep:numpy"]
 
 [dev-dependencies]
 pyo3-introspection = "0.27"
+criterion = "0.5.1"
+
+[[bench]]
+name = "bpe"
+harness = false
 
 [patch.crates-io]
 pyo3 = { git = 'https://github.com/PyO3/pyo3' } # for pyo3-introspection
