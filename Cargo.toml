@@ -2,6 +2,21 @@
 name = "unitoken"
 version = "0.1.0"
 edition = "2024"
+description = "Fast BPE tokenizer/trainer with a Rust core and Python bindings"
+repository = "https://github.com/a-gradient/unitoken"
+readme = "README.md"
+license = "MIT"
+keywords = ["tokenizer", "bpe", "nlp"]
+categories = ["text-processing"]
+exclude = [
+  ".venv/**",
+  "dist/**",
+  "out/**",
+  "target/**",
+  "fixtures/**",
+  "!fixtures/default_special_tokens.txt",
+  "flamegraph*.svg",
+]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -43,7 +58,7 @@ debug = "line-tables-only"
 # RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 [features]
-default = ["plot", "py"]
+default = []
 hotpath = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 
 fmt-npz = ["npyz/npz"]
@@ -59,6 +74,6 @@ criterion = "0.5.1"
 name = "bpe"
 harness = false
 
-[patch.crates-io]
-pyo3 = { git = 'https://github.com/PyO3/pyo3' } # for pyo3-introspection
-pyo3-introspection = { git = 'https://github.com/PyO3/pyo3' } # for https://github.com/PyO3/pyo3/issues/5137
+# [patch.crates-io]
+# pyo3 = { git = 'https://github.com/PyO3/pyo3' } # for pyo3-introspection
+# pyo3-introspection = { git = 'https://github.com/PyO3/pyo3' } # for https://github.com/PyO3/pyo3/issues/5137

@@ -1,11 +1,11 @@
 [project]
 name = "unitoken"
 version = "0.1.0"
-description = "Add your description here"
+description = "Fast BPE tokenizer/trainer with a Rust core and Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "numpy>=2.3.5",
+  "numpy>=1.26",
 ]
 
 [dependency-groups]
@@ -14,7 +14,7 @@ dev = [
 ]
 
 [tool.uv]
-cache-keys = [{file = "pyproject.toml"}, {file = "rust/Cargo.toml"}, {file = "src/**/*.rs"}]
+cache-keys = [{file = "pyproject.toml"}, {file = "Cargo.toml"}, {file = "src/**/*.rs"}]
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
@@ -23,3 +23,5 @@ build-backend = "maturin"
 [tool.maturin]
 python-source = "python"
 module-name = "unitoken._lib"
+bindings = "pyo3"
+features = ["py"]
