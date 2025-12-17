@@ -438,12 +438,12 @@ impl BpeEncoderBase {
 fn generate_py_stubs() {
   println!("test");
   let module = pyo3_introspection::introspect_cdylib(
-      "./python/unicode_tokenizer/_lib.cpython-313-darwin.so",
+      "./python/uni_tokenizer/_lib.cpython-313-darwin.so",
       "_lib",
   )
   .expect("introspection to succeed");
   let result = pyo3_introspection::module_stub_files(&module);
   println!("{result:?}");
   let value = result.get(&std::path::PathBuf::from("__init__.pyi")).unwrap();
-  std::fs::write("./python/unicode_tokenizer/_lib.pyi", value).unwrap();
+  std::fs::write("./python/uni_tokenizer/_lib.pyi", value).unwrap();
 }

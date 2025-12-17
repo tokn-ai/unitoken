@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 out/
+dist/
 *.svg
 .cache
 uv.lock
