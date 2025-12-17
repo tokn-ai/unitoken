@@ -22,9 +22,9 @@ Quickstart (Python)
 -------------------
 
 ```python
-from unitoken import BpeTrainer, BpeEncoder
+from uni_tokenizer import BpeTrainer, BpeEncoder
 
-trainer = BpeTrainer(["<|endoftext|>"], None)  # first token is treated as EOT
+trainer = BpeTrainer(["<|endoftext|>"])  # first token is treated as EOT
 trainer.add_words({"hello": 10, "world": 7})
 trainer.train(vocab_size=256)
 trainer.save("demo")
