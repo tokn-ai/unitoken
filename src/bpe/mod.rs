@@ -34,10 +34,14 @@ pub struct PreToken<C, I> {
 }
 
 impl<C, I> PreToken<C, I> {
+  /// Render a debug string showing the original token and its frequency.
   pub fn display(&self) -> String where Word<C>: WordDebugExt {
     format!("<{:?} => {}>", self.src.debug_display(), self.freq)
   }
 
+  /// Render a debug string by looking up each index in `vocabs`.
+  ///
+  /// This is mainly useful for inspecting intermediate training states.
   pub fn display_split(&self, vocabs: &BTreeMap<I, Word<C>>) -> String where I: Ord, C: Clone, Word<C>: WordDebugExt {
     let parts = self
       .idxs
@@ -64,6 +68,7 @@ impl<C, I: Clone> Clone for Merge<C, I> {
 }
 
 impl<C, I> Merge<C, I> {
+  /// Concatenate the left and right content and return the merged token.
   pub fn merged_content(&self) -> Word<C> where C: Clone {
     let mut v = Vec::with_capacity(self.content.0.len() + self.content.1.len());
     v.extend_from_slice(&self.content.0);
@@ -71,6 +76,7 @@ impl<C, I> Merge<C, I> {
     Arc::<[C]>::from(v.into_boxed_slice())
   }
 
+  /// Set the target (new vocab id) for this merge.
   pub fn with_target(mut self, target: I) -> Self {
     self.target = Some(target);
     self
@@ -84,6 +90,7 @@ pub struct MergeData {
 }
 
 impl MergeData {
+  /// Create a new [`MergeData`] with the given frequency.
   pub fn new(freq: Freq) -> Self {
     Self {
       occurs_in: BTreeSet::new(),
@@ -92,6 +99,7 @@ impl MergeData {
   }
 
   #[must_use]
+  /// Replace the occurrence set with `iter`.
   pub fn add_occurs_in<I: IntoIterator<Item = u64>>(self, iter: I) -> Self {
     Self {
       occurs_in: iter.into_iter().collect(),
@@ -99,12 +107,14 @@ impl MergeData {
     }
   }
 
+  /// Return `occurs_in` as a `Vec`.
   pub fn occurs_in_vec(&self) -> Vec<u64> {
     self.occurs_in.iter().copied().collect::<Vec<u64>>()
   }
 }
 
 impl<C, I> Merge<C, I> {
+  /// Create a merge candidate for a pair `(left, right)`.
   pub fn new(tp: (I, I), content: (Word<C>, Word<C>)) -> Self {
     Self {
       tp,
@@ -114,11 +124,13 @@ impl<C, I> Merge<C, I> {
     }
   }
 
+  /// Record an occurrence of this merge in a document.
   pub fn add(&mut self, doc_id: u64, freq: Freq) {
     self.data.occurs_in.insert(doc_id);
     self.data.freq += freq;
   }
 
+  /// Remove an occurrence of this merge from a document.
   pub fn remove(&mut self, doc_id: &u64, freq: Freq) {
     self.data.freq -= freq;
     self.data.occurs_in.remove(doc_id);

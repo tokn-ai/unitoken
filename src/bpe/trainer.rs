@@ -20,6 +20,10 @@ where
   Word<C>: WordDebugExt,
   C: CanStrToWord + CanToWord<u8>,
 {
+  /// Build a trainer from `(word, frequency)` pairs.
+  ///
+  /// - `special_tokens` are reserved at the start of the vocabulary.
+  /// - Words equal to any special token are skipped.
   pub fn from_words<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(words: Iter, special_tokens: &[String]) -> Self
   where
     C: CharToIdx<I>,
@@ -31,6 +35,9 @@ where
     Self::new(tokens, special_tokens.to_vec())
   }
 
+  /// Create a trainer from already pre-tokenized words.
+  ///
+  /// This initializes vocab with `special_tokens` and a 256-entry byte vocabulary.
   pub fn new(words: Vec<PreToken<C, I>>, special_tokens: Vec<String>) -> Self {
     let mut bpe = Self::empty();
     bpe._vocab_insert_special_tokens(special_tokens);
@@ -39,6 +46,9 @@ where
     bpe
   }
 
+  /// Insert the full single-byte vocabulary (0..=255) into `self.vocab`.
+  ///
+  /// Returns the next available vocab index.
   pub fn _vocab_insert_all_single_byte(&mut self) -> I {
     let start_idx = self.start_vocab_idx.fetch_add(256, std::sync::atomic::Ordering::AcqRel);
     let vocab = &mut self.vocab;
@@ -52,6 +62,9 @@ where
     I::from_u64(start_idx + 256)
   }
 
+  /// Convert `(word, frequency)` input into [`PreToken`]s.
+  ///
+  /// Words that match `special_tokens` are skipped.
   pub fn _words_to_tokens<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(words: Iter, vocab_start_idx: u64, special_tokens: &BTreeSet<&str>) -> Vec<PreToken<C, I>>
   where
     C: CharToIdx<I>,
@@ -79,6 +92,9 @@ impl<C: CanStrToWord, I: IdxLike> BpeTrainer<C, I>
 where
   Word<C>: WordDebugExt,
 {
+  /// Insert special tokens at the start of the vocabulary.
+  ///
+  /// Returns the next available vocab index.
   pub fn _vocab_insert_special_tokens(&mut self, special_tokens: Vec<String>) -> I {
     let length = special_tokens.len();
     let start_idx = self.start_vocab_idx.fetch_add(length as u64, std::sync::atomic::Ordering::AcqRel);
@@ -90,16 +106,19 @@ where
     I::from_u64(start_idx + length as u64)
   }
 
+  /// Serialize the current vocabulary to JSON using `spec`.
   pub fn save_vocab_json<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
     spec.encode_vocab(&mut w, &self.vocab)
   }
 
+  /// Serialize the current merge list to a text format using `spec`.
   pub fn save_merges_txt<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
     spec.encode_merges(&mut w, &self.merges)
   }
 }
 
 impl<C, I> BpeTrainer<C, I> {
+  /// Construct an empty trainer with no vocab, merges, or words.
   pub fn empty() -> Self {
     Self {
       start_vocab_idx: AtomicU64::new(0),
@@ -119,6 +138,9 @@ where
   I: HasChar<C>,
   C: CanStrToWord,
 {
+  /// Initialize the merge candidate map from `self.words`.
+  ///
+  /// This computes merge frequencies and document-occurrence sets used by [`Train::step`].
   pub fn _build_pre_merges(&mut self) {
     debug!("Initializing BPE training with {} words", self.words.len());
     self.pre_merges.clear();
@@ -198,6 +220,9 @@ where
       .cloned()
   }
 
+  /// Apply one merge operation and return the newly assigned vocab index.
+  ///
+  /// This is the core training step once a merge candidate has been selected.
   pub fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
     let target_idx = self._add_vocab_idx();
     // if target = Some(j), this is a single char token, no need to merge.
@@ -224,6 +249,9 @@ where
     target_idx
   }
 
+  /// Convert a trained [`BpeTrainer`] into a [`BpeEncoder`].
+  ///
+  /// This re-encodes indices into the concrete `Idx` type used by encoders.
   pub fn finish(self) -> MyResult<BpeEncoder<C>>
   where
     C: Ord + Clone + Cachable,
@@ -240,6 +268,7 @@ where
     BpeEncoder::new(vocab, merges, self.special_tokens)
   }
 
+  /// Emit internal metrics about the trainer state.
   pub fn _metrics(&self) {
     metrics::counter!("bpe_trainer.vocab_size").absolute(self.vocab.len() as u64);
     metrics::gauge!("bpe_trainer.pre_merges_count").set(self.pre_merges.len() as f64);

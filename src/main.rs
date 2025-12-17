@@ -68,6 +68,7 @@ pub enum SpecLevel {
 }
 
 impl SpecLevel {
+  /// Return the CLI string representation for this character level.
   pub fn as_str(&self) -> &'static str {
     match self {
       Self::U8 => "u8",
@@ -75,6 +76,7 @@ impl SpecLevel {
     }
   }
 
+  /// Default output spec for the given character level.
   pub fn default_spec(&self) -> SpecOutput {
     match self {
       Self::U8 => SpecOutput::Gpt2,
@@ -92,6 +94,7 @@ pub enum SpecOutput {
 }
 
 impl SpecOutput {
+  /// Return the CLI string representation for this output format.
   pub fn as_str(&self) -> &'static str {
     match self {
       Self::Gpt2 => "gpt2",
@@ -99,6 +102,7 @@ impl SpecOutput {
     }
   }
 
+  /// Construct a spec implementation for `u8` token content.
   pub fn get_u8(&self) -> Box<dyn Spec<u8, Idx>> {
     match self {
       Self::Gpt2 => Box::new(Gpt2Spec),
@@ -106,6 +110,7 @@ impl SpecOutput {
     }
   }
 
+  /// Construct a spec implementation for character-level token content.
   pub fn get_char(&self) -> Box<dyn Spec<Character, CharIdx>> {
     match self {
       Self::Gpt2 => unimplemented!(),
@@ -113,6 +118,7 @@ impl SpecOutput {
     }
   }
 
+  /// Construct a spec implementation for character-level content with `Idx` ids.
   pub fn get_char_idx(&self) -> Box<dyn Spec<Character, Idx>> {
     match self {
       Self::Gpt2 => unimplemented!(),
@@ -198,6 +204,9 @@ fn _pretokenize<P1: AsRef<Path>, P2: AsRef<Path>>(output: P1, input: P2, num_chu
 }
 
 
+/// Train a [`BpeTrainer`] to the requested `vocab_size`.
+///
+/// This is a CLI helper used by the `train` subcommand.
 pub fn _bpe_train<C, I>(
   words: BTreeMap<String, i64>, vocab_size: u32, special_tokens: &Vec<String>,
 ) -> BpeTrainer<C, I>
@@ -222,6 +231,9 @@ where
   bpe
 }
 
+/// Save a trained model as `vocab.{name}.json` and `merges.{name}.txt` in `out_dir`.
+///
+/// This is a CLI helper used by the `train` subcommand.
 pub fn _bpe_save_train<C, I>(
   bpe: &BpeTrainer<C, I>,
   spec: &dyn Spec<C, I>,

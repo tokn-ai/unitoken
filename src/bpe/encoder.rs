@@ -21,6 +21,7 @@ pub struct BpeBuilder<S = Vec<u8>> {
 
 impl<S> BpeBuilder<S> {
   #[must_use]
+  /// Create a new builder with all fields unset.
   pub fn new() -> Self {
     Self {
       vocab: None,
@@ -32,6 +33,7 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Set the vocabulary map from token id to token bytes.
   pub fn set_vocab(self, vocab: BTreeMap<Idx, S>) -> Self {
     Self {
       vocab: Some(vocab),
@@ -40,6 +42,7 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Set merges in fully-decoded form: `((left_id, right_id), merged_id)`.
   pub fn set_merges(self, merges: Vec<((Idx, Idx), Idx)>) -> Self {
     Self {
       merges: Some(merges),
@@ -48,6 +51,9 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Set merges in raw/token form: `(left_token, right_token)`.
+  ///
+  /// These will be resolved against the loaded vocabulary during [`Self::build`].
   pub fn set_merges_raw(self, merges_raw: Vec<(S, S)>) -> Self {
     Self {
       merges_raw: Some(merges_raw),
@@ -56,6 +62,7 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Convenience alias for [`Self::set_vocab_size(Some(size))`].
   pub fn vocab_size(self, size: usize) -> Self {
     Self {
       vocab_size: Some(size),
@@ -64,6 +71,9 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Set an optional vocab size cap.
+  ///
+  /// Note: the cap may be enforced by the output spec or by the caller.
   pub fn set_vocab_size(self, size: Option<usize>) -> Self {
     Self {
       vocab_size: size,
@@ -72,6 +82,7 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Convenience alias for [`Self::set_special_tokens(Some(sp))`].
   pub fn special_tokens(self, sp: Vec<String>) -> Self {
     Self {
       special_tokens: Some(sp),
@@ -80,6 +91,9 @@ impl<S> BpeBuilder<S> {
   }
 
   #[must_use]
+  /// Set the special tokens list.
+  ///
+  /// If `None`, special tokens will be inferred from the beginning of the vocab (when possible).
   pub fn set_special_tokens(self, sp: Option<Vec<String>>) -> Self {
     Self {
       special_tokens: sp,
@@ -90,6 +104,7 @@ impl<S> BpeBuilder<S> {
 
 impl BpeBuilder {
   #[must_use]
+  /// Set the vocabulary from a `Word<C>` representation.
   pub fn set_vocab_c<C: CharSplit>(self, vocab: BTreeMap<Idx, Word<C>>) -> Self {
     Self {
       vocab: Some(vocab.into_iter().map(|(k, v)| (k, CharSplit::to_vec_u8(&v))).collect()),
@@ -98,6 +113,7 @@ impl BpeBuilder {
   }
 
   #[must_use]
+  /// Load a vocab file using `spec` and store it in this builder.
   pub fn load_vocab_file<C: CharSplit, SPEC: Spec<C, Idx> + ?Sized>(self, filename: impl AsRef<Path>, spec: &SPEC) -> MyResult<Self> {
     println!("Loading vocab file: {}", filename.as_ref().display());
     let file = std::fs::File::open(filename)?;
@@ -106,6 +122,7 @@ impl BpeBuilder {
   }
 
   #[must_use]
+  /// Load a merges file using `spec` and store it as raw merges in this builder.
   pub fn load_merges_file<C: Clone + CharSplit, SPEC: Spec<C, Idx> + ?Sized>(self, filename: impl AsRef<Path>, spec: &SPEC) -> MyResult<Self> {
     println!("Loading merges file: {}", filename.as_ref().display());
     let file = std::fs::File::open(filename)?;
@@ -117,6 +134,10 @@ impl BpeBuilder {
   }
 
   #[must_use]
+  /// Build a [`BpeEncoder`] using the configured vocab/merges.
+  ///
+  /// If only raw merges are provided, they will be resolved against the vocabulary.
+  /// Returns an error if a merge references an out-of-vocabulary token.
   pub fn build<C: Clone + Ord + CharSplit + CanStrToWord + Cachable, SPEC: Spec<C, Idx> + ?Sized>(self, _spec: &SPEC) -> MyResult<BpeEncoder<C>>
   where
     Word<C>: WordDebugExt
@@ -190,6 +211,10 @@ where
   //   Self::new(vocab, merges, special_tokens)
   // }
 
+  /// Infer special tokens from the prefix of the vocabulary.
+  ///
+  /// The convention used here is: starting at index 0, collect consecutive entries whose token
+  /// length is greater than 1. This matches common BPE vocab layouts.
   pub fn get_special_tokens_from_vocab(vocab: &BTreeMap<Idx, Word<C>>) -> MyResult<Vec<String>> {
     let mut special_tokens = Vec::new();
     for index in 0..vocab.len() {
@@ -202,6 +227,7 @@ where
   }
 
   #[hotpath::measure]
+  /// Save a sequence of token ids to a `.npy` file.
   pub fn save_idxs_npy<P: AsRef<Path>>(&self, file_path: P, idxs: Vec<Idx>) -> MyResult<()> {
     let mut file = std::fs::File::create(file_path)?;
     let mut writer = npyz::WriteOptions::new()
@@ -217,6 +243,7 @@ where
 
   #[cfg(feature = "fmt-npz")]
   #[hotpath::measure]
+  /// Save a sequence of token ids to a `.npz` file containing an `idx` array.
   pub fn save_idxs_npz<P: AsRef<Path>>(&self, file_path: P, idxs: Vec<Idx>) -> MyResult<()> {
     let mut file = std::fs::File::create(file_path)?;
     let mut npz = npyz::npz::NpzWriter::new(BufWriter::new(&mut file));
@@ -230,6 +257,11 @@ where
     Ok(())
   }
 
+  /// Construct an encoder from a vocab and merge table.
+  ///
+  /// - `vocab`: token id → token content
+  /// - `merges`: merge rules in rank order as `((left, right), merged)`
+  /// - `special_tokens`: list of special tokens; first one is used as the pre-tokenizer EOT marker.
   pub fn new(vocab: BTreeMap<Idx, Word<C>>, merges: Vec<((Idx, Idx), Idx)>, special_tokens: Vec<String>) -> MyResult<Self>
   where
     C: Clone
@@ -284,6 +316,9 @@ where
   Word<C>: WordDebugExt,
   C: CanStrToWord,
 {
+  /// Convert an input word into initial byte/char indices (before merges).
+  ///
+  /// Returns a [`PreToken`] containing the source token and its initial ids.
   pub fn _pretoken(&self, word: Word<C>, freq: Freq) -> MyResult<PreToken<C, Idx>> {
     let mut idxs = Vec::new();
     for c in word.iter() {
@@ -355,6 +390,9 @@ where
   }
 
   // #[hotpath::measure]
+  /// Encode many words, using an internal cache to avoid recomputing repeats.
+  ///
+  /// The output ordering matches the input iteration order.
   pub fn encode_words_impl<S: AsRef<str>, I: IntoIterator<Item = S>>(&self, input: I) -> MyResult<Vec<Word<Idx>>> {
     let mut results = BTreeMap::new();
     let mut to_encode = Vec::new();
@@ -448,6 +486,9 @@ where
     Ok(cache)
   }
 
+  /// Replace the internal encode cache with the provided entries.
+  ///
+  /// This is mainly useful for warm-starting an encoder when encoding large corpora.
   pub fn with_cache(mut self, cache: OrderMap<String, Arc<[Idx]>>) -> Self {
     let max_cap = cache.len() as u64 * 3 / 2;
     self.cache = Cache::new(max_cap);
@@ -458,6 +499,9 @@ where
   }
 
   #[deprecated(note = "use `encode_file` instead")]
+  /// Encode a file after building a cache from the file's word inventory.
+  ///
+  /// Deprecated: prefer [`Encode::encode_file`] / [`Self::encode_file_impl`].
   pub fn encode_file_with_cache<P: AsRef<Path>>(
     &self, path: P, num_chunks: usize,
   ) -> MyResult<Vec<Idx>> {
@@ -468,6 +512,9 @@ where
     bpe_with_cache.encode_file(path.as_ref(), num_chunks)
   }
 
+  /// Encode a file into token ids.
+  ///
+  /// The file is split into `num_chunks` aligned on the pre-tokenizer's EOT marker.
   pub fn encode_file_impl<P: AsRef<Path>>(
     &self, path: P, num_chunks: usize,
   ) -> MyResult<Vec<Idx>> {
@@ -532,6 +579,7 @@ where
   Word<C>: WordDebugExt,
   C: CharSplit,
 {
+  /// Convert token ids back into vocab entries.
   pub fn _decode(&self, idxs: &[Idx]) -> MyResult<Vec<Word<C>>> {
     let mut result = Vec::with_capacity(idxs.len());
     for idx in idxs {
@@ -544,6 +592,9 @@ where
     Ok(result)
   }
 
+  /// Decode token ids back into a UTF-8 string.
+  ///
+  /// This concatenates decoded token bytes and performs a lossy UTF-8 conversion.
   pub fn decode(&self, idxs: &[Idx]) -> MyResult<String> {
     let words = self._decode(idxs)?;
     let mut result = Vec::new();

@@ -27,6 +27,12 @@ pub struct PreTokenizer {
 }
 
 impl PreTokenizer {
+  /// Create a pre-tokenizer using the default pattern.
+  ///
+  /// This is an infallible convenience wrapper around [`Self::try_new`].
+  ///
+  /// - `special_tokens`: Tokens that should be detected as indivisible chunks.
+  /// - `end_of_text`: Token used as the document boundary marker when chunking files.
   pub fn new(special_tokens: &[String], end_of_text: Option<&str>) -> Self {
     // Infallible default constructor.
     Self::try_new(special_tokens, end_of_text, None).expect("DEFAULT_PAT must be valid")
@@ -51,10 +57,17 @@ impl PreTokenizer {
     })
   }
 
+  /// Count pre-tokenized pieces in a string.
+  ///
+  /// Returns a map from token slice to frequency. The keys borrow from `text`.
   pub fn count_tokens<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
     _pretokenizer_counter(text, &self.re_pat)
   }
 
+  /// Compute byte `(offset, len)` pairs that split a file into approximately `desired_num_chunks`.
+  ///
+  /// Boundaries are adjusted to fall on occurrences of `self.end_of_text` (the EOT marker),
+  /// so that chunks do not split across document boundaries.
   pub fn find_chunk_boundaries<P: AsRef<Path>>(
     &self, path: P, desired_num_chunks: usize,
   ) -> MyResult<Vec<(u64, usize)>> {
@@ -62,6 +75,10 @@ impl PreTokenizer {
     Ok(boundaries.iter().zip(boundaries.iter().skip(1)).map(|(&a, &b)| (a, (b-a) as usize)).collect())
   }
 
+  /// Build token and special-token indexes for a segment.
+  ///
+  /// The returned maps associate each token (borrowed from `content`) with the list of
+  /// positions it appears in the fully-tokenized stream.
   #[hotpath::measure]
   pub fn get_tokens_index_from_segment<'a>(
     &self, content: &'a str,
@@ -101,6 +118,9 @@ impl PreTokenizer {
     Ok((tokens_index, special_tokens_index))
   }
 
+  /// Read a slice of a file and count pre-tokenized word frequencies within it.
+  ///
+  /// The byte range is described by `(offset, len)`. Special tokens are excluded from counting.
   #[hotpath::measure]
   pub fn get_words_from_segment<P: AsRef<Path>>(
     &self, path: P, offset: u64, len: usize,
@@ -129,6 +149,10 @@ impl PreTokenizer {
     Ok(words.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
   }
 
+  /// Count pre-tokenized word frequencies across an entire file.
+  ///
+  /// The file is split into `num_chunks` using [`Self::find_chunk_boundaries`], processed in
+  /// parallel, and merged into a single frequency map.
   pub fn get_words_from_file<P: AsRef<Path>>(
     &self, path: P, num_chunks: usize,
   ) -> MyResult<BTreeMap<String, Freq>> {
@@ -161,7 +185,9 @@ impl PreTokenizer {
   }
 }
 
-/// input a string and a pattern, return a map of tokens and their counts
+/// Tokenize a string using `pat` and return token frequencies.
+///
+/// The returned keys borrow from `s`.
 pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&'a str, Freq>> {
   let mut result = BTreeMap::new();
   for i in pat.find_iter(s) {
@@ -172,6 +198,10 @@ pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&
 }
 
 #[hotpath::measure]
+/// Find byte offsets that can be used to split a file into `desired_num_chunks`.
+///
+/// Offsets are aligned to occurrences of `split_special_token` to avoid splitting across
+/// boundaries (typically the end-of-text token).
 pub fn _find_chunk_boundaries<P: AsRef<Path>>(
   path: P, desired_num_chunks: usize, split_special_token: &str,
 ) -> MyResult<Vec<u64>> {
@@ -223,6 +253,7 @@ pub enum SplitChunk<'a> {
 }
 
 impl<'a> SplitChunk<'a> {
+  /// Return the underlying string slice.
   pub fn as_str(&self) -> &'a str {
     match self {
       SplitChunk::Special(s) => s,
@@ -230,6 +261,7 @@ impl<'a> SplitChunk<'a> {
     }
   }
 
+  /// Whether this chunk is a special token match.
   pub fn is_special(&self) -> bool {
     matches!(self, SplitChunk::Special(_))
   }
@@ -242,6 +274,7 @@ pub enum SplitToken {
 }
 
 impl SplitToken {
+  /// Return the underlying string slice.
   pub fn as_str(&self) -> &str {
     match self {
       SplitToken::Special(s) => s.as_str(),
@@ -249,6 +282,7 @@ impl SplitToken {
     }
   }
 
+  /// Whether this token is marked as special.
   pub fn is_special(&self) -> bool {
     matches!(self, SplitToken::Special(_))
   }
@@ -262,6 +296,9 @@ impl std::ops::Deref for SplitToken {
   }
 }
 
+/// Build a regex that matches any of the provided `special_tokens`.
+///
+/// If `special_tokens` is empty, returns a regex that matches nothing.
 pub fn create_special_token_regex(special_tokens: &[String]) -> Regex {
   if special_tokens.is_empty() {
     return Regex::new("$^").unwrap(); // matches nothing
@@ -274,6 +311,10 @@ pub fn create_special_token_regex(special_tokens: &[String]) -> Regex {
   Regex::new(&pattern).unwrap()
 }
 
+/// Split `text` into alternating regular chunks and exact special-token chunks.
+///
+/// The `special_tokens` regex should match only the special tokens (typically built with
+/// [`create_special_token_regex`]). Returned chunks borrow from `text`.
 pub fn split_special_tokens<'a>(text: &'a str, special_tokens: &Regex) -> MyResult<Vec<SplitChunk<'a>>> {
   let mut parts = Vec::new();
   let mut last_pos = 0;
@@ -296,6 +337,9 @@ pub fn split_special_tokens<'a>(text: &'a str, special_tokens: &Regex) -> MyResu
 }
 
 #[hotpath::measure]
+/// Read `len` bytes from `path` starting at `offset`.
+///
+/// This is a low-level helper used by the pre-tokenizer and encoder.
 pub fn _read_file_to_buffer<P: AsRef<Path>>(path: P, offset: u64, len: usize) -> MyResult<Vec<u8>> {
   let mut file = File::open(&path)?;
   file.seek(std::io::SeekFrom::Start(offset))?;
@@ -304,12 +348,16 @@ pub fn _read_file_to_buffer<P: AsRef<Path>>(path: P, offset: u64, len: usize) ->
   Ok(buffer)
 }
 
+/// Sort a word-frequency map into a stable, descending-by-frequency order.
+///
+/// Ties are broken by lexicographic order of the word.
 pub fn sort_words(words: &BTreeMap<String, Freq>) -> ordermap::OrderMap<String, Freq> {
   let mut word_freq_vec: Vec<(String, Freq)> = words.iter().map(|(k,v)| (k.clone(), *v)).collect();
   word_freq_vec.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)).reverse());
   word_freq_vec.into_iter().collect()
 }
 
+/// Save a sorted word-frequency map as pretty-printed JSON.
 pub fn save_words<W: std::io::Write>(w: W, words: &ordermap::OrderMap<String, Freq>) -> Result<(), std::io::Error> {
   serde_json::to_writer_pretty(w, &words)?;
   Ok(())

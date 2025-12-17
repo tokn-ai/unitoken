@@ -9,6 +9,7 @@ pub struct Frame<T> {
 }
 
 impl<T> Frame<T> {
+  /// Create a new frame recording `value` at the current timestamp.
   pub fn new(value: T) -> Self {
     Self {
       value,
@@ -143,6 +144,9 @@ impl Recorder for MetricsRecorder {
   }
 }
 
+/// Install the in-process metrics recorder used by this crate.
+///
+/// This must be called at most once per process; subsequent calls will error.
 pub fn init_metrics() -> Result<(), SetRecorderError<MetricsRecorder>> {
   let recorder = MetricsRecorder;
   metrics::set_global_recorder(recorder)?;
@@ -163,6 +167,9 @@ pub struct MetricsSnapshot {
 }
 
 #[must_use]
+/// Capture a snapshot of recorded metrics.
+///
+/// If `clear` is true, recorded frames are cleared after snapshotting.
 pub fn capture_metrics_snapshot(clear: bool) -> MetricsSnapshot {
   let store = global_store();
   fn block_snapshot<T: Copy>(block: &mut Block<T>, started_at: std::time::Instant, clear: bool) -> BlockSnapshot<T> {

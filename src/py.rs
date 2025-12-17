@@ -52,6 +52,9 @@ pub struct BpeTrainer_u8_Idx {
 #[pymethods]
 impl BpeTrainer_u8_Idx {
   #[new]
+  /// Create a new BPE trainer (byte-level) for Python.
+  ///
+  /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
   pub fn new_py(special_tokens: Vec<String>) -> (Self, BpeTrainerBase) {
     (
       Self {
@@ -61,31 +64,39 @@ impl BpeTrainer_u8_Idx {
     )
   }
 
+  /// Add `(word, frequency)` pairs to the trainer's inventory.
   pub fn add_words(&mut self, py: Python, words: Vec<(String, i64)>) {
     py.detach(||
       self.inner.add_words(&mut words.iter().map(|(w, f)| (w.as_str(), *f)))
     )
   }
 
+  /// Current vocabulary size.
   pub fn vocab_size(&self) -> usize {
     self.inner.vocab_size()
   }
 
+  /// Initialize internal training state.
   pub fn init_training(&mut self, py: Python) {
     py.detach(|| self.inner.init_training())
   }
 
+  /// Perform one training step.
+  ///
+  /// Returns the updated vocabulary size.
   pub fn step(&mut self, py: Python) -> PyResult<i64> {
     py.detach(|| self.inner.step()).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(self.inner.vocab_size() as i64)
   }
 
+  /// Return a view of the current vocabulary.
   pub fn get_vocabs(&self) -> Vocabs {
     Vocabs {
       inner: Box::new(VocabsInner::new(&self.inner.vocab)),
     }
   }
 
+  /// Save the vocabulary JSON to `path` using the requested spec (`"gpt2"` or `"uni"`).
   pub fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
@@ -98,6 +109,7 @@ impl BpeTrainer_u8_Idx {
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 
+  /// Save merges to `path` using the requested spec (`"gpt2"` or `"uni"`).
   pub fn save_merges_txt(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
@@ -120,6 +132,9 @@ pub struct BpeTrainer_Character_CharIdx {
 #[pymethods]
 impl BpeTrainer_Character_CharIdx {
   #[new]
+  /// Create a new BPE trainer (character-level) for Python.
+  ///
+  /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
   pub fn new_py(special_tokens: Vec<String>) -> (Self, BpeTrainerBase) {
     (
       Self {
@@ -129,31 +144,41 @@ impl BpeTrainer_Character_CharIdx {
     )
   }
 
+  /// Add `(word, frequency)` pairs to the trainer's inventory.
   pub fn add_words(&mut self, py: Python, words: Vec<(String, i64)>) {
     py.detach(||
       self.inner.add_words(&mut words.iter().map(|(w, f)| (w.as_str(), *f)))
     )
   }
 
+  /// Current vocabulary size.
   pub fn vocab_size(&self) -> usize {
     self.inner.vocab_size()
   }
 
+  /// Initialize internal training state.
   pub fn init_training(&mut self, py: Python) {
     py.detach(|| self.inner.init_training())
   }
 
+  /// Perform one training step.
+  ///
+  /// Returns the updated vocabulary size.
   pub fn step(&mut self, py: Python) -> PyResult<i64> {
     py.detach(|| self.inner.step()).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(self.inner.vocab_size() as i64)
   }
 
+  /// Return a view of the current vocabulary.
   pub fn get_vocabs(&self) -> Vocabs {
     Vocabs {
       inner: Box::new(VocabsInner::new(&self.inner.vocab)),
     }
   }
 
+  /// Save the vocabulary JSON to `path`.
+  ///
+  /// Note: `"gpt2"` is not supported for the character tokenizer.
   pub fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
@@ -166,6 +191,9 @@ impl BpeTrainer_Character_CharIdx {
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 
+  /// Save merges to `path`.
+  ///
+  /// Note: `"gpt2"` is not supported for the character tokenizer.
   pub fn save_merges_txt(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
@@ -182,6 +210,7 @@ impl BpeTrainer_Character_CharIdx {
 pub struct VocabsInner<C, I>(OrderMap<Word<C>, I>);
 
 impl<C: std::hash::Hash + Eq, I: IdxLike> VocabsInner<C, I> {
+  /// Build a reverse map from token bytes to token id.
   pub fn new(vocab: &BTreeMap<I, Word<C>>) -> Self {
     Self(vocab.iter().map(|(i, c)| (c.clone(), i.clone())).collect())
   }
@@ -215,14 +244,17 @@ pub struct Vocabs {
 #[pymethods]
 impl Vocabs {
   #[getter]
+  /// Number of entries in the vocabulary.
   pub fn len(&self) -> usize {
     self.inner.len()
   }
 
+  /// Look up a word/token and return its id if present.
   pub fn get(&self, word: &str) -> Option<i64> {
     self.inner.get(word)
   }
 
+  /// Return all `(token_bytes, id)` entries.
   pub fn items(&self) -> Vec<(Vec<u8>, i64)> {
     self.inner.items()
   }
@@ -234,12 +266,18 @@ pub use crate::pretokenizer::PreTokenizer;
 #[pymethods]
 impl PreTokenizer {
   #[new]
+  /// Create a Python `PreTokenizer`.
+  ///
+  /// - `special_tokens`: special tokens to treat as indivisible.
+  /// - `eot_token`: end-of-text token used for chunk boundary alignment.
+  /// - `pat`: optional regex pattern; defaults to the crate's default.
   pub fn new_py(special_tokens: Vec<String>, eot_token: Option<String>, pat: Option<String>) -> PyResult<Self> {
     Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 
   #[pyo3(name = "find_chunk_boundaries")]
+  /// Python wrapper for [`PreTokenizer::find_chunk_boundaries`].
   pub fn py_find_chunk_boundaries(
     &self, py: Python, path: PathBuf, desired_num_chunks: usize,
   ) -> PyResult<Vec<(u64, usize)>> {
@@ -249,6 +287,7 @@ impl PreTokenizer {
   }
 
   #[pyo3(name = "get_words_from_segment")]
+  /// Python wrapper for [`PreTokenizer::get_words_from_segment`].
   pub fn py_get_words_from_segment(
     &self, py: Python, path: PathBuf, offset: u64, length: usize,
   ) -> PyResult<BTreeMap<String, i64>> {
@@ -258,6 +297,7 @@ impl PreTokenizer {
   }
 
   #[pyo3(name = "get_words_from_file")]
+  /// Python wrapper for [`PreTokenizer::get_words_from_file`].
   pub fn py_get_words_from_file(
     &self, py: Python, path: PathBuf, desired_num_chunks: usize,
   ) -> PyResult<BTreeMap<String, i64>> {
@@ -308,6 +348,10 @@ where
 #[pymethods]
 impl BpeEncoderBase {
   #[new]
+  /// Create a Python BPE encoder.
+  ///
+  /// The encoder can be created from in-memory `vocabs`/`merges` or from file paths.
+  /// `spec` and `char_level` must be compatible (e.g. `("gpt2", "u8")`, `("uni", "char")`).
   pub fn new_py(
     py: Python,
     spec: &str, char_level: &str,
@@ -328,11 +372,13 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "pre_tokenizer")]
+  /// Return the underlying pre-tokenizer.
   pub fn py_pre_tokenizer(&self) -> PreTokenizer {
     self.0.pre_tokenizer().clone()
   }
 
   #[pyo3(name = "encode_word")]
+  /// Encode a single word into token ids.
   pub fn py_encode_word(&self, py: Python, word: &str) -> PyResult<Vec<Idx>> {
     py.detach(||
       self.0.encode_word(word).map(_arc_to_vec)
@@ -340,6 +386,7 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_words")]
+  /// Encode multiple words into token ids.
   pub fn py_encode_words(&self, py: Python, words: Vec<String>) -> PyResult<Vec<Vec<Idx>>> {
     py.detach(|| {
       let words = words.iter().map(|i| i.as_str()).collect::<Vec<_>>();
@@ -349,6 +396,7 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_string")]
+  /// Encode an arbitrary string into a NumPy `uint32` array of token ids.
   pub fn py_encode_string<'py>(&self, py: Python<'py>, s: &str) -> PyResult<Bound<'py, PyArray1<Idx>>> {
     let result = py.detach(|| {
       self.0.encode_string(s)
@@ -360,6 +408,7 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_file")]
+  /// Encode a file into a NumPy `uint32` array of token ids.
   pub fn py_encode_file<'py>(&self, py: Python<'py>, path: PathBuf, num_chunks: usize) -> PyResult<Bound<'py, PyArray1<Idx>>> {
     let result = py.detach(||
       self.0.encode_file(&path, num_chunks)
