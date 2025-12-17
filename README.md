@@ -15,7 +15,7 @@ cargo add unitoken
 Python (wheels via PyPI):
 
 ```bash
-pip install unitoken
+pip install unicode-tokenizer
 ```
 
 Quickstart (Python)

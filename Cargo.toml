@@ -21,6 +21,11 @@ exclude = [
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "unitoken"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
 fancy-regex = "0.16.2"
 lazy_static = "1.5.0"
@@ -29,21 +34,22 @@ memchr = "2.7.6"
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 rayon = "1.11.0"
-clap = { version = "4.5.53", features = ["derive"] }
 moka = { version = "0.12.11", features = ["sync"] }
 tracing = "0.1.43"
-tracing-subscriber = "0.3.22"
 metrics = "0.24.3"
 serde = { version = "1.0.228", features = ["derive"] }
-chrono = "0.4.42"
-textplots = { version = "0.8.7", optional = true }
-rgb = { version = "0.8.52", optional = true } # optional for textplots
-indicatif = "0.18.3"
 hotpath = "0.8.0"
 npyz = { version = "0.8.4" }
 pyo3 = { version = "0.27", optional = true, features = ["experimental-inspect"] }
 ndarray = { version = "0.17.1", optional = true }
 numpy = { version = "0.27.1", optional = true }
+
+clap = { version = "4.5.53", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3.22", optional = true }
+indicatif = { version = "0.18.3", optional = true }
+chrono = { version = "0.4.42", optional = true }
+rgb = { version = "0.8.52", optional = true } # optional for textplots
+textplots = { version = "0.8.7", optional = true }
 
 [profile.dev.package."*"]
 opt-level = 2
@@ -65,6 +71,7 @@ fmt-npz = ["npyz/npz"]
 
 plot = ["dep:textplots", "dep:rgb"]
 py = ["dep:pyo3", "dep:ndarray", "dep:numpy"]
+cli = ["dep:tracing-subscriber", "dep:indicatif", "dep:chrono", "dep:clap"]
 
 [dev-dependencies]
 pyo3-introspection = "0.27"
