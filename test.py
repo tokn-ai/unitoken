@@ -1,6 +1,6 @@
 # %%
 from unicode_tokenizer import BpeTrainer, PreTokenizer
-pre = PreTokenizer(["<|endoftext|>"], None)
+pre = PreTokenizer(["<|endoftext|>"])
 words = pre.get_words_from_file("fixtures/tinystories_sample_5M.txt", 100)
 
 # %%

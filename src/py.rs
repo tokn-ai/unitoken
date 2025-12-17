@@ -271,12 +271,13 @@ impl PreTokenizer {
   /// - `special_tokens`: special tokens to treat as indivisible.
   /// - `eot_token`: end-of-text token used for chunk boundary alignment.
   /// - `pat`: optional regex pattern; defaults to the crate's default.
+  #[pyo3(signature = (special_tokens, eot_token=None, pat=None))]
   pub fn new_py(special_tokens: Vec<String>, eot_token: Option<String>, pat: Option<String>) -> PyResult<Self> {
     Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 
-  #[pyo3(name = "find_chunk_boundaries")]
+  #[pyo3(name = "find_chunk_boundaries", signature = (path, desired_num_chunks = 1024))]
   /// Python wrapper for [`PreTokenizer::find_chunk_boundaries`].
   pub fn py_find_chunk_boundaries(
     &self, py: Python, path: PathBuf, desired_num_chunks: usize,
@@ -296,7 +297,7 @@ impl PreTokenizer {
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 
-  #[pyo3(name = "get_words_from_file")]
+  #[pyo3(name = "get_words_from_file", signature = (path, desired_num_chunks = 1024))]
   /// Python wrapper for [`PreTokenizer::get_words_from_file`].
   pub fn py_get_words_from_file(
     &self, py: Python, path: PathBuf, desired_num_chunks: usize,
@@ -433,7 +434,7 @@ impl BpeEncoderBase {
 }
 
 #[test]
-#[ignore = "manual"]
+// #[ignore = "manual"]
 fn generate_py_stubs() {
   println!("test");
   let module = pyo3_introspection::introspect_cdylib(
