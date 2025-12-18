@@ -1,6 +1,6 @@
 [package]
 name = "unitoken"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Fast BPE tokenizer/trainer with a Rust core and Python bindings"
 repository = "https://github.com/a-gradient/unitoken"
@@ -64,7 +64,7 @@ debug = "line-tables-only"
 # RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 [features]
-default = ["py"]
+default = []
 hotpath = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 
 fmt-npz = ["npyz/npz"]

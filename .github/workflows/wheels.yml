@@ -38,6 +38,16 @@ jobs:
           args: --release --features py --out dist --strip
           manylinux: auto
 
+      - name: Smoke test (install wheel)
+        run: |
+          python -m pip install --upgrade pip
+          python -c "import glob,sys,subprocess; ws=glob.glob('dist/*.whl'); assert ws, 'no wheel found in dist/'; subprocess.check_call([sys.executable,'-m','pip','install',ws[0]])"
+
+      - name: Smoke test (import)
+        run: |
+          python -c "import uni_tokenizer; from uni_tokenizer import BpeEncoder, BpeTrainer, PreTokenizer; print('import ok')"
+          python ./test.py
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

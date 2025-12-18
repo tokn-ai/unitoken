@@ -31,8 +31,8 @@ print(len(b))
 assert len(b) == 2184799
 s = encoder.decode(b)
 # print(s[:100])
-with open("fixtures/tinystories_sample_5M.txt", "r", encoding="utf-8") as f:
-  original = f.read()
+with open("fixtures/tinystories_sample_5M.txt", "rb") as f:
+  original = f.read().decode("utf-8")
 assert s == original
 
 # %%

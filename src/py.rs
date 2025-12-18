@@ -453,7 +453,7 @@ impl BpeEncoderBase {
 }
 
 #[test]
-// #[ignore = "manual"]
+#[ignore = "manual"]
 fn generate_py_stubs() {
   println!("test");
   let module = pyo3_introspection::introspect_cdylib(
