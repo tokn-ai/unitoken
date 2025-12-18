@@ -40,7 +40,7 @@ metrics = "0.24.3"
 serde = { version = "1.0.228", features = ["derive"] }
 hotpath = "0.8.0"
 npyz = { version = "0.8.4" }
-pyo3 = { version = "0.27", optional = true, features = ["experimental-inspect"] }
+pyo3 = { version = "0.27", optional = true, features = ["experimental-inspect", "abi3-py38"] }
 ndarray = { version = "0.17.1", optional = true }
 numpy = { version = "0.27.1", optional = true }
 
@@ -64,7 +64,7 @@ debug = "line-tables-only"
 # RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 [features]
-default = []
+default = ["py"]
 hotpath = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 
 fmt-npz = ["npyz/npz"]
