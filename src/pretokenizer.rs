@@ -3,13 +3,15 @@ use lazy_static::lazy_static;
 use memchr::memmem;
 use rayon::iter::{IntoParallelIterator, ParallelIterator as _};
 use std::{
-  collections::{BTreeMap, BTreeSet, HashMap},
+  collections::{BTreeMap, BTreeSet},
   fs::{self, File},
   io::{Read as _, Seek},
   path::Path,
 };
 
 use crate::{MyError, MyResult, bpe::Freq};
+
+pub type TokenIndexMap<'a> = ahash::AHashMap<&'a str, Vec<usize>>;
 
 lazy_static! {
   /// PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -82,15 +84,15 @@ impl PreTokenizer {
   #[hotpath::measure]
   pub fn get_tokens_index_from_segment<'a>(
     &self, content: &'a str,
-  ) -> MyResult<(HashMap<&'a str, Vec<usize>>, HashMap<&'a str, Vec<usize>>)> {
+  ) -> MyResult<(TokenIndexMap<'a>, TokenIndexMap<'a>)> {
     let _span = trace_span!("get_tokens_index_from_segment", len=content.len()).entered();
 
     if self.metrics {
       metrics::counter!("get_tokens_index_from_segment.calls").increment(1);
     }
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
-    let mut tokens_index: HashMap<&'a str, Vec<usize>> = HashMap::new();
-    let mut special_tokens_index: HashMap<&'a str, Vec<usize>> = HashMap::new();
+    let mut tokens_index: TokenIndexMap<'a> = TokenIndexMap::default();
+    let mut special_tokens_index: TokenIndexMap<'a> = TokenIndexMap::default();
     let mut doc_idx = 0;
     for part in parts.into_iter() {
       match part {

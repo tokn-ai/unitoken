@@ -261,6 +261,8 @@ class Encoding:
       allowed_special: AllowedSpecial = set(),
       disallowed_special: DisallowedSpecial = "all",
   ) -> list[int]:
+    if allowed_special == "all":
+      return self._encoder.encode_string_to_list(text)
     self._raise_if_disallowed(text, allowed_special, disallowed_special)
     return self._encode_impl(text, allowed_special)
 
