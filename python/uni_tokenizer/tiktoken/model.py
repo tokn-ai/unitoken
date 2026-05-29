@@ -1,4 +1,6 @@
-from uni_tokenizer.tiktoken_compat import Encoding, list_encoding_names
+from __future__ import annotations
+
+from uni_tokenizer.tiktoken_compat import Encoding, list_encoding_names as _list_encoding_names
 
 from .registry import get_encoding
 
@@ -12,7 +14,7 @@ def encoding_name_for_model(model_name: str) -> str:
   for prefix, encoding_name in MODEL_PREFIX_TO_ENCODING.items():
     if model_name.startswith(prefix):
       return encoding_name
-  if model_name in list_encoding_names():
+  if model_name in _list_encoding_names():
     return model_name
   raise KeyError(
     f"Could not automatically map {model_name} to a tokeniser. "

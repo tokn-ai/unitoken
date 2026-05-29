@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+import inspect
 from os import PathLike
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
 from .encoder import BpeEncoder, IdxArray
 
@@ -12,7 +13,7 @@ AllowedSpecial = Literal["all"] | set[str]
 DisallowedSpecial = Literal["all"] | Collection[str]
 
 
-def raise_disallowed_special_token(token: str) -> None:
+def raise_disallowed_special_token(token: str) -> NoReturn:
   raise ValueError(
     f"Encountered text corresponding to disallowed special token {token!r}. "
     "Pass allowed_special to allow it, or disallowed_special=() to disable this check."
@@ -358,6 +359,15 @@ class Encoding:
 
   def is_special_token(self, token: int) -> bool:
     return token in set(self._special_tokens.values())
+
+
+Encoding.__signature__ = inspect.Signature([
+  inspect.Parameter("name", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation="str"),
+  inspect.Parameter("pat_str", inspect.Parameter.KEYWORD_ONLY, annotation="str"),
+  inspect.Parameter("mergeable_ranks", inspect.Parameter.KEYWORD_ONLY, annotation="dict[bytes, int]"),
+  inspect.Parameter("special_tokens", inspect.Parameter.KEYWORD_ONLY, annotation="dict[str, int]"),
+  inspect.Parameter("explicit_n_vocab", inspect.Parameter.KEYWORD_ONLY, default=None, annotation="int | None"),
+])
 
 
 def _fixture_encoding(name: str) -> Encoding:

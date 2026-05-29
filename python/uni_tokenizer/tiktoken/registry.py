@@ -1,5 +1,15 @@
+from __future__ import annotations
+
 from collections.abc import Callable
+import functools
+import importlib
+import pkgutil
+from collections.abc import Sequence
+import threading
 from typing import Any
+
+import uni_tokenizer.tiktoken as tiktoken
+import tiktoken_ext
 
 from uni_tokenizer.tiktoken_compat import Encoding, get_encoding as _get_encoding, list_encoding_names
 

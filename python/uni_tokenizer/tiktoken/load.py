@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
-import urllib.request
-from pathlib import Path
+import json as _json
+import os
+import urllib.request as _urllib_request
+from pathlib import Path as _Path
 
 
 def check_hash(data: bytes, expected_hash: str) -> bool:
@@ -13,9 +14,9 @@ def check_hash(data: bytes, expected_hash: str) -> bool:
 
 def read_file(blobpath: str) -> bytes:
   if blobpath.startswith(("http://", "https://")):
-    with urllib.request.urlopen(blobpath) as response:
+    with _urllib_request.urlopen(blobpath) as response:
       return response.read()
-  return Path(blobpath).read_bytes()
+  return _Path(blobpath).read_bytes()
 
 
 def read_file_cached(blobpath: str, expected_hash: str | None = None) -> bytes:
@@ -41,7 +42,7 @@ def dump_tiktoken_bpe(bpe_ranks: dict[bytes, int], tiktoken_bpe_file: str) -> No
   for token, rank in sorted(bpe_ranks.items(), key=lambda item: item[1]):
     encoded = base64.b64encode(token).decode("ascii")
     lines.append(f"{encoded} {rank}")
-  Path(tiktoken_bpe_file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+  _Path(tiktoken_bpe_file).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def data_gym_to_mergeable_bpe_ranks(
@@ -52,5 +53,5 @@ def data_gym_to_mergeable_bpe_ranks(
     clobber_one_byte_tokens: bool = False,
 ) -> dict[bytes, int]:
   del vocab_bpe_file, vocab_bpe_hash, clobber_one_byte_tokens
-  encoder = json.loads(read_file_cached(encoder_json_file, encoder_json_hash))
+  encoder = _json.loads(read_file_cached(encoder_json_file, encoder_json_hash))
   return {token.encode("utf-8"): int(rank) for token, rank in encoder.items()}

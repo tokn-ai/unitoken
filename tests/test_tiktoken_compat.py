@@ -1,8 +1,17 @@
 import unittest
+import inspect
 from pathlib import Path
 
 import tiktoken
+import tiktoken.core
+import tiktoken.load
+import tiktoken.model
+import tiktoken.registry
 import uni_tokenizer.tiktoken as unitiktoken
+import uni_tokenizer.tiktoken.core as unitiktoken_core
+import uni_tokenizer.tiktoken.load as unitiktoken_load
+import uni_tokenizer.tiktoken.model as unitiktoken_model
+import uni_tokenizer.tiktoken.registry as unitiktoken_registry
 from uni_tokenizer import Encoding, list_encoding_names
 from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
 
@@ -43,17 +52,30 @@ class TiktokenCompatTests(unittest.TestCase):
     self.assertIs(unitiktoken.Encoding, Encoding)
     self.assertIn("tinystories_sample_5M", unitiktoken.list_encoding_names())
 
-  def test_unitoken_tiktoken_submodules(self) -> None:
-    import uni_tokenizer.tiktoken.core as core
-    import uni_tokenizer.tiktoken.load as load
-    import uni_tokenizer.tiktoken.model as model
-    import uni_tokenizer.tiktoken.registry as registry
+  def test_unitoken_tiktoken_public_surface_matches_upstream(self) -> None:
+    modules = [
+      (tiktoken, unitiktoken),
+      (tiktoken.core, unitiktoken_core),
+      (tiktoken.model, unitiktoken_model),
+      (tiktoken.registry, unitiktoken_registry),
+      (tiktoken.load, unitiktoken_load),
+    ]
+    for upstream, ours in modules:
+      upstream_names = {name for name in dir(upstream) if not name.startswith("_")}
+      ours_names = {name for name in dir(ours) if not name.startswith("_")}
+      self.assertEqual(ours_names, upstream_names)
+      for name in upstream_names & ours_names:
+        upstream_obj = getattr(upstream, name)
+        ours_obj = getattr(ours, name)
+        if inspect.isfunction(upstream_obj) or inspect.isclass(upstream_obj):
+          self.assertEqual(str(inspect.signature(ours_obj)), str(inspect.signature(upstream_obj)), name)
 
-    self.assertIs(core.Encoding, Encoding)
-    self.assertIs(model.Encoding, Encoding)
-    self.assertIs(registry.Encoding, Encoding)
-    self.assertTrue(callable(core.raise_disallowed_special_token))
-    self.assertTrue(callable(load.load_tiktoken_bpe))
+  def test_unitoken_tiktoken_submodules(self) -> None:
+    self.assertIs(unitiktoken_core.Encoding, Encoding)
+    self.assertIs(unitiktoken_model.Encoding, Encoding)
+    self.assertIs(unitiktoken_registry.Encoding, Encoding)
+    self.assertTrue(callable(unitiktoken_core.raise_disallowed_special_token))
+    self.assertTrue(callable(unitiktoken_load.load_tiktoken_bpe))
 
   def test_unitoken_tiktoken_load_helpers(self) -> None:
     import tempfile
