@@ -1,6 +1,6 @@
 [project]
 name = "uni-tokenizer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Fast BPE tokenizer/trainer with a Rust core and Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
