@@ -385,6 +385,11 @@ def encoding_for_model(model_name: str) -> Encoding:
 
 
 def encoding_name_for_model(model_name: str) -> str:
+  if model_name not in list_encoding_names():
+    raise KeyError(
+      f"Could not automatically map {model_name} to a tokeniser. "
+      "Please use `tiktoken.get_encoding` to explicitly get the tokeniser you expect."
+    )
   return model_name
 
 

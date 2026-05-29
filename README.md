@@ -52,7 +52,7 @@ ids = enc.encode("hello world")
 text = enc.decode(ids)
 ```
 
-The package also includes a `tiktoken` import shim with `Encoding`,
+The package also includes a `uni_tokenizer.tiktoken` namespace with `Encoding`,
 `get_encoding`, `encoding_for_model`, `encoding_name_for_model`, and
 `list_encoding_names`. Built-in registry names are limited to local unitoken
 fixture models for now; use `Encoding.from_files(...)` for trained models.
@@ -68,9 +68,7 @@ python benchmarks/compare_tiktoken.py
 ```
 
 The benchmark reports unitoken encode/decode timings and, when upstream
-`tiktoken` is importable, matching upstream timings. It refuses to compare
-against unitoken's own `tiktoken` shim so accidental self-comparisons are
-visible.
+`tiktoken` is importable, matching upstream timings.
 
 Building from source
 --------------------

@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 import tiktoken
+import uni_tokenizer.tiktoken as unitiktoken
 from uni_tokenizer import Encoding, list_encoding_names
 from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
 
@@ -37,21 +38,39 @@ class TiktokenCompatTests(unittest.TestCase):
       special_tokens={"<|endoftext|>": 7},
     )
 
-  def test_tiktoken_shim_exports_encoding(self) -> None:
+  def test_unitoken_tiktoken_exports_encoding(self) -> None:
     self.assertIn("tinystories_sample_5M", list_encoding_names())
-    if getattr(tiktoken.Encoding, "__module__", "").startswith("uni_tokenizer"):
-      self.assertIs(tiktoken.Encoding, Encoding)
+    self.assertIs(unitiktoken.Encoding, Encoding)
+    self.assertIn("tinystories_sample_5M", unitiktoken.list_encoding_names())
 
-  def test_tiktoken_shim_submodules(self) -> None:
-    import tiktoken.core
-    import tiktoken.model
-    import tiktoken.registry
+  def test_unitoken_tiktoken_submodules(self) -> None:
+    import uni_tokenizer.tiktoken.core as core
+    import uni_tokenizer.tiktoken.load as load
+    import uni_tokenizer.tiktoken.model as model
+    import uni_tokenizer.tiktoken.registry as registry
 
-    if getattr(tiktoken.core.Encoding, "__module__", "").startswith("uni_tokenizer"):
-      self.assertIs(tiktoken.core.Encoding, Encoding)
-      self.assertIs(tiktoken.model.Encoding, Encoding)
-      self.assertIs(tiktoken.registry.Encoding, Encoding)
-      self.assertTrue(callable(tiktoken.core.raise_disallowed_special_token))
+    self.assertIs(core.Encoding, Encoding)
+    self.assertIs(model.Encoding, Encoding)
+    self.assertIs(registry.Encoding, Encoding)
+    self.assertTrue(callable(core.raise_disallowed_special_token))
+    self.assertTrue(callable(load.load_tiktoken_bpe))
+
+  def test_unitoken_tiktoken_load_helpers(self) -> None:
+    import tempfile
+    import uni_tokenizer.tiktoken.load as load
+
+    with tempfile.TemporaryDirectory() as tmp:
+      path = Path(tmp) / "toy.tiktoken"
+      ranks = {b"a": 0, b"b": 1, b"ab": 2}
+      load.dump_tiktoken_bpe(ranks, str(path))
+      self.assertEqual(load.load_tiktoken_bpe(str(path)), ranks)
+      self.assertTrue(load.check_hash(path.read_bytes(), __import__("hashlib").sha256(path.read_bytes()).hexdigest()))
+
+  def test_model_unknown_error_matches_tiktoken_shape(self) -> None:
+    import uni_tokenizer.tiktoken.model as model
+
+    with self.assertRaises(KeyError):
+      model.encoding_name_for_model("definitely_nope-model")
 
   def test_encode_decode_round_trip(self) -> None:
     enc = self.make_encoding()
