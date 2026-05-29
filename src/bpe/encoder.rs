@@ -7,7 +7,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use crate::{
   MyError, MyResult,
-  pretokenizer::{_read_file_to_buffer, split_special_tokens, PreTokenizer, SplitChunk, TokenIndexMap}, spec::Spec, traits::{CanEncode, CanStrToWord, Decode, Encode},
+  pretokenizer::{_read_file_to_buffer, split_special_tokens, PreTokenizer, SplitChunk}, spec::Spec, traits::{CanEncode, CanStrToWord, Decode, Encode},
 };
 
 use super::*;
@@ -477,45 +477,6 @@ where
       }
     }
     Ok(words.into_iter().next().unwrap().idxs.to_word())
-  }
-
-  #[allow(dead_code)]
-  fn encode_tokens_index(&self, tokens_index: &TokenIndexMap<'_>, special_tokens_index: &TokenIndexMap<'_>) -> MyResult<Vec<Idx>> {
-    let tokens_num = tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
-    let special_tokens_num = special_tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
-    let total = tokens_num + special_tokens_num;
-    let mut result: Vec<Option<usize>> = vec![None; total];
-    let mut pieces: Vec<Word<Idx>> = Vec::with_capacity(tokens_index.len() + special_tokens_index.len());
-
-    for (token, doc_idxs) in tokens_index {
-      let w = self.encode_word(token)?;
-      let piece_idx = pieces.len();
-      pieces.push(w);
-      for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = Some(piece_idx);
-      }
-    }
-
-    for (token, doc_idxs) in special_tokens_index {
-      let idx = self.special_tokens.get(*token).ok_or_else(|| MyError::Oov(token.to_string()))?;
-      let w = Arc::<[Idx]>::from(vec![*idx].into_boxed_slice());
-      let piece_idx = pieces.len();
-      pieces.push(w);
-      for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = Some(piece_idx);
-      }
-    }
-
-    let final_len = result
-      .iter()
-      .map(|piece_idx| piece_idx.map(|i| pieces[i].len()).unwrap_or_default())
-      .sum();
-    let mut final_result = Vec::with_capacity(final_len);
-    for piece_idx in result {
-      let piece_idx = piece_idx.ok_or_else(|| MyError::BpeBuilder("encoded token position was not filled".to_string()))?;
-      final_result.extend_from_slice(&pieces[piece_idx]);
-    }
-    Ok(final_result)
   }
 
   fn encode_string_ordered(&self, input: &str) -> MyResult<Vec<Idx>> {

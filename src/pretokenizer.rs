@@ -11,8 +11,6 @@ use std::{
 
 use crate::{MyError, MyResult, bpe::Freq};
 
-pub type TokenIndexMap<'a> = ahash::AHashMap<&'a str, Vec<usize>>;
-
 lazy_static! {
   /// PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
   pub static ref DEFAULT_PAT: Regex = Regex::new(r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+").unwrap();
@@ -75,49 +73,6 @@ impl PreTokenizer {
   ) -> MyResult<Vec<(u64, usize)>> {
     let boundaries = _find_chunk_boundaries(&path, desired_num_chunks, &self.end_of_text)?;
     Ok(boundaries.iter().zip(boundaries.iter().skip(1)).map(|(&a, &b)| (a, (b-a) as usize)).collect())
-  }
-
-  /// Build token and special-token indexes for a segment.
-  ///
-  /// The returned maps associate each token (borrowed from `content`) with the list of
-  /// positions it appears in the fully-tokenized stream.
-  #[hotpath::measure]
-  pub fn get_tokens_index_from_segment<'a>(
-    &self, content: &'a str,
-  ) -> MyResult<(TokenIndexMap<'a>, TokenIndexMap<'a>)> {
-    let _span = trace_span!("get_tokens_index_from_segment", len=content.len()).entered();
-
-    if self.metrics {
-      metrics::counter!("get_tokens_index_from_segment.calls").increment(1);
-    }
-    let parts = split_special_tokens(&content, &self.re_special_tokens)?;
-    let mut tokens_index: TokenIndexMap<'a> = TokenIndexMap::default();
-    let mut special_tokens_index: TokenIndexMap<'a> = TokenIndexMap::default();
-    let mut doc_idx = 0;
-    for part in parts.into_iter() {
-      match part {
-        SplitChunk::Special(token) => {
-          special_tokens_index.entry(token).or_default().push(doc_idx);
-          doc_idx += 1;
-        }
-        SplitChunk::Chunk(part) => {
-          for token in self.re_pat.find_iter(part) {
-            tokens_index.entry(token?.as_str()).or_default().push(doc_idx);
-            doc_idx += 1;
-          }
-        }
-      }
-    }
-
-    if self.metrics {
-      metrics::counter!("get_tokens_index_from_segment.len").increment(content.len() as _);
-      metrics::histogram!("get_tokens_index_from_segment.special_tokens_sum").record(special_tokens_index.values().map(Vec::len).sum::<usize>() as f64);
-      metrics::histogram!("get_tokens_index_from_segment.tokens_count").record(tokens_index.len() as f64);
-      metrics::histogram!("get_tokens_index_from_segment.doc_idx").record(doc_idx as f64);
-    }
-
-    trace!(tokens_index_len=?tokens_index.len(), "result");
-    Ok((tokens_index, special_tokens_index))
   }
 
   /// Read a slice of a file and count pre-tokenized word frequencies within it.
@@ -461,21 +416,6 @@ mod tests {
       &create_special_token_regex(&[DEFAULT_EOT.to_string()]),
     ).unwrap();
     assert!(parts.len() == 12915);
-  }
-
-  #[test]
-  fn test_get_tokens_index_from_segment() {
-    const NAME: &str = "tinystories_sample_5M";
-    let path = format!("fixtures/{NAME}.txt");
-    let text = std::fs::read_to_string(&path).unwrap();
-    let tokenizer = PreTokenizer::new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT));
-    let (tokens_index, special_tokens_index) = tokenizer.get_tokens_index_from_segment(
-      &text,
-    ).unwrap();
-    let idxs = tokens_index.get(" the").unwrap();
-    println!("the idxs length: {:?}", idxs.len());
-    assert_ne!(idxs.len(), 0);
-    assert_eq!(special_tokens_index.len(), 1)
   }
 
   #[test]

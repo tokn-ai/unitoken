@@ -143,10 +143,6 @@ fn main() {
     }
     count
   });
-  measure("get_tokens_index", repeats, || {
-    let (tokens, specials) = bpe.pre_tokenizer.get_tokens_index_from_segment(&text).unwrap();
-    tokens.len() + specials.len()
-  });
   measure("encode_string", repeats, || bpe.encode_string(&text).unwrap().len());
   measure("decode", repeats, || bpe.decode(&encoded).unwrap().len());
 }
