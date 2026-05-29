@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from uni_tokenizer import Encoding
+from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = REPO_ROOT / "fixtures" / "tinystories_sample_5M.txt"
+DEFAULT_PAT = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 
 
 def bench(label: str, fn: Callable[[], Any], repeats: int) -> dict[str, Any]:
@@ -43,7 +45,7 @@ def load_unitoken_encoding(name: str) -> Encoding:
   )
 
 
-def load_upstream_tiktoken(name: str):
+def load_upstream_tiktoken(name: str, *, fixture_encoding: str, use_registry: bool):
   try:
     module = importlib.import_module("tiktoken")
   except ImportError:
@@ -53,16 +55,32 @@ def load_upstream_tiktoken(name: str):
   if module_path.is_relative_to(REPO_ROOT / "python"):
     return None, f"imported unitoken's tiktoken shim at {module_path}, not upstream tiktoken"
 
+  if use_registry:
+    try:
+      return module.get_encoding(name), None
+    except Exception as exc:
+      return None, f"upstream tiktoken could not load {name!r}: {exc}"
+
+  ranks = _load_gpt2_vocab(REPO_ROOT / "fixtures" / f"vocab.{fixture_encoding}.json")
   try:
-    return module.get_encoding(name), None
+    return module.Encoding(
+      f"unitoken-{fixture_encoding}",
+      pat_str=DEFAULT_PAT,
+      mergeable_ranks=ranks,
+      special_tokens={"<|endoftext|>": 0},
+    ), None
   except Exception as exc:
-    return None, f"upstream tiktoken could not load {name!r}: {exc}"
+    return None, f"upstream tiktoken could not construct local fixture encoding {fixture_encoding!r}: {exc}"
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
   text = Path(args.input).read_text(encoding="utf-8")[:args.bytes]
   unitoken = load_unitoken_encoding(args.unitoken_encoding)
-  upstream, upstream_error = load_upstream_tiktoken(args.tiktoken_encoding)
+  upstream, upstream_error = load_upstream_tiktoken(
+    args.tiktoken_encoding,
+    fixture_encoding=args.unitoken_encoding,
+    use_registry=args.use_upstream_registry,
+  )
 
   results = {
     "input": str(args.input),
@@ -93,6 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--repeats", type=int, default=5)
   parser.add_argument("--unitoken-encoding", default="tinystories_sample_5M")
   parser.add_argument("--tiktoken-encoding", default="gpt2")
+  parser.add_argument("--use-upstream-registry", action="store_true", help="Use tiktoken.get_encoding instead of constructing upstream Encoding from local fixture ranks.")
   parser.add_argument("--json", type=Path)
   args = parser.parse_args(argv)
 

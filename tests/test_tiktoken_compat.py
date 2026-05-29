@@ -1,7 +1,7 @@
 import unittest
 
 import tiktoken
-from uni_tokenizer import Encoding
+from uni_tokenizer import Encoding, list_encoding_names
 
 
 class TiktokenCompatTests(unittest.TestCase):
@@ -14,6 +14,17 @@ class TiktokenCompatTests(unittest.TestCase):
       b"abc": 4,
       b" ": 5,
       b"x": 6,
+      b"<": 8,
+      b"|": 9,
+      b">": 10,
+      b"e": 11,
+      b"n": 12,
+      b"d": 13,
+      b"o": 14,
+      b"f": 15,
+      b"t": 16,
+      b"h": 17,
+      b"i": 18,
     }
     return Encoding(
       "toy",
@@ -22,7 +33,9 @@ class TiktokenCompatTests(unittest.TestCase):
     )
 
   def test_tiktoken_shim_exports_encoding(self) -> None:
-    self.assertIs(tiktoken.Encoding, Encoding)
+    self.assertIn("tinystories_sample_5M", list_encoding_names())
+    if getattr(tiktoken.Encoding, "__module__", "").startswith("uni_tokenizer"):
+      self.assertIs(tiktoken.Encoding, Encoding)
 
   def test_encode_decode_round_trip(self) -> None:
     enc = self.make_encoding()
@@ -47,6 +60,8 @@ class TiktokenCompatTests(unittest.TestCase):
       enc.encode("<|endoftext|>")
 
     self.assertEqual(enc.encode("<|endoftext|>", allowed_special="all"), [7])
+    self.assertNotEqual(enc.encode("<|endoftext|>", disallowed_special=()), [7])
+    self.assertEqual(enc.encode_ordinary("<|endoftext|>"), enc.encode("<|endoftext|>", disallowed_special=()))
 
   def test_batch_helpers(self) -> None:
     enc = self.make_encoding()
@@ -68,6 +83,27 @@ class TiktokenCompatTests(unittest.TestCase):
     self.assertEqual(enc.encode_with_unstable("ab"), ([3], []))
     self.assertEqual(enc.decode_with_offsets([4, 5, 3]), ("abc ab", [0, 3, 4]))
     self.assertIn(b"abc", enc.token_byte_values())
+
+  def test_matches_upstream_tiktoken_on_toy_encoding(self) -> None:
+    ranks = {
+      b"a": 0,
+      b"b": 1,
+      b"c": 2,
+      b"ab": 3,
+      b"abc": 4,
+      b" ": 5,
+      b"x": 6,
+    }
+    pattern = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ours = Encoding("toy", pat_str=pattern, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
+    theirs = tiktoken.Encoding("toy", pat_str=pattern, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
+
+    for text in ["ab", "abc ab", "x ab"]:
+      self.assertEqual(ours.encode(text), theirs.encode(text))
+      self.assertEqual(ours.encode_ordinary(text), theirs.encode_ordinary(text))
+
+    self.assertEqual(ours.decode([4, 5, 3]), theirs.decode([4, 5, 3]))
+    self.assertEqual(ours.decode_single_token_bytes(4), theirs.decode_single_token_bytes(4))
 
 
 if __name__ == "__main__":

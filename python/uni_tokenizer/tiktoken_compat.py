@@ -95,6 +95,7 @@ class Encoding:
       ch: Literal["u8", "char"] = "u8",
       output_format: Literal["gpt2", "uni"] | None = None,
       _encoder: BpeEncoder | None = None,
+      _ordinary_encoder: BpeEncoder | None = None,
       _token_bytes: Mapping[int, bytes] | None = None,
       _merges: Sequence[tuple[bytes, bytes]] | None = None,
   ) -> None:
@@ -125,6 +126,17 @@ class Encoding:
         merges=merges,
         vocabs=vocabs,
       )
+    if _ordinary_encoder is not None:
+      self._ordinary_encoder = _ordinary_encoder
+    else:
+      vocabs = {token: idx for idx, token in self._token_bytes.items()}
+      merges = list(_merges) if _merges is not None else _infer_merges_from_ranks(self._mergeable_ranks)
+      self._ordinary_encoder = BpeEncoder(
+        ch=ch,
+        special_tokens=[],
+        merges=merges,
+        vocabs=vocabs,
+      )
 
     if explicit_n_vocab is not None and self.n_vocab != explicit_n_vocab:
       raise ValueError(f"explicit_n_vocab={explicit_n_vocab} does not match n_vocab={self.n_vocab}")
@@ -149,7 +161,14 @@ class Encoding:
         merges_file=merges_file,
         vocabs_file=vocab_file,
       )
-      return cls(name, special_tokens=special_tokens, ch=ch, output_format=spec, _encoder=encoder)
+      ordinary_encoder = BpeEncoder.load(
+        ch=ch,
+        output_format=spec,
+        special_tokens=[],
+        merges_file=merges_file,
+        vocabs_file=vocab_file,
+      )
+      return cls(name, special_tokens=special_tokens, ch=ch, output_format=spec, _encoder=encoder, _ordinary_encoder=ordinary_encoder)
 
     ranks = _load_gpt2_vocab(vocab_file)
     token_bytes = {idx: token for token, idx in ranks.items()}
@@ -163,6 +182,13 @@ class Encoding:
       merges_file=merges_file,
       vocabs_file=vocab_file,
     )
+    ordinary_encoder = BpeEncoder.load(
+      ch=ch,
+      output_format=spec,
+      special_tokens=[],
+      merges_file=merges_file,
+      vocabs_file=vocab_file,
+    )
     return cls(
       name,
       mergeable_ranks=ranks,
@@ -170,6 +196,7 @@ class Encoding:
       ch=ch,
       output_format=spec,
       _encoder=encoder,
+      _ordinary_encoder=ordinary_encoder,
       _token_bytes=token_bytes,
       _merges=merges,
     )
@@ -208,6 +235,13 @@ class Encoding:
           "Pass allowed_special to allow it, or disallowed_special=() to disable this check."
         )
 
+  def _encode_impl(self, text: str, allowed_special: AllowedSpecial) -> list[int]:
+    if allowed_special == "all":
+      return self._encoder.encode_string(text).tolist()
+    if not set(allowed_special):
+      return self._ordinary_encoder.encode_string(text).tolist()
+    return self._encoder.encode_string(text).tolist()
+
   def encode(
       self,
       text: str,
@@ -216,10 +250,10 @@ class Encoding:
       disallowed_special: DisallowedSpecial = "all",
   ) -> list[int]:
     self._raise_if_disallowed(text, allowed_special, disallowed_special)
-    return self._encoder.encode_string(text).tolist()
+    return self._encode_impl(text, allowed_special)
 
   def encode_ordinary(self, text: str) -> list[int]:
-    return self._encoder.encode_string(text).tolist()
+    return self._ordinary_encoder.encode_string(text).tolist()
 
   def encode_to_numpy(
       self,
@@ -229,7 +263,9 @@ class Encoding:
       disallowed_special: DisallowedSpecial = "all",
   ) -> IdxArray:
     self._raise_if_disallowed(text, allowed_special, disallowed_special)
-    return self._encoder.encode_string(text)
+    if allowed_special == "all" or set(allowed_special):
+      return self._encoder.encode_string(text)
+    return self._ordinary_encoder.encode_string(text)
 
   def encode_single_token(self, text_or_bytes: str | bytes) -> int:
     token = text_or_bytes.encode("utf-8") if isinstance(text_or_bytes, str) else text_or_bytes
@@ -315,6 +351,8 @@ class Encoding:
 
 def _fixture_encoding(name: str) -> Encoding:
   root = Path.cwd()
+  if not (root / "fixtures").exists():
+    root = Path(__file__).resolve().parents[2]
   vocab_file = root / f"fixtures/vocab.{name}.json"
   merges_file = root / f"fixtures/merges.{name}.txt"
   if not vocab_file.exists() or not merges_file.exists():
@@ -340,7 +378,10 @@ def encoding_name_for_model(model_name: str) -> str:
 
 
 def list_encoding_names() -> list[str]:
-  root = Path.cwd() / "fixtures"
+  root = Path.cwd()
+  if not (root / "fixtures").exists():
+    root = Path(__file__).resolve().parents[2]
+  root = root / "fixtures"
   names = []
   for vocab_file in root.glob("vocab.*.json"):
     name = vocab_file.name.removeprefix("vocab.").removesuffix(".json")
