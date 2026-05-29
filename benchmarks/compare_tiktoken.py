@@ -16,7 +16,7 @@ from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = REPO_ROOT / "fixtures" / "tinystories_sample_5M.txt"
-DEFAULT_PAT = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+DEFAULT_PAT = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"
 
 
 def bench(label: str, fn: Callable[[], Any], repeats: int) -> dict[str, Any]:
@@ -42,6 +42,7 @@ def load_unitoken_encoding(name: str) -> Encoding:
     vocab_file=REPO_ROOT / "fixtures" / f"vocab.{name}.json",
     merges_file=REPO_ROOT / "fixtures" / f"merges.{name}.txt",
     special_tokens={"<|endoftext|>": 0},
+    pat_str=DEFAULT_PAT,
   )
 
 
@@ -98,6 +99,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
   if upstream is not None:
     upstream_ids = upstream.encode(text, allowed_special="all")
+    results["same_tokens"] = unitoken_ids == upstream_ids
+    results["unitoken_tokens"] = len(unitoken_ids)
+    results["tiktoken_tokens"] = len(upstream_ids)
     results["benchmarks"].append(bench("tiktoken.encode", lambda: upstream.encode(text, allowed_special="all"), args.repeats))
     results["benchmarks"].append(bench("tiktoken.decode", lambda: upstream.decode(upstream_ids), args.repeats))
 

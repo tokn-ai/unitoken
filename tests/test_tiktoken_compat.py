@@ -1,7 +1,12 @@
 import unittest
+from pathlib import Path
 
 import tiktoken
 from uni_tokenizer import Encoding, list_encoding_names
+from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
+
+
+R50K_PAT = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"
 
 
 class TiktokenCompatTests(unittest.TestCase):
@@ -94,9 +99,8 @@ class TiktokenCompatTests(unittest.TestCase):
       b" ": 5,
       b"x": 6,
     }
-    pattern = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
-    ours = Encoding("toy", pat_str=pattern, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
-    theirs = tiktoken.Encoding("toy", pat_str=pattern, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
+    ours = Encoding("toy", pat_str=R50K_PAT, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
+    theirs = tiktoken.Encoding("toy", pat_str=R50K_PAT, mergeable_ranks=ranks, special_tokens={"<|endoftext|>": 7})
 
     for text in ["ab", "abc ab", "x ab"]:
       self.assertEqual(ours.encode(text), theirs.encode(text))
@@ -104,6 +108,26 @@ class TiktokenCompatTests(unittest.TestCase):
 
     self.assertEqual(ours.decode([4, 5, 3]), theirs.decode([4, 5, 3]))
     self.assertEqual(ours.decode_single_token_bytes(4), theirs.decode_single_token_bytes(4))
+
+  def test_matches_upstream_tiktoken_on_fixture_prefix(self) -> None:
+    root = Path(__file__).resolve().parents[1]
+    name = "tinystories_sample_5M"
+    text = (root / "fixtures" / f"{name}.txt").read_text(encoding="utf-8")[:50_000]
+    ours = Encoding.from_files(
+      name,
+      vocab_file=root / "fixtures" / f"vocab.{name}.json",
+      merges_file=root / "fixtures" / f"merges.{name}.txt",
+      special_tokens={"<|endoftext|>": 0},
+      pat_str=R50K_PAT,
+    )
+    theirs = tiktoken.Encoding(
+      name,
+      pat_str=R50K_PAT,
+      mergeable_ranks=_load_gpt2_vocab(root / "fixtures" / f"vocab.{name}.json"),
+      special_tokens={"<|endoftext|>": 0},
+    )
+
+    self.assertEqual(ours.encode(text, allowed_special="all"), theirs.encode(text, allowed_special="all"))
 
 
 if __name__ == "__main__":

@@ -321,6 +321,7 @@ fn new_bpe<C: Clone>(
   vocab_filename: Option<PathBuf>,
   merges_filename: Option<PathBuf>,
   special_tokens: Option<Vec<String>>,
+  pat_str: Option<String>,
   spec: &dyn Spec<C, Idx>,
 ) -> MyResult<BpeEncoderBase>
 where
@@ -342,6 +343,7 @@ where
     return Err(MyError::BpeBuilder("Either merges_filename or merges must be provided".to_string()));
   }
   builder= builder.set_special_tokens(special_tokens);
+  builder = builder.set_pat_str(pat_str);
   let bpe = builder.build(spec)?;
   Ok(BpeEncoderBase(Arc::new(bpe)))
 }
@@ -349,6 +351,7 @@ where
 #[pymethods]
 impl BpeEncoderBase {
   #[new]
+  #[pyo3(signature = (spec, char_level, vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str=None))]
   /// Create a Python BPE encoder.
   ///
   /// The encoder can be created from in-memory `vocabs`/`merges` or from file paths.
@@ -361,12 +364,13 @@ impl BpeEncoderBase {
     vocab_filename: Option<PathBuf>,
     merges_filename: Option<PathBuf>,
     special_tokens: Option<Vec<String>>,
+    pat_str: Option<String>,
   ) -> PyResult<Self> {
     py.detach(||
       match (spec, char_level) {
-        ("gpt2", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &Gpt2Spec),
-        ("uni", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &UniSpec),
-        ("uni", "char") => new_bpe::<Character>(vocabs, merges, vocab_filename, merges_filename, special_tokens, &UniSpec),
+        ("gpt2", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &Gpt2Spec),
+        ("uni", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &UniSpec),
+        ("uni", "char") => new_bpe::<Character>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &UniSpec),
         _ => Err(MyError::SpecError(format!("spec {spec} not compatibale with {char_level}"))),
       }
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))

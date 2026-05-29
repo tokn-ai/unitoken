@@ -17,6 +17,7 @@ pub struct BpeBuilder<S = Vec<u8>> {
   pub merges_raw: Option<Vec<(S, S)>>,
   pub special_tokens: Option<Vec<String>>,
   pub vocab_size: Option<usize>,
+  pub pat_str: Option<String>,
 }
 
 impl<S> BpeBuilder<S> {
@@ -29,6 +30,7 @@ impl<S> BpeBuilder<S> {
       merges_raw: None,
       special_tokens: None,
       vocab_size: None,
+      pat_str: None,
     }
   }
 
@@ -100,6 +102,17 @@ impl<S> BpeBuilder<S> {
       ..self
     }
   }
+
+  #[must_use]
+  /// Set the regex pattern used by the pre-tokenizer.
+  ///
+  /// If unset, the crate's default GPT-2-style pattern is used.
+  pub fn set_pat_str(self, pat_str: Option<String>) -> Self {
+    Self {
+      pat_str,
+      ..self
+    }
+  }
 }
 
 impl BpeBuilder {
@@ -164,7 +177,7 @@ impl BpeBuilder {
       Vec::new()
     };
     let special_tokens = self.special_tokens.unwrap_or_else(|| BpeEncoder::get_special_tokens_from_vocab(&vocab).unwrap_or_default());
-    BpeEncoder::new(vocab, merges, special_tokens)
+    BpeEncoder::new_with_pat(vocab, merges, special_tokens, self.pat_str.as_deref())
   }
 }
 
@@ -266,6 +279,19 @@ where
   where
     C: Clone
   {
+    Self::new_with_pat(vocab, merges, special_tokens, None)
+  }
+
+  /// Construct an encoder from a vocab, merge table, and optional pre-tokenizer pattern.
+  pub fn new_with_pat(
+    vocab: BTreeMap<Idx, Word<C>>,
+    merges: Vec<((Idx, Idx), Idx)>,
+    special_tokens: Vec<String>,
+    pat_str: Option<&str>,
+  ) -> MyResult<Self>
+  where
+    C: Clone
+  {
     let vocab_rev = vocab
       .iter()
       .map(|(k, v)| (v.clone(), *k))
@@ -289,7 +315,7 @@ where
       Ok((tp, merge))
     }).collect::<MyResult<_>>()?;
     let end_of_text = special_tokens.first().cloned();
-    let pre_tokenizer = PreTokenizer::new(&special_tokens, end_of_text.as_deref());
+    let pre_tokenizer = PreTokenizer::try_new(&special_tokens, end_of_text.as_deref(), pat_str)?;
     let special_tokens = special_tokens.into_iter().map(|s| {
       let w = s.to_word();
       let idx = *vocab_rev.get(&w).ok_or_else(|| MyError::Oov(w.debug_display()))?;

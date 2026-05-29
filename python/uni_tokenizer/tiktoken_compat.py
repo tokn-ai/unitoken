@@ -125,6 +125,7 @@ class Encoding:
         special_tokens=list(self._special_tokens),
         merges=merges,
         vocabs=vocabs,
+        pat_str=pat_str,
       )
     if _ordinary_encoder is not None:
       self._ordinary_encoder = _ordinary_encoder
@@ -136,6 +137,7 @@ class Encoding:
         special_tokens=[],
         merges=merges,
         vocabs=vocabs,
+        pat_str=pat_str,
       )
 
     if explicit_n_vocab is not None and self.n_vocab != explicit_n_vocab:
@@ -151,6 +153,7 @@ class Encoding:
       special_tokens: Mapping[str, int] | None = None,
       ch: Literal["u8", "char"] = "u8",
       output_format: Literal["gpt2", "uni"] | None = None,
+      pat_str: str | None = None,
   ) -> "Encoding":
     spec = output_format or ("uni" if ch == "char" else "gpt2")
     if spec != "gpt2":
@@ -160,6 +163,7 @@ class Encoding:
         special_tokens=list(special_tokens or {}),
         merges_file=merges_file,
         vocabs_file=vocab_file,
+        pat_str=pat_str,
       )
       ordinary_encoder = BpeEncoder.load(
         ch=ch,
@@ -167,6 +171,7 @@ class Encoding:
         special_tokens=[],
         merges_file=merges_file,
         vocabs_file=vocab_file,
+        pat_str=pat_str,
       )
       return cls(name, special_tokens=special_tokens, ch=ch, output_format=spec, _encoder=encoder, _ordinary_encoder=ordinary_encoder)
 
@@ -181,6 +186,7 @@ class Encoding:
       special_tokens=list(special_tokens or {}),
       merges_file=merges_file,
       vocabs_file=vocab_file,
+      pat_str=pat_str,
     )
     ordinary_encoder = BpeEncoder.load(
       ch=ch,
@@ -188,6 +194,7 @@ class Encoding:
       special_tokens=[],
       merges_file=merges_file,
       vocabs_file=vocab_file,
+      pat_str=pat_str,
     )
     return cls(
       name,
