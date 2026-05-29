@@ -55,6 +55,19 @@ class TiktokenCompatTests(unittest.TestCase):
 
     self.assertEqual(batch, [[3], [4]])
     self.assertEqual(enc.decode_batch(batch, num_threads=1), ["ab", "abc"])
+    self.assertEqual(enc.encode_ordinary_batch(["ab", "abc"], num_threads=1), [[3], [4]])
+    self.assertEqual(enc.decode_bytes_batch(batch, num_threads=1), [b"ab", b"abc"])
+
+  def test_extra_encoding_helpers(self) -> None:
+    enc = self.make_encoding()
+
+    self.assertEqual(enc.eot_token, 7)
+    self.assertTrue(enc.is_special_token(7))
+    self.assertFalse(enc.is_special_token(4))
+    self.assertEqual(enc.encode_to_numpy("ab").tolist(), [3])
+    self.assertEqual(enc.encode_with_unstable("ab"), ([3], []))
+    self.assertEqual(enc.decode_with_offsets([4, 5, 3]), ("abc ab", [0, 3, 4]))
+    self.assertIn(b"abc", enc.token_byte_values())
 
 
 if __name__ == "__main__":

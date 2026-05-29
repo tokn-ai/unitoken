@@ -179,6 +179,10 @@ class Encoding:
     return set(self._special_tokens_set)
 
   @property
+  def eot_token(self) -> int:
+    return self._special_tokens["<|endoftext|>"]
+
+  @property
   def n_vocab(self) -> int:
     if self._token_bytes:
       return max(self._token_bytes) + 1
@@ -217,6 +221,16 @@ class Encoding:
   def encode_ordinary(self, text: str) -> list[int]:
     return self._encoder.encode_string(text).tolist()
 
+  def encode_to_numpy(
+      self,
+      text: str,
+      *,
+      allowed_special: AllowedSpecial = set(),
+      disallowed_special: DisallowedSpecial = "all",
+  ) -> IdxArray:
+    self._raise_if_disallowed(text, allowed_special, disallowed_special)
+    return self._encoder.encode_string(text)
+
   def encode_single_token(self, text_or_bytes: str | bytes) -> int:
     token = text_or_bytes.encode("utf-8") if isinstance(text_or_bytes, str) else text_or_bytes
     for idx, candidate in self._token_bytes.items():
@@ -236,6 +250,21 @@ class Encoding:
       return [self.encode(s, allowed_special=allowed_special, disallowed_special=disallowed_special) for s in text]
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
       return list(executor.map(lambda s: self.encode(s, allowed_special=allowed_special, disallowed_special=disallowed_special), text))
+
+  def encode_ordinary_batch(self, text: Sequence[str], *, num_threads: int = 8) -> list[list[int]]:
+    if num_threads <= 1:
+      return [self.encode_ordinary(s) for s in text]
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+      return list(executor.map(self.encode_ordinary, text))
+
+  def encode_with_unstable(
+      self,
+      text: str,
+      *,
+      allowed_special: AllowedSpecial = set(),
+      disallowed_special: DisallowedSpecial = "all",
+  ) -> tuple[list[int], list[list[int]]]:
+    return self.encode(text, allowed_special=allowed_special, disallowed_special=disallowed_special), []
 
   def decode(self, tokens: Sequence[int], errors: str = "replace") -> str:
     if errors == "replace":
@@ -259,6 +288,29 @@ class Encoding:
       return [self.decode(tokens, errors=errors) for tokens in batch]
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
       return list(executor.map(lambda tokens: self.decode(tokens, errors=errors), batch))
+
+  def decode_bytes_batch(self, batch: Sequence[Sequence[int]], *, num_threads: int = 8) -> list[bytes]:
+    if num_threads <= 1:
+      return [self.decode_bytes(tokens) for tokens in batch]
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+      return list(executor.map(self.decode_bytes, batch))
+
+  def decode_with_offsets(self, tokens: Sequence[int]) -> tuple[str, list[int]]:
+    offsets = []
+    pieces = []
+    char_count = 0
+    for token in tokens:
+      offsets.append(char_count)
+      piece = self.decode_single_token_bytes(token).decode("utf-8", "replace")
+      pieces.append(piece)
+      char_count += len(piece)
+    return "".join(pieces), offsets
+
+  def token_byte_values(self) -> list[bytes]:
+    return [self._token_bytes[idx] for idx in sorted(self._token_bytes)]
+
+  def is_special_token(self, token: int) -> bool:
+    return token in set(self._special_tokens.values())
 
 
 def _fixture_encoding(name: str) -> Encoding:
