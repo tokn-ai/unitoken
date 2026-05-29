@@ -412,6 +412,14 @@ impl BpeEncoderBase {
     }
   }
 
+  #[pyo3(name = "encode_string_to_list")]
+  /// Encode an arbitrary string into a Python list of token ids.
+  pub fn py_encode_string_to_list(&self, py: Python, s: &str) -> PyResult<Vec<Idx>> {
+    py.detach(|| {
+      self.0.encode_string(s)
+    }).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+  }
+
   #[pyo3(name = "encode_file")]
   /// Encode a file into a NumPy `uint32` array of token ids.
   pub fn py_encode_file<'py>(&self, py: Python<'py>, path: PathBuf, num_chunks: usize) -> PyResult<Bound<'py, PyArray1<Idx>>> {

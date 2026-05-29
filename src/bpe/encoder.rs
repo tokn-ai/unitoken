@@ -186,6 +186,7 @@ pub struct BpeEncoder<C = u8> {
   pub vocab_bytes: BTreeMap<C, Idx>,
   pub vocab_rev: BTreeMap<Word<C>, Idx>,
   pub vocab: BTreeMap<Idx, Word<C>>,
+  pub decode_vocab_bytes: Vec<Box<[u8]>>,
   pub special_tokens: BTreeMap<String, Idx>,
   pub pre_tokenizer: PreTokenizer,
   pub merges: Vec<((Idx, Idx), Idx)>,
@@ -198,7 +199,7 @@ pub struct BpeEncoder<C = u8> {
 impl<C: Ord + Cachable> BpeEncoder<C>
 where
   Word<C>: WordDebugExt,
-  C: CanStrToWord,
+  C: CanStrToWord + CharSplit,
 {
   // fn _load_vocab<R: std::io::Read>(spec: &dyn Spec<C, Idx>, mut reader: R) -> MyResult<BTreeMap<Idx, Word<C>>> {
   //   spec.decode_vocab(&mut reader)
@@ -314,6 +315,10 @@ where
       merge.add(0, -(i as Freq));
       Ok((tp, merge))
     }).collect::<MyResult<_>>()?;
+    let mut decode_vocab_bytes = vec![Box::<[u8]>::default(); vocab.keys().max().map(|idx| *idx as usize + 1).unwrap_or_default()];
+    for (idx, word) in &vocab {
+      decode_vocab_bytes[*idx as usize] = CharSplit::to_vec_u8(word).into_boxed_slice();
+    }
     let end_of_text = special_tokens.first().cloned();
     let pre_tokenizer = PreTokenizer::try_new(&special_tokens, end_of_text.as_deref(), pat_str)?;
     let special_tokens = special_tokens.into_iter().map(|s| {
@@ -326,6 +331,7 @@ where
       vocab_bytes,
       vocab_rev,
       vocab,
+      decode_vocab_bytes,
       merges,
       pre_merge_map,
       special_tokens,
@@ -477,28 +483,37 @@ where
     let tokens_num = tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
     let special_tokens_num = special_tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
     let total = tokens_num + special_tokens_num;
-    let mut result: Vec<&[Idx]> = vec![&[]; total];
+    let mut result: Vec<Option<usize>> = vec![None; total];
+    let mut pieces: Vec<Word<Idx>> = Vec::with_capacity(tokens_index.len() + special_tokens_index.len());
 
-    let output = self.encode_words_impl(tokens_index.keys())?;
-    for (doc_idxs, w) in tokens_index.values().zip(output.iter()) {
+    for (token, doc_idxs) in tokens_index {
+      let w = self.encode_word(token)?;
+      let piece_idx = pieces.len();
+      pieces.push(w);
       for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = &w;
+        result[*doc_idx] = Some(piece_idx);
       }
     }
 
-    let special_output = special_tokens_index.iter()
-      .map(|(token, _)| {
-        let idx = self.special_tokens.get(*token).ok_or_else(|| MyError::Oov(token.to_string()))?;
-        Ok([*idx])
-      })
-      .collect::<MyResult<Vec<_>>>()?;
-    for ((_token, doc_idxs), w) in special_tokens_index.iter().zip(special_output.iter()) {
+    for (token, doc_idxs) in special_tokens_index {
+      let idx = self.special_tokens.get(*token).ok_or_else(|| MyError::Oov(token.to_string()))?;
+      let w = Arc::<[Idx]>::from(vec![*idx].into_boxed_slice());
+      let piece_idx = pieces.len();
+      pieces.push(w);
       for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = w.as_slice();
+        result[*doc_idx] = Some(piece_idx);
       }
     }
 
-    let final_result = result.into_iter().map(|w| w.to_vec()).flatten().collect::<Vec<_>>();
+    let final_len = result
+      .iter()
+      .map(|piece_idx| piece_idx.map(|i| pieces[i].len()).unwrap_or_default())
+      .sum();
+    let mut final_result = Vec::with_capacity(final_len);
+    for piece_idx in result {
+      let piece_idx = piece_idx.ok_or_else(|| MyError::BpeBuilder("encoded token position was not filled".to_string()))?;
+      final_result.extend_from_slice(&pieces[piece_idx]);
+    }
     Ok(final_result)
   }
 
@@ -632,14 +647,15 @@ where
   ///
   /// This concatenates decoded token bytes and performs a lossy UTF-8 conversion.
   pub fn decode(&self, idxs: &[Idx]) -> MyResult<String> {
-    let words = self._decode(idxs)?;
-    let mut result = Vec::new();
-    for word in words {
-      for c in word.iter() {
-        c.char_split_u8(&mut result);
-      }
+    let mut result = Vec::with_capacity(idxs.len().saturating_mul(4));
+    for idx in idxs {
+      let bytes = self.decode_vocab_bytes
+        .get(*idx as usize)
+        .filter(|bytes| !bytes.is_empty())
+        .ok_or_else(|| MyError::OovIdx(idx.to_u64()))?;
+      result.extend_from_slice(bytes);
     }
-    Ok(String::from_utf8_lossy(&result).to_string())
+    Ok(String::from_utf8(result).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string()))
   }
 }
 

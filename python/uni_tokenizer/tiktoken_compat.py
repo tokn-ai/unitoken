@@ -249,10 +249,10 @@ class Encoding:
 
   def _encode_impl(self, text: str, allowed_special: AllowedSpecial) -> list[int]:
     if allowed_special == "all":
-      return self._encoder.encode_string(text).tolist()
+      return self._encoder.encode_string_to_list(text)
     if not set(allowed_special):
-      return self._ordinary_encoder.encode_string(text).tolist()
-    return self._encoder.encode_string(text).tolist()
+      return self._ordinary_encoder.encode_string_to_list(text)
+    return self._encoder.encode_string_to_list(text)
 
   def encode(
       self,
@@ -265,7 +265,7 @@ class Encoding:
     return self._encode_impl(text, allowed_special)
 
   def encode_ordinary(self, text: str) -> list[int]:
-    return self._ordinary_encoder.encode_string(text).tolist()
+    return self._ordinary_encoder.encode_string_to_list(text)
 
   def encode_to_numpy(
       self,

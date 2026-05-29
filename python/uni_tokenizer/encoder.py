@@ -121,6 +121,10 @@ class BpeEncoder:
     """Encode an arbitrary string into a NumPy array of token ids."""
     return self._encoder.encode_string(s)
 
+  def encode_string_to_list(self, /, s: str) -> list[int]:
+    """Encode an arbitrary string into a Python list of token ids."""
+    return self._encoder.encode_string_to_list(s)
+
   def encode_file(self, /, path: str | PathLike, num_chunks: int = 1024) -> IdxArray:
     """Encode a text file into a NumPy array of token ids.
 
