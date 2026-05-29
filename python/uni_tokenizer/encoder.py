@@ -31,6 +31,7 @@ class BpeEncoder:
       special_tokens: Sequence[str] | None = None,
       merges: list[tuple[bytes, bytes]] | None = None,
       vocabs: dict[bytes, int] | None = None,
+      pat_str: str | None = None,
       _encoder: BpeEncoderBase | None = None,
   ) -> None:
     self.char_level = ch
@@ -46,6 +47,7 @@ class BpeEncoder:
         merges=merges,
         vocabs=cast(dict[Sequence[int], int], vocabs),
         special_tokens=special_tokens,
+        pat_str=pat_str,
       )
 
   @classmethod
@@ -59,6 +61,7 @@ class BpeEncoder:
     input_dir: str | PathLike | None = None,
     merges_file: str | PathLike | None = None,
     vocabs_file: str | PathLike | None = None,
+    pat_str: str | None = None,
   ) -> "BpeEncoder":
     """Load an encoder from vocab/merge files.
 
@@ -102,6 +105,7 @@ class BpeEncoder:
         merges=None,
         vocabs=None,
         special_tokens=special_tokens,
+        pat_str=pat_str,
       ),
     )
 

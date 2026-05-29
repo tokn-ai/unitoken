@@ -33,6 +33,43 @@ enc = BpeEncoder.load("demo")
 ids = enc.encode_word("hello")
 ```
 
+Tiktoken-compatible API
+-----------------------
+
+`unitoken` also exposes a tiktoken-shaped Python API:
+
+```python
+from uni_tokenizer import Encoding
+
+enc = Encoding.from_files(
+  "demo",
+  vocab_file="vocab.demo[u8].json",
+  merges_file="merges.demo[u8].txt",
+  special_tokens={"<|endoftext|>": 0},
+)
+
+ids = enc.encode("hello world")
+text = enc.decode(ids)
+```
+
+The package also includes a `uni_tokenizer.tiktoken` namespace with `Encoding`,
+`get_encoding`, `encoding_for_model`, `encoding_name_for_model`, and
+`list_encoding_names`. Built-in registry names are limited to local unitoken
+fixture models for now; use `Encoding.from_files(...)` for trained models.
+
+Benchmark against tiktoken
+--------------------------
+
+Install the dev dependency and run:
+
+```bash
+uv pip install "tiktoken>=0.12.0"
+python benchmarks/compare_tiktoken.py
+```
+
+The benchmark reports unitoken encode/decode timings and, when upstream
+`tiktoken` is importable, matching upstream timings.
+
 Building from source
 --------------------
 
