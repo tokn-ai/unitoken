@@ -12,6 +12,13 @@ AllowedSpecial = Literal["all"] | set[str]
 DisallowedSpecial = Literal["all"] | Collection[str]
 
 
+def raise_disallowed_special_token(token: str) -> None:
+  raise ValueError(
+    f"Encountered text corresponding to disallowed special token {token!r}. "
+    "Pass allowed_special to allow it, or disallowed_special=() to disable this check."
+  )
+
+
 def _byte_encoder() -> dict[int, str]:
   chars = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
   result = chars[:]
@@ -237,10 +244,7 @@ class Encoding:
   def _raise_if_disallowed(self, text: str, allowed_special: AllowedSpecial, disallowed_special: DisallowedSpecial) -> None:
     for token in self._collect_disallowed(allowed_special, disallowed_special):
       if token in text:
-        raise ValueError(
-          f"Encountered text corresponding to disallowed special token {token!r}. "
-          "Pass allowed_special to allow it, or disallowed_special=() to disable this check."
-        )
+        raise_disallowed_special_token(token)
 
   def _encode_impl(self, text: str, allowed_special: AllowedSpecial) -> list[int]:
     if allowed_special == "all":

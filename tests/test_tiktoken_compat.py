@@ -42,6 +42,17 @@ class TiktokenCompatTests(unittest.TestCase):
     if getattr(tiktoken.Encoding, "__module__", "").startswith("uni_tokenizer"):
       self.assertIs(tiktoken.Encoding, Encoding)
 
+  def test_tiktoken_shim_submodules(self) -> None:
+    import tiktoken.core
+    import tiktoken.model
+    import tiktoken.registry
+
+    if getattr(tiktoken.core.Encoding, "__module__", "").startswith("uni_tokenizer"):
+      self.assertIs(tiktoken.core.Encoding, Encoding)
+      self.assertIs(tiktoken.model.Encoding, Encoding)
+      self.assertIs(tiktoken.registry.Encoding, Encoding)
+      self.assertTrue(callable(tiktoken.core.raise_disallowed_special_token))
+
   def test_encode_decode_round_trip(self) -> None:
     enc = self.make_encoding()
 
