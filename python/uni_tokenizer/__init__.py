@@ -1,6 +1,13 @@
 from .trainer import BpeTrainer
 from .encoder import BpeEncoder
 from ._lib import PreTokenizer, Vocabs
+from .tiktoken_compat import (
+  Encoding,
+  encoding_for_model,
+  encoding_name_for_model,
+  get_encoding,
+  list_encoding_names,
+)
 
 try:
   from importlib.metadata import version as _pkg_version
@@ -11,7 +18,12 @@ except Exception:  # pragma: no cover
 __all__ = [
   "BpeTrainer",
   "BpeEncoder",
+  "Encoding",
   "PreTokenizer",
   "Vocabs",
+  "encoding_for_model",
+  "encoding_name_for_model",
+  "get_encoding",
+  "list_encoding_names",
   "__version__",
 ]
