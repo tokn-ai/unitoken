@@ -1,4 +1,5 @@
 use std::{collections::{BTreeMap, HashMap}, io::BufWriter, path::Path, usize};
+use std::collections::hash_map::Entry;
 
 use moka::sync::Cache;
 use npyz::WriterBuilder;
@@ -6,7 +7,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use crate::{
   MyError, MyResult,
-  pretokenizer::{_read_file_to_buffer, PreTokenizer}, spec::Spec, traits::{CanEncode, CanStrToWord, Decode, Encode},
+  pretokenizer::{_read_file_to_buffer, split_special_tokens, PreTokenizer, SplitChunk}, spec::Spec, traits::{CanEncode, CanStrToWord, Decode, Encode},
 };
 
 use super::*;
@@ -186,6 +187,7 @@ pub struct BpeEncoder<C = u8> {
   pub vocab_bytes: BTreeMap<C, Idx>,
   pub vocab_rev: BTreeMap<Word<C>, Idx>,
   pub vocab: BTreeMap<Idx, Word<C>>,
+  pub decode_vocab_bytes: Vec<Box<[u8]>>,
   pub special_tokens: BTreeMap<String, Idx>,
   pub pre_tokenizer: PreTokenizer,
   pub merges: Vec<((Idx, Idx), Idx)>,
@@ -198,7 +200,7 @@ pub struct BpeEncoder<C = u8> {
 impl<C: Ord + Cachable> BpeEncoder<C>
 where
   Word<C>: WordDebugExt,
-  C: CanStrToWord,
+  C: CanStrToWord + CharSplit,
 {
   // fn _load_vocab<R: std::io::Read>(spec: &dyn Spec<C, Idx>, mut reader: R) -> MyResult<BTreeMap<Idx, Word<C>>> {
   //   spec.decode_vocab(&mut reader)
@@ -314,6 +316,10 @@ where
       merge.add(0, -(i as Freq));
       Ok((tp, merge))
     }).collect::<MyResult<_>>()?;
+    let mut decode_vocab_bytes = vec![Box::<[u8]>::default(); vocab.keys().max().map(|idx| *idx as usize + 1).unwrap_or_default()];
+    for (idx, word) in &vocab {
+      decode_vocab_bytes[*idx as usize] = CharSplit::to_vec_u8(word).into_boxed_slice();
+    }
     let end_of_text = special_tokens.first().cloned();
     let pre_tokenizer = PreTokenizer::try_new(&special_tokens, end_of_text.as_deref(), pat_str)?;
     let special_tokens = special_tokens.into_iter().map(|s| {
@@ -326,6 +332,7 @@ where
       vocab_bytes,
       vocab_rev,
       vocab,
+      decode_vocab_bytes,
       merges,
       pre_merge_map,
       special_tokens,
@@ -472,33 +479,55 @@ where
     Ok(words.into_iter().next().unwrap().idxs.to_word())
   }
 
-  // #[hotpath::measure]
-  fn encode_tokens_index(&self, tokens_index: &HashMap<&str, Vec<usize>>, special_tokens_index: &HashMap<&str, Vec<usize>>) -> MyResult<Vec<Idx>> {
-    let tokens_num = tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
-    let special_tokens_num = special_tokens_index.iter().map(|(_, doc_idxs)| doc_idxs.len()).sum::<usize>();
-    let total = tokens_num + special_tokens_num;
-    let mut result: Vec<&[Idx]> = vec![&[]; total];
+  fn encode_string_ordered(&self, input: &str) -> MyResult<Vec<Idx>> {
+    let parts = split_special_tokens(input, &self.pre_tokenizer.re_special_tokens)?;
+    let mut piece_by_token: ahash::AHashMap<&str, usize> = ahash::AHashMap::default();
+    let mut pieces: Vec<Word<Idx>> = Vec::new();
+    let mut ordered_pieces = Vec::with_capacity(input.len() / 4);
+    let mut final_len = 0;
 
-    let output = self.encode_words_impl(tokens_index.keys())?;
-    for (doc_idxs, w) in tokens_index.values().zip(output.iter()) {
-      for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = &w;
+    for part in parts {
+      match part {
+        SplitChunk::Special(token) => {
+          let piece_idx = if let Some(existing) = piece_by_token.get(token).copied() {
+            existing
+          } else {
+            let idx = self.special_tokens.get(token).ok_or_else(|| MyError::Oov(token.to_string()))?;
+            let piece_idx = pieces.len();
+            pieces.push(Arc::<[Idx]>::from(vec![*idx].into_boxed_slice()));
+            piece_by_token.insert(token, piece_idx);
+            piece_idx
+          };
+          final_len += 1;
+          ordered_pieces.push(piece_idx);
+        }
+        SplitChunk::Chunk(chunk) => {
+          for token in self.pre_tokenizer.re_pat.find_iter(chunk) {
+            let token = token?;
+            let token = token.as_str();
+            let piece_idx = match piece_by_token.entry(token) {
+              Entry::Occupied(entry) => *entry.get(),
+              Entry::Vacant(entry) => {
+                let w = self.encode_word(token)?;
+                let piece_idx = pieces.len();
+                final_len += w.len();
+                pieces.push(w);
+                entry.insert(piece_idx);
+                ordered_pieces.push(piece_idx);
+                continue;
+              }
+            };
+            final_len += pieces[piece_idx].len();
+            ordered_pieces.push(piece_idx);
+          }
+        }
       }
     }
 
-    let special_output = special_tokens_index.iter()
-      .map(|(token, _)| {
-        let idx = self.special_tokens.get(*token).ok_or_else(|| MyError::Oov(token.to_string()))?;
-        Ok([*idx])
-      })
-      .collect::<MyResult<Vec<_>>>()?;
-    for ((_token, doc_idxs), w) in special_tokens_index.iter().zip(special_output.iter()) {
-      for doc_idx in doc_idxs.iter() {
-        result[*doc_idx] = w.as_slice();
-      }
+    let mut final_result = Vec::with_capacity(final_len);
+    for piece_idx in ordered_pieces {
+      final_result.extend_from_slice(&pieces[piece_idx]);
     }
-
-    let final_result = result.into_iter().map(|w| w.to_vec()).flatten().collect::<Vec<_>>();
     Ok(final_result)
   }
 
@@ -577,6 +606,11 @@ where
     if let Some(result) = self.cache.get(input) {
       return Ok(result);
     }
+    if let Some(idx) = self.vocab_rev.get(&input.to_word()) {
+      let result = Arc::<[Idx]>::from(vec![*idx].into_boxed_slice());
+      self.cache.insert(input.to_string(), result.clone());
+      return Ok(result);
+    }
     let result = self._encode_word(&input.to_word())?;
     self.cache.insert(input.to_string(), result.clone());
     Ok(result)
@@ -588,8 +622,7 @@ where
 
   #[hotpath::measure]
   fn encode_string(&self, input: &str) -> MyResult<Vec<Idx>> {
-    let (tokens_index, special_tokens_index) = self.pre_tokenizer.get_tokens_index_from_segment(input)?;
-    self.encode_tokens_index(&tokens_index, &special_tokens_index)
+    self.encode_string_ordered(input)
   }
 
   fn encode_file(
@@ -632,14 +665,15 @@ where
   ///
   /// This concatenates decoded token bytes and performs a lossy UTF-8 conversion.
   pub fn decode(&self, idxs: &[Idx]) -> MyResult<String> {
-    let words = self._decode(idxs)?;
-    let mut result = Vec::new();
-    for word in words {
-      for c in word.iter() {
-        c.char_split_u8(&mut result);
-      }
+    let mut result = Vec::with_capacity(idxs.len().saturating_mul(4));
+    for idx in idxs {
+      let bytes = self.decode_vocab_bytes
+        .get(*idx as usize)
+        .filter(|bytes| !bytes.is_empty())
+        .ok_or_else(|| MyError::OovIdx(idx.to_u64()))?;
+      result.extend_from_slice(bytes);
     }
-    Ok(String::from_utf8_lossy(&result).to_string())
+    Ok(String::from_utf8(result).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string()))
   }
 }
 

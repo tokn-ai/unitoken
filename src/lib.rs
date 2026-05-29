@@ -39,16 +39,3 @@ pub enum MyError {
 }
 
 pub type MyResult<T> = Result<T, MyError>;
-
-#[cfg(test)]
-#[allow(dead_code)]
-mod tests {
-  pub enum TestData {
-    /// fixtures/tinystories_sample_5M.txt
-    TinyStories5M,
-    /// fixtures/_words.TinyStoriesV2-GPT4-train.json
-    TinyStroies,
-    /// https://huggingface.co/datasets/52AI/TinyStoriesZh
-    TinyStoriesZh
-  }
-}

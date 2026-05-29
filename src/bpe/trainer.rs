@@ -254,7 +254,7 @@ where
   /// This re-encodes indices into the concrete `Idx` type used by encoders.
   pub fn finish(self) -> MyResult<BpeEncoder<C>>
   where
-    C: Ord + Clone + Cachable,
+    C: Ord + Clone + Cachable + CharSplit,
   {
     let merges = self.merges
       .into_iter()
