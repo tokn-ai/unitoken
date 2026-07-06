@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap}, sync::atomic::AtomicU64};
+use std::{cmp::Reverse, collections::{BTreeMap, HashMap}, sync::atomic::AtomicU64};
 
 use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
@@ -202,21 +202,21 @@ where
     _merge(&mut self.words, merge, target_idx)
   }
 
-  fn _get_largest_merge(&self) -> Option<Merge<C, I>> where C: Ord {
+  fn _get_largest_merge(&self) -> Option<Merge<C, I>> {
     self
       .pre_merges
       .values()
-      .max_by_key(|m| (m.data.freq, &m.content))
+      .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
       .cloned()
   }
 
-  fn _get_largest_merge2(&self) -> Option<Merge<C, I>> where C: Ord + Send + Sync + 'static {
+  fn _get_largest_merge2(&self) -> Option<Merge<C, I>> where C: Send + Sync {
     use rayon::prelude::*;
     self
       .pre_merges
       .par_iter()
       .map(|(_, m)| m)
-      .max_by_key(|m| (m.data.freq, &m.content))
+      .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
       .cloned()
   }
 
@@ -300,8 +300,8 @@ where
   }
 
   fn step(&mut self) -> MyResult<()> {
-    // find the most frequent merge,
-    // if the frequency is the same, choose the lexicographically largest one.
+    // Find the most frequent merge. Hugging Face's BPE trainer resolves equal
+    // frequencies by choosing the smallest pair ids, so keep that ordering here.
     let merge = if self.pre_merges.len() < 100_000 {
       self._get_largest_merge()
     } else {
@@ -451,6 +451,21 @@ mod tests {
         ("b".to_string(), "abc".to_string(), 230),
       ]
     );
+  }
+
+  #[test]
+  fn test_bpe_step_tie_breaks_by_smallest_pair_id() {
+    let mut bpe = BpeTrainer::<u8, Idx>::from_words(vec![
+      ("ab", 1),
+      ("cd", 1),
+    ], &vec![]);
+    bpe.init_training();
+
+    bpe.step().unwrap();
+
+    let merge = bpe.merges.last().unwrap();
+    assert_eq!(merge.content.0.debug_display(), "a");
+    assert_eq!(merge.content.1.debug_display(), "b");
   }
 
   #[test]
