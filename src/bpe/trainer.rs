@@ -114,10 +114,20 @@ where
     C: CharToIdx<I>,
     I: HasChar<C>,
   {
+    Self::from_words_with_config(words, special_tokens, BpeTrainerConfig::default())
+  }
+
+  pub fn from_words_with_config<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(
+    words: Iter, special_tokens: &[String], config: BpeTrainerConfig,
+  ) -> Self
+  where
+    C: CharToIdx<I>,
+    I: HasChar<C>,
+  {
     let vocab_start_idx = special_tokens.len() as u64;
     let sp_set = special_tokens.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let tokens = Self::_words_to_tokens(words, vocab_start_idx, &sp_set, None);
-    Self::new(tokens, special_tokens.to_vec())
+    Self::new_with_config(tokens, special_tokens.to_vec(), config)
   }
 
   /// Create a trainer from already pre-tokenized words.
@@ -638,7 +648,14 @@ mod tests {
     let spec = crate::spec::uni::UniSpec;
     let input = std::fs::read_to_string(format!("fixtures/_words.{NAME}.json")).unwrap();
     let words: BTreeMap<String, Freq> = serde_json::from_str(&input).unwrap();
-    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(words, &vec![DEFAULT_EOT.to_string()]);
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+      words,
+      &vec![DEFAULT_EOT.to_string()],
+      BpeTrainerConfig {
+        initial_alphabet: InitialAlphabet::RawBytes,
+        tie_break: TieBreak::LargestContent,
+      },
+    );
     bpe.init_training();
     let vocab_size = match NAME {
       "tinystories_sample_5M" | "TinyStories_all_data_zh_1M-sample" => 2000,

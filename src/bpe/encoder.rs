@@ -760,7 +760,7 @@ mod tests {
       format!("fixtures/{NAME}.txt").as_ref(),
       1,
     ).unwrap();
-    assert_eq!(result.len(), 886836);
+    assert_eq!(result.len(), 886572);
     let decoded = bpe.decode(&result).unwrap();
     let input = std::fs::read_to_string(format!("fixtures/{NAME}.txt")).unwrap();
     assert_eq!(decoded.len(), 5292796);
