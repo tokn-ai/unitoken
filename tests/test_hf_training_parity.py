@@ -46,7 +46,7 @@ def _train_hf_from_words(words: list[tuple[str, int]], vocab_size: int) -> dict[
 
 
 def _train_ours_from_words(words: list[tuple[str, int]], vocab_size: int) -> dict[str, int]:
-  trainer = BpeTrainer(["<|endoftext|>"], ch="u8")
+  trainer = BpeTrainer(["<|endoftext|>"], ch="u8", initial_alphabet="byte_level")
   trainer.add_words(words)
   trainer.train(vocab_size)
   return {
@@ -75,31 +75,6 @@ def test_bpe_training_learned_tokens_match_hugging_face_on_5m_fixture() -> None:
   ours_vocab = _train_ours_from_words(words, 2000)
   hf_vocab = _train_hf_from_words(words, 2000)
 
-  ours_learned = {token: rank for token, rank in ours_vocab.items() if rank > 256}
-  hf_learned = {token: rank for token, rank in hf_vocab.items() if rank > 256}
-
-  assert set(ours_learned) == set(hf_learned)
-  assert ours_learned["he"] == hf_learned["he"] == 257
-  assert ours_learned["Ġthe"] == hf_learned["Ġthe"] == 263
-
-  rank_diffs = {
-    token: (ours_learned[token], hf_learned[token])
-    for token in ours_learned
-    if ours_learned[token] != hf_learned[token]
-  }
-  assert rank_diffs == {
-    "ĠOne": (527, 528),
-    "round": (528, 527),
-    "Ġz": (1117, 1118),
-    "ble": (1118, 1117),
-    "ĠCan": (1163, 1164),
-    "Hell": (1164, 1163),
-    "Ġour": (1180, 1181),
-    "eet": (1181, 1180),
-    "Ġice": (1218, 1219),
-    "que": (1219, 1218),
-    "Ġowl": (1398, 1399),
-    "red": (1399, 1398),
-    "Ġve": (1649, 1650),
-    "sc": (1650, 1649),
-  }
+  assert ours_vocab == hf_vocab
+  assert ours_vocab["he"] == hf_vocab["he"] == 257
+  assert ours_vocab["Ġthe"] == hf_vocab["Ġthe"] == 263
