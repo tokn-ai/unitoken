@@ -1,10 +1,10 @@
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, sync::Arc};
 
 pub mod trainer;
 pub mod encoder;
 pub mod utils;
 
-pub use trainer::BpeTrainer;
+pub use trainer::{BpeTrainer, BpeTrainerConfig, InitialAlphabet, TieBreak};
 pub use encoder::BpeEncoder;
 use utils::*;
 
@@ -177,33 +177,43 @@ pub trait CharToIdx<I: IdxLike> {
   /// Convert a character or byte to an index.
   /// If the character is a byte, it will be converted to an index.
   /// If the character is a unicode character, it will be converted to a `CharIdx::Char`.
-  fn char_to_idx(&self, start: u64) -> I;
+  fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, I>>) -> I;
 }
 
 impl CharToIdx<Idx> for u8 {
-  fn char_to_idx(&self, start: u64) -> Idx {
+  fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, Idx>>) -> Idx {
+    if let Some(idx) = byte_vocab.and_then(|vocab| vocab.get(self)).copied() {
+      return idx;
+    }
     (*self as u64 + start) as Idx
   }
 }
 impl CharToIdx<CharIdx> for char {
-  fn char_to_idx(&self, start: u64) -> CharIdx {
+  fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, CharIdx>>) -> CharIdx {
     if self.is_ascii() {
-      CharIdx::Idx(*self as u8 as Idx + start as Idx)
+      let byte = *self as u8;
+      if let Some(idx) = byte_vocab.and_then(|vocab| vocab.get(&byte)).copied() {
+        return idx;
+      }
+      CharIdx::Idx(byte as Idx + start as Idx)
     } else {
       CharIdx::Char(*self)
     }
   }
 }
 impl CharToIdx<CharIdx> for u8 {
-  fn char_to_idx(&self, start: u64) -> CharIdx {
+  fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, CharIdx>>) -> CharIdx {
+    if let Some(idx) = byte_vocab.and_then(|vocab| vocab.get(self)).copied() {
+      return idx;
+    }
     CharIdx::Idx((*self as u64 + start) as Idx)
   }
 }
 impl CharToIdx<CharIdx> for Character {
-  fn char_to_idx(&self, start: u64) -> CharIdx {
+  fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, CharIdx>>) -> CharIdx {
     match self {
-      Character::Unicode(c) => c.char_to_idx(start),
-      Character::Byte(b) => b.char_to_idx(start),
+      Character::Unicode(c) => c.char_to_idx(start, byte_vocab),
+      Character::Byte(b) => b.char_to_idx(start, byte_vocab),
     }
   }
 }

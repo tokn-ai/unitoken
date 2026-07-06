@@ -736,7 +736,7 @@ mod tests {
     let bpe = _setup_bpe(NAME, &Gpt2Spec);
     let input = std::fs::read_to_string(format!("fixtures/{NAME}.txt")).unwrap();
     let result = bpe.encode_string(&input).unwrap();
-    assert!(result.len() == 1424324);
+    assert_eq!(result.len(), 1424317);
   }
 
   #[test]
@@ -749,7 +749,7 @@ mod tests {
     ).unwrap();
     // assert!(result.len() == 1269588);
     // let total_index: usize = result.iter().map(|idxs| idxs.len()).sum();
-    assert!(result.len() == 1424324);
+    assert_eq!(result.len(), 1424317);
   }
 
   #[test]

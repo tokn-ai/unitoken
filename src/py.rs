@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, CharIdx, CharSplit, Character, Idx, IdxLike, Word, encoder::BpeBuilder, utils::ToWord}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -43,6 +43,23 @@ pub trait BpeTrainerBaseImpl: Sized {
 //   Char,
 // }
 
+fn trainer_config(initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<BpeTrainerConfig> {
+  let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
+    "raw" => InitialAlphabet::RawBytes,
+    "byte_level" => InitialAlphabet::ByteLevel,
+    value => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown initial_alphabet: {value}"))),
+  };
+  let tie_break = match tie_break.unwrap_or("smallest_pair_id") {
+    "smallest_pair_id" => TieBreak::SmallestPairId,
+    "largest_content" => TieBreak::LargestContent,
+    value => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown tie_break: {value}"))),
+  };
+  Ok(BpeTrainerConfig {
+    initial_alphabet,
+    tie_break,
+  })
+}
+
 #[allow(non_camel_case_types)]
 #[pyclass(extends = BpeTrainerBase)]
 pub struct BpeTrainer_u8_Idx {
@@ -55,13 +72,15 @@ impl BpeTrainer_u8_Idx {
   /// Create a new BPE trainer (byte-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  pub fn new_py(special_tokens: Vec<String>) -> (Self, BpeTrainerBase) {
-    (
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None))]
+  pub fn new_py(special_tokens: Vec<String>, initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<(Self, BpeTrainerBase)> {
+    let config = trainer_config(initial_alphabet, tie_break)?;
+    Ok((
       Self {
-        inner: BpeTrainer::new(vec![], special_tokens),
+        inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
       },
       BpeTrainerBase {},
-    )
+    ))
   }
 
   /// Add `(word, frequency)` pairs to the trainer's inventory.
@@ -135,13 +154,15 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  pub fn new_py(special_tokens: Vec<String>) -> (Self, BpeTrainerBase) {
-    (
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None))]
+  pub fn new_py(special_tokens: Vec<String>, initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<(Self, BpeTrainerBase)> {
+    let config = trainer_config(initial_alphabet, tie_break)?;
+    Ok((
       Self {
-        inner: BpeTrainer::new(vec![], special_tokens),
+        inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
       },
       BpeTrainerBase {},
-    )
+    ))
   }
 
   /// Add `(word, frequency)` pairs to the trainer's inventory.

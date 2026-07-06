@@ -1,13 +1,98 @@
-use std::{collections::{BTreeMap, HashMap}, sync::atomic::AtomicU64};
+use std::{cmp::Reverse, collections::{BTreeMap, HashMap}, sync::atomic::AtomicU64};
 
 use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialAlphabet {
+  /// Insert bytes in raw byte order, preserving GPT-2/tiktoken-compatible ids.
+  RawBytes,
+  /// Insert bytes in Hugging Face ByteLevel alphabet order.
+  ByteLevel,
+}
+
+impl Default for InitialAlphabet {
+  fn default() -> Self {
+    Self::RawBytes
+  }
+}
+
+impl InitialAlphabet {
+  fn bytes(self) -> Vec<u8> {
+    match self {
+      Self::RawBytes => (0u8..=255).collect(),
+      Self::ByteLevel => byte_level_alphabet_bytes(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TieBreak {
+  /// Resolve equal frequencies by the smallest pair ids, matching Hugging Face BPE.
+  SmallestPairId,
+  /// Resolve equal frequencies by lexicographically largest token content.
+  LargestContent,
+}
+
+impl Default for TieBreak {
+  fn default() -> Self {
+    Self::SmallestPairId
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BpeTrainerConfig {
+  pub initial_alphabet: InitialAlphabet,
+  pub tie_break: TieBreak,
+}
+
+impl BpeTrainerConfig {
+  pub fn hf_byte_level() -> Self {
+    Self {
+      initial_alphabet: InitialAlphabet::ByteLevel,
+      tie_break: TieBreak::SmallestPairId,
+    }
+  }
+}
+
+fn byte_level_alphabet_bytes() -> Vec<u8> {
+  let mut pairs = (0u8..=255)
+    .map(|byte| (byte, byte_to_unicode(byte)))
+    .collect::<Vec<_>>();
+  pairs.sort_by_key(|(_, ch)| *ch);
+  pairs.into_iter().map(|(byte, _)| byte).collect()
+}
+
+fn byte_to_unicode(byte: u8) -> char {
+  if (b'!'..=b'~').contains(&byte)
+    || (0xA1..=0xAC).contains(&byte)
+    || (0xAE..=0xFF).contains(&byte)
+  {
+    return byte as char;
+  }
+  let mut n = 0u32;
+  for b in 0u8..=255 {
+    if (b'!'..=b'~').contains(&b)
+      || (0xA1..=0xAC).contains(&b)
+      || (0xAE..=0xFF).contains(&b)
+    {
+      continue;
+    }
+    if b == byte {
+      return char::from_u32(256 + n).unwrap();
+    }
+    n += 1;
+  }
+  unreachable!("all bytes are covered")
+}
+
 #[derive(Debug, Default)]
 pub struct BpeTrainer<C, I> {
   pub start_vocab_idx: AtomicU64,
   pub _byte_vocab_start_idx: Option<u64>,
+  pub byte_vocab: HashMap<u8, I>,
+  pub config: BpeTrainerConfig,
   pub special_tokens: Vec<String>,
   pub vocab: BTreeMap<I, Word<C>>,
   pub merges: Vec<Merge<C, I>>,
@@ -29,17 +114,32 @@ where
     C: CharToIdx<I>,
     I: HasChar<C>,
   {
+    Self::from_words_with_config(words, special_tokens, BpeTrainerConfig::default())
+  }
+
+  pub fn from_words_with_config<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(
+    words: Iter, special_tokens: &[String], config: BpeTrainerConfig,
+  ) -> Self
+  where
+    C: CharToIdx<I>,
+    I: HasChar<C>,
+  {
     let vocab_start_idx = special_tokens.len() as u64;
     let sp_set = special_tokens.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let tokens = Self::_words_to_tokens(words, vocab_start_idx, &sp_set);
-    Self::new(tokens, special_tokens.to_vec())
+    let tokens = Self::_words_to_tokens(words, vocab_start_idx, &sp_set, None);
+    Self::new_with_config(tokens, special_tokens.to_vec(), config)
   }
 
   /// Create a trainer from already pre-tokenized words.
   ///
   /// This initializes vocab with `special_tokens` and a 256-entry byte vocabulary.
   pub fn new(words: Vec<PreToken<C, I>>, special_tokens: Vec<String>) -> Self {
+    Self::new_with_config(words, special_tokens, BpeTrainerConfig::default())
+  }
+
+  pub fn new_with_config(words: Vec<PreToken<C, I>>, special_tokens: Vec<String>, config: BpeTrainerConfig) -> Self {
     let mut bpe = Self::empty();
+    bpe.config = config;
     bpe._vocab_insert_special_tokens(special_tokens);
     bpe._vocab_insert_all_single_byte();
     bpe.words = words;
@@ -52,11 +152,15 @@ where
   pub fn _vocab_insert_all_single_byte(&mut self) -> I {
     let start_idx = self.start_vocab_idx.fetch_add(256, std::sync::atomic::Ordering::AcqRel);
     let vocab = &mut self.vocab;
-    for i in 0u8..128 {
-      vocab.insert(I::from_u64(i as u64 + start_idx), (i as char).to_string().to_word());
-    }
-    for i in 128u8..=255 {
-      vocab.insert(I::from_u64(i as u64 + start_idx), i.to_word());
+    self.byte_vocab.clear();
+    for (offset, byte) in self.config.initial_alphabet.bytes().into_iter().enumerate() {
+      let idx = I::from_u64(offset as u64 + start_idx);
+      if byte < 128 {
+        vocab.insert(idx, (byte as char).to_string().to_word());
+      } else {
+        vocab.insert(idx, byte.to_word());
+      }
+      self.byte_vocab.insert(byte, idx);
     }
     self._byte_vocab_start_idx = Some(start_idx);
     I::from_u64(start_idx + 256)
@@ -65,7 +169,9 @@ where
   /// Convert `(word, frequency)` input into [`PreToken`]s.
   ///
   /// Words that match `special_tokens` are skipped.
-  pub fn _words_to_tokens<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(words: Iter, vocab_start_idx: u64, special_tokens: &BTreeSet<&str>) -> Vec<PreToken<C, I>>
+  pub fn _words_to_tokens<Iter: IntoIterator<Item = (S, Freq)>, S: AsRef<str>>(
+    words: Iter, vocab_start_idx: u64, special_tokens: &BTreeSet<&str>, byte_vocab: Option<&HashMap<u8, I>>,
+  ) -> Vec<PreToken<C, I>>
   where
     C: CharToIdx<I>,
   {
@@ -76,7 +182,7 @@ where
         continue;
       }
       let src = w.to_word();
-      let idxs = src.iter().map(|b| b.char_to_idx(vocab_start_idx)).collect::<Vec<_>>();
+      let idxs = src.iter().map(|b| b.char_to_idx(vocab_start_idx, byte_vocab)).collect::<Vec<_>>();
       let pre_token = PreToken {
         src: src.clone(),
         idxs,
@@ -123,6 +229,8 @@ impl<C, I> BpeTrainer<C, I> {
     Self {
       start_vocab_idx: AtomicU64::new(0),
       _byte_vocab_start_idx: None,
+      byte_vocab: HashMap::new(),
+      config: BpeTrainerConfig::default(),
       vocab: BTreeMap::new(),
       merges: Vec::new(),
       pre_merges: HashMap::new(),
@@ -203,21 +311,36 @@ where
   }
 
   fn _get_largest_merge(&self) -> Option<Merge<C, I>> where C: Ord {
-    self
-      .pre_merges
-      .values()
-      .max_by_key(|m| (m.data.freq, &m.content))
-      .cloned()
+    match self.config.tie_break {
+      TieBreak::SmallestPairId => self
+        .pre_merges
+        .values()
+        .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
+        .cloned(),
+      TieBreak::LargestContent => self
+        .pre_merges
+        .values()
+        .max_by_key(|m| (m.data.freq, &m.content))
+        .cloned(),
+    }
   }
 
-  fn _get_largest_merge2(&self) -> Option<Merge<C, I>> where C: Ord + Send + Sync + 'static {
+  fn _get_largest_merge2(&self) -> Option<Merge<C, I>> where C: Ord + Send + Sync {
     use rayon::prelude::*;
-    self
-      .pre_merges
-      .par_iter()
-      .map(|(_, m)| m)
-      .max_by_key(|m| (m.data.freq, &m.content))
-      .cloned()
+    match self.config.tie_break {
+      TieBreak::SmallestPairId => self
+        .pre_merges
+        .par_iter()
+        .map(|(_, m)| m)
+        .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
+        .cloned(),
+      TieBreak::LargestContent => self
+        .pre_merges
+        .par_iter()
+        .map(|(_, m)| m)
+        .max_by_key(|m| (m.data.freq, &m.content))
+        .cloned(),
+    }
   }
 
   /// Apply one merge operation and return the newly assigned vocab index.
@@ -287,7 +410,7 @@ where
   fn add_words(&mut self, words: &mut dyn Iterator<Item = (&str, Freq)>) {
     let special_tokens = self.special_tokens.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let vocab_start_idx = self._byte_vocab_start_idx.unwrap();
-    self.words = Self::_words_to_tokens(words, vocab_start_idx, &special_tokens);
+    self.words = Self::_words_to_tokens(words, vocab_start_idx, &special_tokens, Some(&self.byte_vocab));
   }
 
   fn vocab_size(&self) -> usize {
@@ -300,8 +423,8 @@ where
   }
 
   fn step(&mut self) -> MyResult<()> {
-    // find the most frequent merge,
-    // if the frequency is the same, choose the lexicographically largest one.
+    // Find the most frequent merge. Hugging Face's BPE trainer resolves equal
+    // frequencies by choosing the smallest pair ids, so keep that ordering here.
     let merge = if self.pre_merges.len() < 100_000 {
       self._get_largest_merge()
     } else {
@@ -454,6 +577,44 @@ mod tests {
   }
 
   #[test]
+  fn test_bpe_step_tie_breaks_by_smallest_pair_id() {
+    let mut bpe = BpeTrainer::<u8, Idx>::from_words(vec![
+      ("ab", 1),
+      ("cd", 1),
+    ], &vec![]);
+    bpe.init_training();
+
+    bpe.step().unwrap();
+
+    let merge = bpe.merges.last().unwrap();
+    assert_eq!(merge.content.0.debug_display(), "a");
+    assert_eq!(merge.content.1.debug_display(), "b");
+  }
+
+  #[test]
+  fn test_bpe_step_can_tie_break_by_largest_content() {
+    let mut bpe = BpeTrainer::<u8, Idx>::new_with_config(
+      vec![],
+      vec![],
+      BpeTrainerConfig {
+        initial_alphabet: InitialAlphabet::RawBytes,
+        tie_break: TieBreak::LargestContent,
+      },
+    );
+    bpe.add_words(&mut vec![
+      ("ab", 1),
+      ("cd", 1),
+    ].into_iter());
+    bpe.init_training();
+
+    bpe.step().unwrap();
+
+    let merge = bpe.merges.last().unwrap();
+    assert_eq!(merge.content.0.debug_display(), "c");
+    assert_eq!(merge.content.1.debug_display(), "d");
+  }
+
+  #[test]
   fn test_bpe_from_words() {
     const NAME: &str = "tinystories_sample_5M";
     // const NAME: &str = "TinyStoriesV2-GPT4-train";
@@ -487,7 +648,14 @@ mod tests {
     let spec = crate::spec::uni::UniSpec;
     let input = std::fs::read_to_string(format!("fixtures/_words.{NAME}.json")).unwrap();
     let words: BTreeMap<String, Freq> = serde_json::from_str(&input).unwrap();
-    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(words, &vec![DEFAULT_EOT.to_string()]);
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+      words,
+      &vec![DEFAULT_EOT.to_string()],
+      BpeTrainerConfig {
+        initial_alphabet: InitialAlphabet::RawBytes,
+        tie_break: TieBreak::LargestContent,
+      },
+    );
     bpe.init_training();
     let vocab_size = match NAME {
       "tinystories_sample_5M" | "TinyStories_all_data_zh_1M-sample" => 2000,

@@ -6,6 +6,8 @@ from ._lib import BpeTrainer_Character_CharIdx, BpeTrainer_u8_Idx
 
 CharLevel = Literal["char", "u8"]
 OutputFormat = Literal["uni", "gpt2"]
+InitialAlphabet = Literal["raw", "byte_level"]
+TieBreak = Literal["smallest_pair_id", "largest_content"]
 
 class BpeTrainer:
   """Train a BPE model from a word-frequency inventory.
@@ -21,15 +23,31 @@ class BpeTrainer:
   output_format:
     Output spec for serialization (`"gpt2"` or `"uni"`). For `ch="char"`, only `"uni"` is supported.
   """
-  def __init__(self, special_tokens: Sequence[str], *, ch: CharLevel = "u8", output_format: OutputFormat | None = None) -> None:
+  def __init__(
+    self,
+    special_tokens: Sequence[str],
+    *,
+    ch: CharLevel = "u8",
+    output_format: OutputFormat | None = None,
+    initial_alphabet: InitialAlphabet | None = None,
+    tie_break: TieBreak | None = None,
+  ) -> None:
     # super().__init__()
     self._ch: CharLevel = ch
     self.output_format: OutputFormat = "uni"
     if ch == "char":
-      self._trainer = BpeTrainer_Character_CharIdx(special_tokens=special_tokens)
+      self._trainer = BpeTrainer_Character_CharIdx(
+        special_tokens=special_tokens,
+        initial_alphabet=initial_alphabet,
+        tie_break=tie_break,
+      )
     else:
       self.output_format = output_format or "gpt2"
-      self._trainer = BpeTrainer_u8_Idx(special_tokens=special_tokens)
+      self._trainer = BpeTrainer_u8_Idx(
+        special_tokens=special_tokens,
+        initial_alphabet=initial_alphabet,
+        tie_break=tie_break,
+      )
 
   @property
   def vocab_size(self) -> int:
