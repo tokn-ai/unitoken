@@ -13,6 +13,7 @@ from uni_tokenizer import PreTokenizer
 
 
 SPECIAL_TOKENS = ["<|endoftext|>"]
+DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
 def time_call(fn: Callable[[], Any], repeats: int) -> tuple[Any, dict[str, float]]:
@@ -43,7 +44,6 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
   boundaries, boundary_timing = time_call(
     lambda: pretokenizer.find_chunk_boundaries(
       args.input,
-      args.chunks,
       chunk_size=args.chunk_size,
       boundary=args.boundary,
     ),
@@ -67,7 +67,6 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
   full_words, full_timing = time_call(
     lambda: pretokenizer.get_words_from_file(
       args.input,
-      args.chunks,
       chunk_size=args.chunk_size,
       boundary=args.boundary,
     ),
@@ -77,7 +76,6 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
   return {
     "input": str(args.input),
     "bytes": file_size,
-    "chunks": args.chunks,
     "chunk_size": args.chunk_size,
     "boundary": args.boundary,
     "repeats": args.repeats,
@@ -94,17 +92,14 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description="Profile unitoken pretokenizer phases on a raw text file.")
   parser.add_argument("input", type=Path)
-  parser.add_argument("--chunks", type=int, default=64)
-  parser.add_argument("--chunk-size", type=int)
+  parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
   parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto")
   parser.add_argument("--segments", type=int, default=4)
   parser.add_argument("--repeats", type=int, default=1)
   parser.add_argument("--json", type=Path)
   args = parser.parse_args(argv)
 
-  if args.chunks < 1:
-    parser.error("--chunks must be at least 1")
-  if args.chunk_size is not None and args.chunk_size < 1:
+  if args.chunk_size < 1:
     parser.error("--chunk-size must be at least 1")
   if args.segments < 0:
     parser.error("--segments must be non-negative")
