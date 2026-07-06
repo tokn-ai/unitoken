@@ -161,10 +161,10 @@ def iter_text_chunks(path: Path, chunk_bytes: int) -> Iterable[str]:
       yield pending.decode("utf-8")
 
 
-def train_unitoken_from_text(path: Path, vocab_size: int, num_chunks: int) -> dict[str, Any]:
+def train_unitoken_from_text(path: Path, vocab_size: int, num_chunks: int, chunk_size: int | None, boundary: str) -> dict[str, Any]:
   started = time.perf_counter()
   pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
-  words = pretokenizer.get_words_from_file(path, num_chunks)
+  words = pretokenizer.get_words_from_file(path, num_chunks, chunk_size=chunk_size, boundary=boundary)
   pretokenize_s = time.perf_counter() - started
 
   started = time.perf_counter()
@@ -293,12 +293,17 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   hf_chunking = f"fixed {args.hf_chunk_bytes} byte chunks"
   if args.hf_chunk_bytes is None:
     pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
-    hf_segments = pretokenizer.find_chunk_boundaries(args.text, args.chunks)
+    hf_segments = pretokenizer.find_chunk_boundaries(
+      args.text,
+      args.chunks,
+      chunk_size=args.chunk_size,
+      boundary=args.boundary,
+    )
     hf_chunking = "unitoken chunk boundaries"
 
   unitoken = time_call(
     "unitoken.raw_train",
-    lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunks),
+    lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunks, args.chunk_size, args.boundary),
     args.repeats,
   )
   hf = time_call(
@@ -322,6 +327,9 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   return {
     "text": str(args.text),
     "text_bytes": args.text.stat().st_size,
+    "boundary": args.boundary,
+    "chunks": args.chunks,
+    "chunk_size": args.chunk_size,
     "huggingface_chunking": hf_chunking,
     "target_vocab_size": args.vocab_size,
     "same_vocab": same_vocab,
@@ -344,6 +352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--repeats", type=int, default=3)
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a faster smoke benchmark.")
   parser.add_argument("--chunks", type=int, default=1024, help="Desired unitoken pretokenizer chunks in --text mode.")
+  parser.add_argument("--chunk-size", type=int, help="Target unitoken pretokenizer chunk size in bytes for --text mode.")
+  parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto", help="Boundary strategy for unitoken chunking in --text mode.")
   parser.add_argument("--hf-chunk-bytes", type=int, help="Force fixed byte chunks for Hugging Face in --text mode. Defaults to unitoken chunk boundaries.")
   parser.add_argument("--diff-limit", type=int, default=10)
   parser.add_argument("--json", type=Path)
@@ -354,6 +364,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--repeats must be at least 1")
   if args.chunks < 1:
     parser.error("--chunks must be at least 1")
+  if args.chunk_size is not None and args.chunk_size < 1:
+    parser.error("--chunk-size must be at least 1")
   if args.hf_chunk_bytes is not None and args.hf_chunk_bytes < 1:
     parser.error("--hf-chunk-bytes must be at least 1")
 

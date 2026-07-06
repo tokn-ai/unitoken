@@ -8,7 +8,7 @@ use std::{
 };
 
 use unitoken::{
-  bpe::{BpeEncoder, BpeTrainer, CharIdx, Character, Idx, encoder::BpeBuilder}, pretokenizer::{PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanTrain, Encode, Train}
+  bpe::{BpeEncoder, BpeTrainer, CharIdx, Character, Idx, encoder::BpeBuilder}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanTrain, Encode, Train}
 };
 
 mod _metrics;
@@ -93,6 +93,29 @@ pub enum SpecOutput {
   Uni,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum BoundaryArg {
+  #[clap(name = "auto")]
+  Auto,
+  #[clap(name = "eot")]
+  Eot,
+  #[clap(name = "line")]
+  Line,
+  #[clap(name = "utf8")]
+  Utf8,
+}
+
+impl From<BoundaryArg> for BoundaryMode {
+  fn from(value: BoundaryArg) -> Self {
+    match value {
+      BoundaryArg::Auto => Self::Auto,
+      BoundaryArg::Eot => Self::Eot,
+      BoundaryArg::Line => Self::Line,
+      BoundaryArg::Utf8 => Self::Utf8,
+    }
+  }
+}
+
 impl SpecOutput {
   /// Return the CLI string representation for this output format.
   pub fn as_str(&self) -> &'static str {
@@ -137,6 +160,10 @@ struct TrainArgs {
   vocab_size: u32,
   #[arg(long = "chunks", default_value = "1024")]
   num_chunks: u32,
+  #[arg(long = "chunk-size")]
+  chunk_size: Option<u64>,
+  #[arg(long = "boundary", default_value = "auto")]
+  boundary: BoundaryArg,
   #[arg(short, long, default_value = "u8")]
   char: SpecLevel,
   #[arg(long = "out-spec")]
@@ -183,7 +210,7 @@ struct PlotArgs {
   input_file: PathBuf,
 }
 
-fn _pretokenize<P1: AsRef<Path>, P2: AsRef<Path>>(output: P1, input: P2, num_chunks: usize, special_tokens: Vec<String>) -> BTreeMap<String, i64> {
+fn _pretokenize<P1: AsRef<Path>, P2: AsRef<Path>>(output: P1, input: P2, options: ChunkOptions, special_tokens: Vec<String>) -> BTreeMap<String, i64> {
   if output.as_ref().exists() {
     info!("pretokenize file already exists, loading from {}", output.as_ref().display());
     let buffered = BufReader::new(fs::File::open(output).expect("open _words file"));
@@ -193,7 +220,7 @@ fn _pretokenize<P1: AsRef<Path>, P2: AsRef<Path>>(output: P1, input: P2, num_chu
   let split_special_token = special_tokens.get(0).cloned();
   let pre = PreTokenizer::new(&special_tokens, split_special_token.as_deref());
 
-  let words = pre.get_words_from_file(&input, num_chunks).unwrap();
+  let words = pre.get_words_from_file_with_options(&input, options).unwrap();
 
   debug!("Sort words");
   let sorted_words = sort_words(&words);
@@ -255,7 +282,7 @@ pub fn _bpe_save_train<C, I>(
 pub struct BpeTrainParams {
   pub input_path: PathBuf,
   pub vocab_size: u32,
-  pub num_chunks: u32,
+  pub chunk_options: ChunkOptions,
   pub special_tokens: Vec<String>,
   pub out_dir: PathBuf,
   pub char_level: SpecLevel,
@@ -266,7 +293,7 @@ pub struct BpeTrainParams {
 fn bpe_train(BpeTrainParams{
   input_path,
   vocab_size,
-  num_chunks,
+  chunk_options,
   special_tokens,
   out_dir,
   char_level: spec,
@@ -286,7 +313,7 @@ fn bpe_train(BpeTrainParams{
   let words = _pretokenize(
     out_dir.join(format!("_words.{file_stem}.json")),
     &input_path,
-    num_chunks as _,
+    chunk_options,
     special_tokens.clone(),
   );
 
@@ -373,12 +400,16 @@ fn run_train(args: TrainArgs) {
     lines_of(include_str!("../fixtures/default_special_tokens.txt"))
   };
   let output_spec = args.output_spec.unwrap_or(args.char.default_spec());
+  let chunk_options = ChunkOptions {
+    hint: args.chunk_size.map(ChunkHint::Size).unwrap_or(ChunkHint::Count(args.num_chunks as usize)),
+    boundary: args.boundary.into(),
+  };
 
   let vocab_name = format!("{}[{}]", args.input_file.file_stem().unwrap().display(), args.char.as_str());
   let params = BpeTrainParams {
     input_path: args.input_file,
     vocab_size: args.vocab_size,
-    num_chunks: args.num_chunks,
+    chunk_options,
     special_tokens,
     out_dir: args.out_dir,
     char_level: args.char,
@@ -390,7 +421,7 @@ fn run_train(args: TrainArgs) {
   debug!("Output spec: {:?}", params.output_spec.as_str());
   debug!("Special tokens: {:?}", params.special_tokens);
   debug!("Vocabulary size: {}", params.vocab_size);
-  debug!("Number of chunks: {}", params.num_chunks);
+  debug!("Chunk options: {:?}", params.chunk_options);
   debug!("Input file: {}", params.input_path.display());
   debug!("Output directory: {}", params.out_dir.display());
   bpe_train(params);

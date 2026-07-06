@@ -17,6 +17,60 @@ lazy_static! {
 }
 pub const DEFAULT_EOT: &'static str = "<|endoftext|>";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryMode {
+  Auto,
+  Eot,
+  Line,
+  Utf8,
+}
+
+impl BoundaryMode {
+  pub fn parse(value: &str) -> MyResult<Self> {
+    match value {
+      "auto" => Ok(Self::Auto),
+      "eot" => Ok(Self::Eot),
+      "line" => Ok(Self::Line),
+      "utf8" => Ok(Self::Utf8),
+      _ => Err(MyError::SpecError(format!("Unknown boundary mode: {value}"))),
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkHint {
+  Count(usize),
+  Size(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkOptions {
+  pub hint: ChunkHint,
+  pub boundary: BoundaryMode,
+}
+
+impl ChunkOptions {
+  pub fn count(chunks: usize) -> Self {
+    Self {
+      hint: ChunkHint::Count(chunks),
+      boundary: BoundaryMode::Auto,
+    }
+  }
+
+  pub fn chunk_count(&self, file_size: u64) -> usize {
+    match self.hint {
+      ChunkHint::Count(count) => count.max(1),
+      ChunkHint::Size(size) => {
+        if size == 0 || file_size == 0 {
+          1
+        } else {
+          file_size.div_ceil(size) as usize
+        }
+      }
+    }
+  }
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "py", pyo3::pyclass(from_py_object))]
 pub struct PreTokenizer {
@@ -71,7 +125,13 @@ impl PreTokenizer {
   pub fn find_chunk_boundaries<P: AsRef<Path>>(
     &self, path: P, desired_num_chunks: usize,
   ) -> MyResult<Vec<(u64, usize)>> {
-    let boundaries = _find_chunk_boundaries(&path, desired_num_chunks, &self.end_of_text)?;
+    self.find_chunk_boundaries_with_options(path, ChunkOptions::count(desired_num_chunks))
+  }
+
+  pub fn find_chunk_boundaries_with_options<P: AsRef<Path>>(
+    &self, path: P, options: ChunkOptions,
+  ) -> MyResult<Vec<(u64, usize)>> {
+    let boundaries = _find_chunk_boundaries_with_options(&path, options, &self.end_of_text)?;
     Ok(boundaries.iter().zip(boundaries.iter().skip(1)).map(|(&a, &b)| (a, (b-a) as usize)).collect())
   }
 
@@ -113,7 +173,13 @@ impl PreTokenizer {
   pub fn get_words_from_file<P: AsRef<Path>>(
     &self, path: P, num_chunks: usize,
   ) -> MyResult<BTreeMap<String, Freq>> {
-    let boundaries = _find_chunk_boundaries(&path, num_chunks, &self.end_of_text)?;
+    self.get_words_from_file_with_options(path, ChunkOptions::count(num_chunks))
+  }
+
+  pub fn get_words_from_file_with_options<P: AsRef<Path>>(
+    &self, path: P, options: ChunkOptions,
+  ) -> MyResult<BTreeMap<String, Freq>> {
+    let boundaries = _find_chunk_boundaries_with_options(&path, options, &self.end_of_text)?;
     let path = path.as_ref().to_path_buf();
     let params = boundaries
       .iter()
@@ -162,11 +228,21 @@ pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&
 pub fn _find_chunk_boundaries<P: AsRef<Path>>(
   path: P, desired_num_chunks: usize, split_special_token: &str,
 ) -> MyResult<Vec<u64>> {
+  _find_chunk_boundaries_with_options(path, ChunkOptions::count(desired_num_chunks), split_special_token)
+}
+
+pub fn _find_chunk_boundaries_with_options<P: AsRef<Path>>(
+  path: P, options: ChunkOptions, split_special_token: &str,
+) -> MyResult<Vec<u64>> {
   let file_size = fs::metadata(&path)?.len();
+  let desired_num_chunks = options.chunk_count(file_size);
   if desired_num_chunks <= 1 || file_size == 0 {
     return Ok(vec![0, file_size]);
   }
-  let chunk_size = file_size / desired_num_chunks as u64;
+  let chunk_size = match options.hint {
+    ChunkHint::Count(_) => file_size / desired_num_chunks as u64,
+    ChunkHint::Size(size) => size,
+  };
   let mini_chunk_size = 4096;
   let finder = memmem::Finder::new(split_special_token);
   debug!(
@@ -183,37 +259,80 @@ pub fn _find_chunk_boundaries<P: AsRef<Path>>(
   boundaries.push(file_size);
 
   let mut file = File::open(&path)?;
-  if !_file_contains(&mut file, &finder, mini_chunk_size, split_special_token.len())? {
-    for boundary in boundaries.iter_mut().skip(1).take(desired_num_chunks - 1) {
-      *boundary = _align_utf8_boundary(&mut file, *boundary, file_size)?;
-    }
-    let deduplicated_boundaries = boundaries.into_iter().collect::<BTreeSet<_>>();
-    debug!(boundaries.len=?deduplicated_boundaries.len(), "find_chunk_boundaries_no_split_token");
-    return Ok(deduplicated_boundaries.into_iter().collect());
-  }
+  let has_split_token = if matches!(options.boundary, BoundaryMode::Auto | BoundaryMode::Eot) {
+    _file_contains(&mut file, &finder, mini_chunk_size, split_special_token.len())?
+  } else {
+    false
+  };
 
-  for bi in 1..boundaries.len() - 1 {
-    let mut initial_position = boundaries[bi];
-    let _ = file.seek(std::io::SeekFrom::Start(initial_position))?;
-    loop {
-      let mut buffer = vec![0; mini_chunk_size as usize];
-      let bytes_read = file.read(&mut buffer)?;
-      if bytes_read < mini_chunk_size as usize {
-        boundaries[bi] = file_size;
-        break;
+  match options.boundary {
+    BoundaryMode::Eot => {
+      if !has_split_token {
+        return Ok(vec![0, file_size]);
       }
-      if let Some(pos) = finder.find(buffer[..bytes_read].as_ref()) {
-        let boundary = initial_position + pos as u64;
-        boundaries[bi] = boundary;
-        break;
+      _align_eot_boundaries(&mut file, &mut boundaries, &finder, mini_chunk_size, file_size)?;
+    }
+    BoundaryMode::Auto if has_split_token => {
+      _align_eot_boundaries(&mut file, &mut boundaries, &finder, mini_chunk_size, file_size)?;
+    }
+    BoundaryMode::Auto | BoundaryMode::Line => {
+      for boundary in boundaries.iter_mut().skip(1).take(desired_num_chunks - 1) {
+        *boundary = _align_line_boundary(&mut file, *boundary, file_size, mini_chunk_size)?;
       }
-      initial_position += mini_chunk_size as u64;
+    }
+    BoundaryMode::Utf8 => {
+      for boundary in boundaries.iter_mut().skip(1).take(desired_num_chunks - 1) {
+        *boundary = _align_utf8_boundary(&mut file, *boundary, file_size)?;
+      }
     }
   }
 
   let deduplicated_boundaries = boundaries.into_iter().collect::<BTreeSet<_>>();
   debug!(boundaries.len=?deduplicated_boundaries.len(), "find_chunk_boundaries");
   Ok(deduplicated_boundaries.into_iter().collect())
+}
+
+fn _align_eot_boundaries(
+  file: &mut File, boundaries: &mut [u64], finder: &memmem::Finder, window_size: usize, file_size: u64,
+) -> MyResult<()> {
+  let interior_count = boundaries.len().saturating_sub(2);
+  for boundary in boundaries.iter_mut().skip(1).take(interior_count) {
+    let mut initial_position = *boundary;
+    let _ = file.seek(std::io::SeekFrom::Start(initial_position))?;
+    loop {
+      let mut buffer = vec![0; window_size];
+      let bytes_read = file.read(&mut buffer)?;
+      if bytes_read < window_size {
+        *boundary = file_size;
+        break;
+      }
+      if let Some(pos) = finder.find(buffer[..bytes_read].as_ref()) {
+        *boundary = initial_position + pos as u64;
+        break;
+      }
+      initial_position += window_size as u64;
+    }
+  }
+  Ok(())
+}
+
+fn _align_line_boundary(file: &mut File, boundary: u64, file_size: u64, window_size: usize) -> MyResult<u64> {
+  if boundary == 0 || boundary >= file_size {
+    return Ok(boundary);
+  }
+  file.seek(std::io::SeekFrom::Start(boundary - 1))?;
+  let mut previous = [0; 1];
+  file.read_exact(&mut previous)?;
+  if previous[0] == b'\n' {
+    return Ok(boundary);
+  }
+  file.seek(std::io::SeekFrom::Start(boundary))?;
+  let mut buffer = vec![0; window_size];
+  let bytes_read = file.read(&mut buffer)?;
+  if let Some(pos) = memchr::memchr(b'\n', &buffer[..bytes_read]) {
+    return Ok((boundary + pos as u64 + 1).min(file_size));
+  }
+  _align_utf8_boundary(file, boundary, file_size)
 }
 
 fn _file_contains(file: &mut File, finder: &memmem::Finder, chunk_size: usize, needle_len: usize) -> MyResult<bool> {
@@ -458,6 +577,42 @@ mod tests {
     let boundaries = _find_chunk_boundaries(path, 4, DEFAULT_EOT).unwrap();
 
     assert_eq!(boundaries, vec![0, 2, 4, 6, 8]);
+  }
+
+  #[test]
+  fn test_find_chunk_boundaries_line_mode() {
+    std::fs::create_dir_all("out").ok();
+    let path = std::path::Path::new("out/line_boundaries.txt");
+    std::fs::write(path, "aa\nbb\ncc\ndd\n").unwrap();
+
+    let boundaries = _find_chunk_boundaries_with_options(
+      path,
+      ChunkOptions {
+        hint: ChunkHint::Count(4),
+        boundary: BoundaryMode::Line,
+      },
+      DEFAULT_EOT,
+    ).unwrap();
+
+    assert_eq!(boundaries, vec![0, 3, 6, 9, 12]);
+  }
+
+  #[test]
+  fn test_find_chunk_boundaries_chunk_size_hint() {
+    std::fs::create_dir_all("out").ok();
+    let path = std::path::Path::new("out/chunk_size_hint.txt");
+    std::fs::write(path, "abcdefghij").unwrap();
+
+    let boundaries = _find_chunk_boundaries_with_options(
+      path,
+      ChunkOptions {
+        hint: ChunkHint::Size(4),
+        boundary: BoundaryMode::Utf8,
+      },
+      DEFAULT_EOT,
+    ).unwrap();
+
+    assert_eq!(boundaries, vec![0, 4, 8, 10]);
   }
 
   #[test]

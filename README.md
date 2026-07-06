@@ -87,7 +87,7 @@ match, and reports median training speed.
 For an end-to-end raw text comparison:
 
 ```bash
-python benchmarks/compare_hf_training.py --text out/fineweb2_1GiB.txt --repeats 1
+python benchmarks/compare_hf_training.py --text out/fineweb2_1GiB.txt --chunk-size 1048576 --boundary line --repeats 1
 ```
 
 Raw text mode reports unitoken pretokenization and BPE training phases
@@ -95,6 +95,16 @@ separately, then compares the total against Hugging Face raw training. By
 default, Hugging Face receives the same chunk boundaries as unitoken so vocab
 parity is not affected by iterator boundary differences. Pass
 `--hf-chunk-bytes` to force fixed byte chunks for Hugging Face.
+
+Chunking supports explicit boundary modes:
+
+- `auto`: split on the EOT token when present, otherwise line boundaries, then UTF-8 byte boundaries as a last resort.
+- `eot`: split only on the EOT token.
+- `line`: split on newline boundaries.
+- `utf8`: split near byte boundaries while preserving valid UTF-8.
+
+Use `--chunk-size BYTES` when you want target chunk size instead of a fixed
+chunk count.
 
 Prepare benchmark data
 ----------------------
