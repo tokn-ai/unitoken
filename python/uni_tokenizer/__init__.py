@@ -1,6 +1,7 @@
 from .trainer import BpeTrainer
 from .encoder import BpeEncoder
-from ._lib import PreTokenizer, Vocabs
+from ._lib import Vocabs
+from .pretokenizer import BoundaryMode, PreTokenizer
 from .tiktoken_compat import (
   Encoding,
   encoding_for_model,
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover
 __all__ = [
   "BpeTrainer",
   "BpeEncoder",
+  "BoundaryMode",
   "Encoding",
   "PreTokenizer",
   "Vocabs",

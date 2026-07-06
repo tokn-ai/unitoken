@@ -7,8 +7,9 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
 
 
@@ -40,12 +41,13 @@ def summarize_words(words: dict[str, int]) -> dict[str, int]:
 def profile(args: argparse.Namespace) -> dict[str, Any]:
   pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
   file_size = args.input.stat().st_size
+  boundary = cast(BoundaryMode, args.boundary)
 
   boundaries, boundary_timing = time_call(
     lambda: pretokenizer.find_chunk_boundaries(
       args.input,
       chunk_size=args.chunk_size,
-      boundary=args.boundary,
+      boundary=boundary,
     ),
     args.repeats,
   )
@@ -68,7 +70,7 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
     lambda: pretokenizer.get_words_from_file(
       args.input,
       chunk_size=args.chunk_size,
-      boundary=args.boundary,
+      boundary=boundary,
     ),
     args.repeats,
   )
@@ -77,7 +79,7 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
     "input": str(args.input),
     "bytes": file_size,
     "chunk_size": args.chunk_size,
-    "boundary": args.boundary,
+    "boundary": boundary,
     "repeats": args.repeats,
     "boundary_count": len(boundaries),
     "find_chunk_boundaries": boundary_timing,

@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from tokenizers import Tokenizer
 from tokenizers import models
@@ -16,6 +16,7 @@ from tokenizers import pre_tokenizers
 from tokenizers import trainers
 
 from uni_tokenizer import BpeTrainer
+from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
 
 
@@ -164,7 +165,7 @@ def iter_text_chunks(path: Path, chunk_bytes: int) -> Iterable[str]:
 DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
-def train_unitoken_from_text(path: Path, vocab_size: int, chunk_size: int, boundary: str) -> dict[str, Any]:
+def train_unitoken_from_text(path: Path, vocab_size: int, chunk_size: int, boundary: BoundaryMode) -> dict[str, Any]:
   started = time.perf_counter()
   pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
   words = pretokenizer.get_words_from_file(path, chunk_size=chunk_size, boundary=boundary)
@@ -292,6 +293,7 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_text(args: argparse.Namespace) -> dict[str, Any]:
+  boundary = cast(BoundaryMode, args.boundary)
   hf_segments = None
   hf_chunking = f"fixed {args.hf_chunk_bytes} byte chunks"
   if args.hf_chunk_bytes is None:
@@ -299,13 +301,13 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
     hf_segments = pretokenizer.find_chunk_boundaries(
       args.text,
       chunk_size=args.chunk_size,
-      boundary=args.boundary,
+      boundary=boundary,
     )
     hf_chunking = "unitoken chunk boundaries"
 
   unitoken = time_call(
     "unitoken.raw_train",
-    lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunk_size, args.boundary),
+    lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunk_size, boundary),
     args.repeats,
   )
   hf = time_call(
@@ -329,7 +331,7 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   return {
     "text": str(args.text),
     "text_bytes": args.text.stat().st_size,
-    "boundary": args.boundary,
+    "boundary": boundary,
     "chunk_size": args.chunk_size,
     "huggingface_chunking": hf_chunking,
     "target_vocab_size": args.vocab_size,
