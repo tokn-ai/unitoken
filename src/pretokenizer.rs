@@ -163,6 +163,9 @@ pub fn _find_chunk_boundaries<P: AsRef<Path>>(
   path: P, desired_num_chunks: usize, split_special_token: &str,
 ) -> MyResult<Vec<u64>> {
   let file_size = fs::metadata(&path)?.len();
+  if desired_num_chunks <= 1 || file_size == 0 {
+    return Ok(vec![0, file_size]);
+  }
   let chunk_size = file_size / desired_num_chunks as u64;
   let mini_chunk_size = 4096;
   let finder = memmem::Finder::new(split_special_token);
@@ -180,6 +183,15 @@ pub fn _find_chunk_boundaries<P: AsRef<Path>>(
   boundaries.push(file_size);
 
   let mut file = File::open(&path)?;
+  if !_file_contains(&mut file, &finder, mini_chunk_size, split_special_token.len())? {
+    for boundary in boundaries.iter_mut().skip(1).take(desired_num_chunks - 1) {
+      *boundary = _align_utf8_boundary(&mut file, *boundary, file_size)?;
+    }
+    let deduplicated_boundaries = boundaries.into_iter().collect::<BTreeSet<_>>();
+    debug!(boundaries.len=?deduplicated_boundaries.len(), "find_chunk_boundaries_no_split_token");
+    return Ok(deduplicated_boundaries.into_iter().collect());
+  }
+
   for bi in 1..boundaries.len() - 1 {
     let mut initial_position = boundaries[bi];
     let _ = file.seek(std::io::SeekFrom::Start(initial_position))?;
@@ -195,13 +207,67 @@ pub fn _find_chunk_boundaries<P: AsRef<Path>>(
         boundaries[bi] = boundary;
         break;
       }
-      initial_position += mini_chunk_size;
+      initial_position += mini_chunk_size as u64;
     }
   }
 
   let deduplicated_boundaries = boundaries.into_iter().collect::<BTreeSet<_>>();
   debug!(boundaries.len=?deduplicated_boundaries.len(), "find_chunk_boundaries");
   Ok(deduplicated_boundaries.into_iter().collect())
+}
+
+fn _file_contains(file: &mut File, finder: &memmem::Finder, chunk_size: usize, needle_len: usize) -> MyResult<bool> {
+  file.seek(std::io::SeekFrom::Start(0))?;
+  let overlap_len = needle_len.saturating_sub(1);
+  let mut overlap = Vec::new();
+  loop {
+    let mut buffer = vec![0; chunk_size];
+    let bytes_read = file.read(&mut buffer)?;
+    if bytes_read == 0 {
+      return Ok(false);
+    }
+    buffer.truncate(bytes_read);
+
+    if overlap.is_empty() {
+      if finder.find(&buffer).is_some() {
+        return Ok(true);
+      }
+    } else {
+      let mut combined = Vec::with_capacity(overlap.len() + buffer.len());
+      combined.extend_from_slice(&overlap);
+      combined.extend_from_slice(&buffer);
+      if finder.find(&combined).is_some() {
+        return Ok(true);
+      }
+    }
+
+    if overlap_len == 0 {
+      overlap.clear();
+    } else if buffer.len() >= overlap_len {
+      overlap = buffer[buffer.len() - overlap_len..].to_vec();
+    } else {
+      overlap.extend_from_slice(&buffer);
+      if overlap.len() > overlap_len {
+        overlap = overlap[overlap.len() - overlap_len..].to_vec();
+      }
+    }
+  }
+}
+
+fn _align_utf8_boundary(file: &mut File, mut boundary: u64, file_size: u64) -> MyResult<u64> {
+  if boundary == 0 || boundary >= file_size {
+    return Ok(boundary);
+  }
+  let mut buffer = [0; 4];
+  file.seek(std::io::SeekFrom::Start(boundary))?;
+  let bytes_read = file.read(&mut buffer)?;
+  for byte in buffer.iter().take(bytes_read) {
+    if byte & 0b1100_0000 != 0b1000_0000 {
+      return Ok(boundary);
+    }
+    boundary += 1;
+  }
+  Ok(boundary.min(file_size))
 }
 
 pub enum SplitChunk<'a> {
@@ -381,6 +447,17 @@ mod tests {
       0, 525166, 1048920, 1573438, 2097691, 2621933, 3146237, 3670035, 4196392, 4718956, 5242880,
     ];
     assert!(boundaries == expect, "{:?} != {:?}", boundaries, expect);
+  }
+
+  #[test]
+  fn test_find_chunk_boundaries_falls_back_without_split_token() {
+    std::fs::create_dir_all("out").ok();
+    let path = std::path::Path::new("out/no_split_token.txt");
+    std::fs::write(path, "abcdefgh").unwrap();
+
+    let boundaries = _find_chunk_boundaries(path, 4, DEFAULT_EOT).unwrap();
+
+    assert_eq!(boundaries, vec![0, 2, 4, 6, 8]);
   }
 
   #[test]
