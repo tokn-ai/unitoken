@@ -91,7 +91,10 @@ python benchmarks/compare_hf_training.py --text out/fineweb2_1GiB.txt --repeats 
 ```
 
 Raw text mode reports unitoken pretokenization and BPE training phases
-separately, then compares the total against Hugging Face raw training.
+separately, then compares the total against Hugging Face raw training. By
+default, Hugging Face receives the same chunk boundaries as unitoken so vocab
+parity is not affected by iterator boundary differences. Pass
+`--hf-chunk-bytes` to force fixed byte chunks for Hugging Face.
 
 Prepare benchmark data
 ----------------------

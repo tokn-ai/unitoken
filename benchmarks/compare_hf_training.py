@@ -127,13 +127,38 @@ def train_hugging_face(words: Sequence[tuple[str, int]], vocab_size: int) -> dic
   }
 
 
+def iter_text_segments(path: Path, segments: Sequence[tuple[int, int]]) -> Iterable[str]:
+  with path.open("rb") as file:
+    for offset, length in segments:
+      file.seek(offset)
+      yield file.read(length).decode("utf-8")
+
+
 def iter_text_chunks(path: Path, chunk_bytes: int) -> Iterable[str]:
-  with path.open("r", encoding="utf-8") as file:
+  pending = b""
+  with path.open("rb") as file:
     while True:
       chunk = file.read(chunk_bytes)
       if not chunk:
         break
-      yield chunk
+
+      data = pending + chunk
+      boundary = len(data)
+      while boundary > 0:
+        try:
+          text = data[:boundary].decode("utf-8")
+          break
+        except UnicodeDecodeError:
+          boundary -= 1
+      else:
+        pending = data
+        continue
+
+      yield text
+      pending = data[boundary:]
+
+    if pending:
+      yield pending.decode("utf-8")
 
 
 def train_unitoken_from_text(path: Path, vocab_size: int, num_chunks: int) -> dict[str, Any]:
@@ -154,7 +179,13 @@ def train_unitoken_from_text(path: Path, vocab_size: int, num_chunks: int) -> di
   return train_result
 
 
-def train_hugging_face_from_text(path: Path, vocab_size: int, chunk_bytes: int) -> dict[str, Any]:
+def train_hugging_face_from_text(
+  path: Path,
+  vocab_size: int,
+  *,
+  chunk_bytes: int | None,
+  segments: Sequence[tuple[int, int]] | None,
+) -> dict[str, Any]:
   tokenizer = Tokenizer(models.BPE())
   tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
   trainer = trainers.BpeTrainer(
@@ -162,8 +193,9 @@ def train_hugging_face_from_text(path: Path, vocab_size: int, chunk_bytes: int) 
     special_tokens=SPECIAL_TOKENS,
     initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
   )
+  iterator = iter_text_segments(path, segments) if segments is not None else iter_text_chunks(path, chunk_bytes or 1)
   tokenizer.train_from_iterator(
-    iter_text_chunks(path, chunk_bytes),
+    iterator,
     trainer=trainer,
   )
   return {
@@ -257,6 +289,13 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_text(args: argparse.Namespace) -> dict[str, Any]:
+  hf_segments = None
+  hf_chunking = f"fixed {args.hf_chunk_bytes} byte chunks"
+  if args.hf_chunk_bytes is None:
+    pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
+    hf_segments = pretokenizer.find_chunk_boundaries(args.text, args.chunks)
+    hf_chunking = "unitoken chunk boundaries"
+
   unitoken = time_call(
     "unitoken.raw_train",
     lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunks),
@@ -264,7 +303,12 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   )
   hf = time_call(
     "huggingface.raw_train",
-    lambda: train_hugging_face_from_text(args.text, args.vocab_size, args.hf_chunk_bytes),
+    lambda: train_hugging_face_from_text(
+      args.text,
+      args.vocab_size,
+      chunk_bytes=args.hf_chunk_bytes,
+      segments=hf_segments,
+    ),
     args.repeats,
   )
 
@@ -278,6 +322,7 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   return {
     "text": str(args.text),
     "text_bytes": args.text.stat().st_size,
+    "huggingface_chunking": hf_chunking,
     "target_vocab_size": args.vocab_size,
     "same_vocab": same_vocab,
     "speedup_hf_over_unitoken_median": speedup,
@@ -286,7 +331,7 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
       without_vocab(unitoken),
       without_vocab(hf),
     ],
-    "note": "Raw-text mode includes unitoken pretokenization plus training. Hugging Face receives fixed-size text chunks, so vocab parity can differ at chunk boundaries.",
+    "note": "Raw-text mode includes unitoken pretokenization plus training. By default Hugging Face receives unitoken's chunk boundaries so vocab parity reflects tokenizer/trainer behavior instead of iterator boundary differences.",
   }
 
 
@@ -299,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--repeats", type=int, default=3)
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a faster smoke benchmark.")
   parser.add_argument("--chunks", type=int, default=1024, help="Desired unitoken pretokenizer chunks in --text mode.")
-  parser.add_argument("--hf-chunk-bytes", type=int, default=8 * 1024 * 1024, help="Text chunk size yielded to Hugging Face in --text mode.")
+  parser.add_argument("--hf-chunk-bytes", type=int, help="Force fixed byte chunks for Hugging Face in --text mode. Defaults to unitoken chunk boundaries.")
   parser.add_argument("--diff-limit", type=int, default=10)
   parser.add_argument("--json", type=Path)
   args = parser.parse_args(argv)
@@ -309,7 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--repeats must be at least 1")
   if args.chunks < 1:
     parser.error("--chunks must be at least 1")
-  if args.hf_chunk_bytes < 1:
+  if args.hf_chunk_bytes is not None and args.hf_chunk_bytes < 1:
     parser.error("--hf-chunk-bytes must be at least 1")
 
   results = run_text(args) if args.text else run_words(args)
