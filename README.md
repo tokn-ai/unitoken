@@ -70,6 +70,41 @@ python benchmarks/compare_tiktoken.py
 The benchmark reports unitoken encode/decode timings and, when upstream
 `tiktoken` is importable, matching upstream timings.
 
+Benchmark training against Hugging Face
+---------------------------------------
+
+Install the dev dependency and run:
+
+```bash
+uv pip install "tokenizers>=0.22.1"
+python benchmarks/compare_hf_training.py
+```
+
+The benchmark trains unitoken and Hugging Face `tokenizers` on the same
+word-frequency fixture, checks that the learned byte-level BPE vocabularies
+match, and reports median training speed.
+
+For an end-to-end raw text comparison:
+
+```bash
+python benchmarks/compare_hf_training.py --text out/fineweb2_1GiB.txt --repeats 1
+```
+
+Raw text mode reports unitoken pretokenization and BPE training phases
+separately, then compares the total against Hugging Face raw training.
+
+Prepare benchmark data
+----------------------
+
+To create a larger raw UTF-8 text sample from local FineWeb2 Parquet shards:
+
+```bash
+python benchmarks/create_fineweb2_sample.py --input-dir /path/to/fineweb2/10BT
+```
+
+This is a data-preparation step. Use the generated text with the CLI or a
+separate benchmark that measures pretokenization/training on raw input.
+
 Building from source
 --------------------
 
