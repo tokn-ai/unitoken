@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -57,6 +57,18 @@ fn trainer_config(initial_alphabet: Option<&str>, tie_break: Option<&str>) -> Py
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
+  })
+}
+
+fn chunk_options(chunk_size: u64, boundary: &str) -> PyResult<ChunkOptions> {
+  let boundary = BoundaryMode::parse(boundary)
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+  if chunk_size == 0 {
+    return Err(pyo3::exceptions::PyValueError::new_err("chunk_size must be at least 1"));
+  }
+  Ok(ChunkOptions {
+    hint: ChunkHint::Size(chunk_size),
+    boundary,
   })
 }
 
@@ -298,13 +310,14 @@ impl PreTokenizer {
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 
-  #[pyo3(name = "find_chunk_boundaries", signature = (path, desired_num_chunks = 1024))]
+  #[pyo3(name = "find_chunk_boundaries", signature = (path, *, chunk_size=1048576, boundary="auto"))]
   /// Python wrapper for [`PreTokenizer::find_chunk_boundaries`].
   pub fn py_find_chunk_boundaries(
-    &self, py: Python, path: PathBuf, desired_num_chunks: usize,
+    &self, py: Python, path: PathBuf, chunk_size: u64, boundary: &str,
   ) -> PyResult<Vec<(u64, usize)>> {
+    let options = chunk_options(chunk_size, boundary)?;
     py.detach(||
-      self.find_chunk_boundaries(path, desired_num_chunks)
+      self.find_chunk_boundaries_with_options(path, options)
     ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 
@@ -318,13 +331,14 @@ impl PreTokenizer {
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 
-  #[pyo3(name = "get_words_from_file", signature = (path, desired_num_chunks = 1024))]
+  #[pyo3(name = "get_words_from_file", signature = (path, *, chunk_size=1048576, boundary="auto"))]
   /// Python wrapper for [`PreTokenizer::get_words_from_file`].
   pub fn py_get_words_from_file(
-    &self, py: Python, path: PathBuf, desired_num_chunks: usize,
+    &self, py: Python, path: PathBuf, chunk_size: u64, boundary: &str,
   ) -> PyResult<BTreeMap<String, i64>> {
+    let options = chunk_options(chunk_size, boundary)?;
     py.detach(||
-      self.get_words_from_file(path, desired_num_chunks)
+      self.get_words_from_file_with_options(path, options)
     ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 }
