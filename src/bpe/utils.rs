@@ -105,9 +105,23 @@ struct MergeWordUpdate<I> {
   changes: Vec<((I, I), MergeData)>,
 }
 
+struct MergeBatchUpdate<I> {
+  word_updates: Vec<(usize, Vec<I>)>,
+  changes: BTreeMap<(I, I), MergeData>,
+}
+
 const LARGE_WORD_DICT_THRESHOLD: usize = 1_000_000;
 const LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 1024;
 const SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 64 * 1024;
+
+fn should_parallel_merge(words_len: usize, occurs_in_len: usize) -> bool {
+  let threshold = if words_len >= LARGE_WORD_DICT_THRESHOLD {
+    LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
+  } else {
+    SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
+  };
+  occurs_in_len >= threshold
+}
 
 fn add_local_change<I: Eq + Copy>(
   changes: &mut Vec<((I, I), MergeData)>,
@@ -214,9 +228,20 @@ where
   }
 }
 
+fn merge_change_map<I>(changes: &mut BTreeMap<(I, I), MergeData>, local_changes: BTreeMap<(I, I), MergeData>)
+where
+  I: Ord,
+{
+  for (tp, local) in local_changes {
+    let data = changes.entry(tp).or_default();
+    data.freq += local.freq;
+    data.occurs_in.extend(local.occurs_in);
+  }
+}
+
 fn merge_words_sequential<C, I>(
   words: &mut Vec<PreToken<C, I>>,
-  affected_words: Vec<usize>,
+  affected_words: impl IntoIterator<Item = usize>,
   merge_tp: (I, I),
   target_idx: I,
 ) -> BTreeMap<(I, I), MergeData>
@@ -294,29 +319,45 @@ where
 {
   // all tp with target_idx MUST be positive, so that occurs_in should be added.
   // while tp without target_idx MUST be negative, and occurs_in should be removed.
-  let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize).collect::<Vec<_>>();
-  let parallel_threshold = if words.len() >= LARGE_WORD_DICT_THRESHOLD {
-    LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
-  } else {
-    SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
-  };
-  if affected_words.len() < parallel_threshold {
+  if !should_parallel_merge(words.len(), merge.data.occurs_in.len()) {
+    let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize);
     return merge_words_sequential(words, affected_words, merge.tp, target_idx);
   }
 
-  let mut changes = BTreeMap::<(I, I), MergeData>::new();
-  let updates = affected_words
+  let update = merge
+    .data
+    .occurs_in
     .par_iter()
-    .map(|&word_idx| {
-      let word = &words[word_idx];
-      merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx)
-    })
-    .collect::<Vec<_>>();
-  for update in updates {
-    words[update.word_idx].idxs = update.idxs;
-    merge_changes(&mut changes, update.changes);
+    .fold(
+      || MergeBatchUpdate {
+        word_updates: Vec::new(),
+        changes: BTreeMap::new(),
+      },
+      |mut batch, &word_idx| {
+        let word_idx = word_idx as usize;
+        let word = &words[word_idx];
+        let update = merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx);
+        batch.word_updates.push((update.word_idx, update.idxs));
+        merge_changes(&mut batch.changes, update.changes);
+        batch
+      },
+    )
+    .reduce(
+      || MergeBatchUpdate {
+        word_updates: Vec::new(),
+        changes: BTreeMap::new(),
+      },
+      |mut left, mut right| {
+        left.word_updates.append(&mut right.word_updates);
+        merge_change_map(&mut left.changes, right.changes);
+        left
+      },
+    );
+
+  for (word_idx, idxs) in update.word_updates {
+    words[word_idx].idxs = idxs;
   }
-  changes
+  update.changes
 }
 
 pub(crate) fn _vocab_get<C, I>(vocab: &BTreeMap<I, Word<C>>, idx: I) -> MyResult<Word<C>>
