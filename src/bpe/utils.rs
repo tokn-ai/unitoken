@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, hash_map};
 
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
+
 use crate::{MyError, MyResult, spec::WordDisplay, traits::CanStrToWord};
 
 use super::*;
@@ -85,30 +87,184 @@ impl WordDebugExt for Word<Character> {
   }
 }
 
-pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData>
+fn add_local_pair_delta<I: Eq + Copy>(
+  local_freq: &mut Vec<((I, I), Freq)>,
+  tp: (I, I),
+  delta: Freq,
+) {
+  if let Some((_, freq)) = local_freq.iter_mut().find(|(existing, _)| *existing == tp) {
+    *freq += delta;
+  } else {
+    local_freq.push((tp, delta));
+  }
+}
+
+struct MergeWordUpdate<I> {
+  word_idx: usize,
+  idxs: Vec<I>,
+  changes: Vec<((I, I), MergeData)>,
+}
+
+struct MergeBatchUpdate<I> {
+  word_updates: Vec<(usize, Vec<I>)>,
+  changes: BTreeMap<(I, I), MergeData>,
+}
+
+const LARGE_WORD_DICT_THRESHOLD: usize = 1_000_000;
+const LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 1024;
+const SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 64 * 1024;
+
+fn should_parallel_merge(words_len: usize, occurs_in_len: usize) -> bool {
+  let threshold = if words_len >= LARGE_WORD_DICT_THRESHOLD {
+    LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
+  } else {
+    SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
+  };
+  occurs_in_len >= threshold
+}
+
+fn add_local_change<I: Eq + Copy>(
+  changes: &mut Vec<((I, I), MergeData)>,
+  tp: (I, I),
+  freq_delta: Freq,
+) {
+  if let Some((_, data)) = changes.iter_mut().find(|(existing, _)| *existing == tp) {
+    data.freq += freq_delta;
+  } else {
+    changes.push((tp, MergeData::new(freq_delta)));
+  }
+}
+
+fn add_local_occurs_in<I: Eq + Copy>(
+  changes: &mut Vec<((I, I), MergeData)>,
+  tp: (I, I),
+  word_idx: usize,
+) {
+  if let Some((_, data)) = changes.iter_mut().find(|(existing, _)| *existing == tp) {
+    data.occurs_in.insert(word_idx as _);
+  }
+}
+
+fn merge_word<I>(
+  word_idx: usize,
+  w_idx: &[I],
+  w_freq: Freq,
+  merge_tp: (I, I),
+  target_idx: I,
+) -> MergeWordUpdate<I>
 where
   I: Ord + Copy,
 {
-  // all tp with target_idx MUST be positive, so that occurs_in should be added.
-  // while tp without target_idx MUST be negative, and occurs_in should be removed.
+  let mut changes = Vec::<((I, I), MergeData)>::with_capacity(8);
+  let mut local_freq = Vec::<((I, I), Freq)>::with_capacity(w_idx.len().saturating_sub(1));
+  let mut new_idxs = Vec::with_capacity(w_idx.len());
+  let mut i = 0;
+  let mut last_tp: Option<(I, I)> = None;
+  while i + 1 < w_idx.len() {
+    let tp = (w_idx[i], w_idx[i + 1]);
+    add_local_pair_delta(&mut local_freq, tp, 1);
+    if tp == merge_tp {
+      new_idxs.push(target_idx);
+      i += 2;
+      add_local_change(&mut changes, tp, -w_freq);
+      add_local_pair_delta(&mut local_freq, tp, -1);
+      // deal with left neighbor,
+      // e.g. in "abcd", when merging "b" and "c",
+      // old_tp = ("a", "b"), new_tp = ("a", "bc")
+      if let Some(old_tp) = last_tp {
+        let new_tp = (old_tp.0, target_idx);
+        add_local_change(&mut changes, old_tp, -w_freq);
+        add_local_change(&mut changes, new_tp, w_freq);
+        add_local_pair_delta(&mut local_freq, old_tp, -1);
+        add_local_pair_delta(&mut local_freq, new_tp, -1);
+        // if i >= w_idx.len(), loop is end, and last_tp never reads
+        // last_tp = Some(new_tp);
+      }
+      // deal with right neighbor, notice i+=2 above
+      // e.g. in "abcd", when merging "b" and "c",
+      // old_tp = ("c", "d"), new_tp = ("bc", "d")
+      if i < w_idx.len() {
+        let old_tp = (tp.1, w_idx[i]);
+        let new_tp = (target_idx, old_tp.1);
+        add_local_change(&mut changes, old_tp, -w_freq);
+        add_local_change(&mut changes, new_tp, w_freq);
+        // old_tp is not increased, so that it should not be decreased.
+        // Keep a zero local entry so occurrence-set membership is still updated.
+        add_local_pair_delta(&mut local_freq, old_tp, 0);
+        // when combining "b" and "c" in "bcbc",
+        // new_tp=("bc", "b") would be false positive occurs_in
+        add_local_pair_delta(&mut local_freq, new_tp, -1);
+        last_tp = Some(new_tp);
+      }
+    } else {
+      new_idxs.push(w_idx[i]);
+      last_tp = Some(tp);
+      i += 1;
+    }
+  }
+  if i < w_idx.len() {
+    new_idxs.push(w_idx[i]);
+  }
+
+  local_freq.iter().filter(|(_, i)| *i <= 0).for_each(|(tp, _)| {
+    add_local_occurs_in(&mut changes, *tp, word_idx);
+  });
+
+  MergeWordUpdate {
+    word_idx,
+    idxs: new_idxs,
+    changes,
+  }
+}
+
+fn merge_changes<I>(changes: &mut BTreeMap<(I, I), MergeData>, local_changes: Vec<((I, I), MergeData)>)
+where
+  I: Ord,
+{
+  for (tp, local) in local_changes {
+    let data = changes.entry(tp).or_default();
+    data.freq += local.freq;
+    data.occurs_in.extend(local.occurs_in);
+  }
+}
+
+fn merge_change_map<I>(changes: &mut BTreeMap<(I, I), MergeData>, local_changes: BTreeMap<(I, I), MergeData>)
+where
+  I: Ord,
+{
+  for (tp, local) in local_changes {
+    let data = changes.entry(tp).or_default();
+    data.freq += local.freq;
+    data.occurs_in.extend(local.occurs_in);
+  }
+}
+
+fn merge_words_sequential<C, I>(
+  words: &mut Vec<PreToken<C, I>>,
+  affected_words: impl IntoIterator<Item = usize>,
+  merge_tp: (I, I),
+  target_idx: I,
+) -> BTreeMap<(I, I), MergeData>
+where
+  I: Ord + Copy,
+{
   let mut changes = BTreeMap::<(I, I), MergeData>::new();
-  for k in merge.data.occurs_in.iter().copied() {
-    let w = &mut words[k as usize];
-    // local freq tracks the frequency changes within this word.
-    let mut local_freq = BTreeMap::<(I, I), Freq>::new();
+  for word_idx in affected_words {
+    let w = &mut words[word_idx];
     let w_idx = &w.idxs;
     let w_freq = w.freq;
+    let mut local_freq = Vec::<((I, I), Freq)>::with_capacity(w_idx.len().saturating_sub(1));
     let mut new_idxs = Vec::with_capacity(w_idx.len());
     let mut i = 0;
     let mut last_tp: Option<(I, I)> = None;
     while i + 1 < w_idx.len() {
       let tp = (w_idx[i], w_idx[i + 1]);
-      *local_freq.entry(tp).or_default() += 1;
-      if tp == merge.tp {
+      add_local_pair_delta(&mut local_freq, tp, 1);
+      if tp == merge_tp {
         new_idxs.push(target_idx);
         i += 2;
         changes.entry(tp).or_default().freq -= w_freq;
-        *local_freq.entry(tp).or_default() -= 1;
+        add_local_pair_delta(&mut local_freq, tp, -1);
         // deal with left neighbor,
         // e.g. in "abcd", when merging "b" and "c",
         // old_tp = ("a", "b"), new_tp = ("a", "bc")
@@ -116,8 +272,8 @@ where
           let new_tp = (old_tp.0, target_idx);
           changes.entry(old_tp).or_default().freq -= w_freq;
           changes.entry(new_tp).or_default().freq += w_freq;
-          *local_freq.entry(old_tp).or_default() -= 1;
-          *local_freq.entry(new_tp).or_default() -= 1;
+          add_local_pair_delta(&mut local_freq, old_tp, -1);
+          add_local_pair_delta(&mut local_freq, new_tp, -1);
           // if i >= w_idx.len(), loop is end, and last_tp never reads
           // last_tp = Some(new_tp);
         }
@@ -129,11 +285,12 @@ where
           let new_tp = (target_idx, old_tp.1);
           changes.entry(old_tp).or_default().freq -= w_freq;
           changes.entry(new_tp).or_default().freq += w_freq;
-          // old_tp is not increased, so that it should not be decreased
-          *local_freq.entry(old_tp).or_default() -= 0;
+          // old_tp is not increased, so that it should not be decreased.
+          // Keep a zero local entry so occurrence-set membership is still updated.
+          add_local_pair_delta(&mut local_freq, old_tp, 0);
           // when combining "b" and "c" in "bcbc",
           // new_tp=("bc", "b") would be false positive occurs_in
-          *local_freq.entry(new_tp).or_default() -= 1;
+          add_local_pair_delta(&mut local_freq, new_tp, -1);
           last_tp = Some(new_tp);
         }
       } else {
@@ -146,13 +303,61 @@ where
       new_idxs.push(w_idx[i]);
     }
 
-    local_freq.iter().filter(|(_, i)| **i <= 0).for_each(|(tp, _)| {
-      changes.entry(*tp).and_modify(|d| { d.occurs_in.insert(k as _); });
+    local_freq.iter().filter(|(_, i)| *i <= 0).for_each(|(tp, _)| {
+      changes.entry(*tp).and_modify(|d| { d.occurs_in.insert(word_idx as _); });
     });
 
     w.idxs = new_idxs;
   }
   changes
+}
+
+pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData>
+where
+  C: Send + Sync,
+  I: Ord + Copy + Send + Sync,
+{
+  // all tp with target_idx MUST be positive, so that occurs_in should be added.
+  // while tp without target_idx MUST be negative, and occurs_in should be removed.
+  if !should_parallel_merge(words.len(), merge.data.occurs_in.len()) {
+    let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize);
+    return merge_words_sequential(words, affected_words, merge.tp, target_idx);
+  }
+
+  let update = merge
+    .data
+    .occurs_in
+    .par_iter()
+    .fold(
+      || MergeBatchUpdate {
+        word_updates: Vec::new(),
+        changes: BTreeMap::new(),
+      },
+      |mut batch, &word_idx| {
+        let word_idx = word_idx as usize;
+        let word = &words[word_idx];
+        let update = merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx);
+        batch.word_updates.push((update.word_idx, update.idxs));
+        merge_changes(&mut batch.changes, update.changes);
+        batch
+      },
+    )
+    .reduce(
+      || MergeBatchUpdate {
+        word_updates: Vec::new(),
+        changes: BTreeMap::new(),
+      },
+      |mut left, mut right| {
+        left.word_updates.append(&mut right.word_updates);
+        merge_change_map(&mut left.changes, right.changes);
+        left
+      },
+    );
+
+  for (word_idx, idxs) in update.word_updates {
+    words[word_idx].idxs = idxs;
+  }
+  update.changes
 }
 
 pub(crate) fn _vocab_get<C, I>(vocab: &BTreeMap<I, Word<C>>, idx: I) -> MyResult<Word<C>>

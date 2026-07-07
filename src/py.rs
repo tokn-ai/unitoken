@@ -19,6 +19,7 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn add_words(&mut self, py: Python, words: Vec<(String, i64)>);
   fn vocab_size(&self) -> usize;
   fn init_training(&mut self, py: Python);
+  fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
   fn get_vocabs(&self) -> Vocabs;
   fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()>;
@@ -112,6 +113,14 @@ impl BpeTrainer_u8_Idx {
     py.detach(|| self.inner.init_training())
   }
 
+  /// Train until the vocabulary reaches `vocab_size`.
+  ///
+  /// Returns the updated vocabulary size.
+  pub fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64> {
+    py.detach(|| self.inner.train_until(vocab_size)).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(self.inner.vocab_size() as i64)
+  }
+
   /// Perform one training step.
   ///
   /// Returns the updated vocabulary size.
@@ -192,6 +201,14 @@ impl BpeTrainer_Character_CharIdx {
   /// Initialize internal training state.
   pub fn init_training(&mut self, py: Python) {
     py.detach(|| self.inner.init_training())
+  }
+
+  /// Train until the vocabulary reaches `vocab_size`.
+  ///
+  /// Returns the updated vocabulary size.
+  pub fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64> {
+    py.detach(|| self.inner.train_until(vocab_size)).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(self.inner.vocab_size() as i64)
   }
 
   /// Perform one training step.
