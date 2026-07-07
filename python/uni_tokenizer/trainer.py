@@ -83,12 +83,12 @@ class BpeTrainer:
   def train(self, vocab_size: int) -> None:
     """Train until the vocab reaches `vocab_size` entries.
 
-    This is a convenience wrapper over repeated :meth:`step` calls.
+    Training runs inside Rust until the target is reached.
     """
-    self.init_training()
-    for _ in range(self.vocab_size, vocab_size):
-      if self.step() is None:
-        return
+    try:
+      self._trainer.train_until(vocab_size)
+    except:
+      return
 
   def step(self) -> int | None:
     """Perform one training step.

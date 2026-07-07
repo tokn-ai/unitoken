@@ -297,7 +297,7 @@ impl<C, I: IdxLike> BpeTrainer<C, I>
 where
   Word<C>: WordDebugExt,
   I: HasChar<C>,
-  C: CanStrToWord + Ord,
+  C: CanStrToWord + Ord + Send + Sync,
 {
   /// Initialize the merge candidate map from `self.words`.
   ///
@@ -412,6 +412,7 @@ where
   /// Apply one merge operation and return the newly assigned vocab index.
   ///
   /// This is the core training step once a merge candidate has been selected.
+  #[hotpath::measure]
   pub fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
     let target_idx = self._add_vocab_idx();
     // if target = Some(j), this is a single char token, no need to merge.
@@ -463,6 +464,27 @@ where
     metrics::gauge!("bpe_trainer.pre_merges_count").set(self.pre_merges.len() as f64);
     metrics::gauge!("bpe_trainer.words_count").set(self.words.len() as f64);
   }
+
+  /// Initialize trainer state and run merge steps until `vocab_size` is reached.
+  #[hotpath::measure]
+  pub fn train_until(&mut self, vocab_size: usize) -> MyResult<()>
+  where
+    C: Clone,
+  {
+    self._build_pre_merges();
+    self._metrics();
+    while self.vocab.len() < vocab_size {
+      let Some(merge) = self._get_largest_merge() else {
+        return Err(MyError::TrainStep);
+      };
+      self._step(merge);
+      if self.vocab.len() % 100 == 0 {
+        self._metrics();
+      }
+    }
+    self._metrics();
+    Ok(())
+  }
 }
 
 impl<C, I> Train for BpeTrainer<C, I>
@@ -488,6 +510,11 @@ where
     self._metrics();
   }
 
+  fn train(&mut self, vocab_size: usize) -> MyResult<()> {
+    self.train_until(vocab_size)
+  }
+
+  #[hotpath::measure]
   fn step(&mut self) -> MyResult<()> {
     // Find the most frequent merge. Hugging Face's BPE trainer resolves equal
     // frequencies by choosing the smallest pair ids, so keep that ordering here.
