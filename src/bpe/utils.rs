@@ -85,6 +85,18 @@ impl WordDebugExt for Word<Character> {
   }
 }
 
+fn add_local_pair_delta<I: Eq + Copy>(
+  local_freq: &mut Vec<((I, I), Freq)>,
+  tp: (I, I),
+  delta: Freq,
+) {
+  if let Some((_, freq)) = local_freq.iter_mut().find(|(existing, _)| *existing == tp) {
+    *freq += delta;
+  } else {
+    local_freq.push((tp, delta));
+  }
+}
+
 pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData>
 where
   I: Ord + Copy,
@@ -95,20 +107,20 @@ where
   for k in merge.data.occurs_in.iter().copied() {
     let w = &mut words[k as usize];
     // local freq tracks the frequency changes within this word.
-    let mut local_freq = BTreeMap::<(I, I), Freq>::new();
     let w_idx = &w.idxs;
     let w_freq = w.freq;
+    let mut local_freq = Vec::<((I, I), Freq)>::with_capacity(w_idx.len().saturating_sub(1));
     let mut new_idxs = Vec::with_capacity(w_idx.len());
     let mut i = 0;
     let mut last_tp: Option<(I, I)> = None;
     while i + 1 < w_idx.len() {
       let tp = (w_idx[i], w_idx[i + 1]);
-      *local_freq.entry(tp).or_default() += 1;
+      add_local_pair_delta(&mut local_freq, tp, 1);
       if tp == merge.tp {
         new_idxs.push(target_idx);
         i += 2;
         changes.entry(tp).or_default().freq -= w_freq;
-        *local_freq.entry(tp).or_default() -= 1;
+        add_local_pair_delta(&mut local_freq, tp, -1);
         // deal with left neighbor,
         // e.g. in "abcd", when merging "b" and "c",
         // old_tp = ("a", "b"), new_tp = ("a", "bc")
@@ -116,8 +128,8 @@ where
           let new_tp = (old_tp.0, target_idx);
           changes.entry(old_tp).or_default().freq -= w_freq;
           changes.entry(new_tp).or_default().freq += w_freq;
-          *local_freq.entry(old_tp).or_default() -= 1;
-          *local_freq.entry(new_tp).or_default() -= 1;
+          add_local_pair_delta(&mut local_freq, old_tp, -1);
+          add_local_pair_delta(&mut local_freq, new_tp, -1);
           // if i >= w_idx.len(), loop is end, and last_tp never reads
           // last_tp = Some(new_tp);
         }
@@ -129,11 +141,12 @@ where
           let new_tp = (target_idx, old_tp.1);
           changes.entry(old_tp).or_default().freq -= w_freq;
           changes.entry(new_tp).or_default().freq += w_freq;
-          // old_tp is not increased, so that it should not be decreased
-          *local_freq.entry(old_tp).or_default() -= 0;
+          // old_tp is not increased, so that it should not be decreased.
+          // Keep a zero local entry so occurrence-set membership is still updated.
+          add_local_pair_delta(&mut local_freq, old_tp, 0);
           // when combining "b" and "c" in "bcbc",
           // new_tp=("bc", "b") would be false positive occurs_in
-          *local_freq.entry(new_tp).or_default() -= 1;
+          add_local_pair_delta(&mut local_freq, new_tp, -1);
           last_tp = Some(new_tp);
         }
       } else {
@@ -146,7 +159,7 @@ where
       new_idxs.push(w_idx[i]);
     }
 
-    local_freq.iter().filter(|(_, i)| **i <= 0).for_each(|(tp, _)| {
+    local_freq.iter().filter(|(_, i)| *i <= 0).for_each(|(tp, _)| {
       changes.entry(*tp).and_modify(|d| { d.occurs_in.insert(k as _); });
     });
 
