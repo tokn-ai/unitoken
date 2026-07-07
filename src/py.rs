@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -321,10 +321,19 @@ impl PreTokenizer {
   /// - `special_tokens`: special tokens to treat as indivisible.
   /// - `eot_token`: end-of-text token used for chunk boundary alignment.
   /// - `pat`: optional regex pattern; defaults to the crate's default.
-  #[pyo3(signature = (special_tokens, eot_token=None, pat=None))]
-  pub fn new_py(special_tokens: Vec<String>, eot_token: Option<String>, pat: Option<String>) -> PyResult<Self> {
-    Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
-      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+  #[pyo3(signature = (special_tokens, eot_token=None, pat=None, unicode_bigrams=None))]
+  pub fn new_py(
+    special_tokens: Vec<String>, eot_token: Option<String>, pat: Option<String>, unicode_bigrams: Option<Vec<String>>,
+  ) -> PyResult<Self> {
+    let mut pretokenizer = Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    if let Some(unicode_bigrams) = unicode_bigrams {
+      pretokenizer = pretokenizer.with_unicode_bigrams(
+        parse_unicode_bigrams(&unicode_bigrams)
+          .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
+      );
+    }
+    Ok(pretokenizer)
   }
 
   #[pyo3(name = "find_chunk_boundaries", signature = (path, *, chunk_size=1048576, boundary="auto"))]
@@ -357,6 +366,17 @@ impl PreTokenizer {
     py.detach(||
       self.get_words_from_file_with_options(path, options)
     ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+  }
+
+  #[pyo3(name = "build_unicode_bigrams_from_file", signature = (path, *, chunk_size=1048576, boundary="auto", top_k=100000, min_freq=16))]
+  pub fn py_build_unicode_bigrams_from_file(
+    &self, py: Python, path: PathBuf, chunk_size: u64, boundary: &str, top_k: usize, min_freq: i64,
+  ) -> PyResult<Vec<String>> {
+    let options = chunk_options(chunk_size, boundary)?;
+    let bigrams = py.detach(||
+      self.build_unicode_bigram_set_from_file_with_options(path, options, top_k, min_freq)
+    ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    Ok(bigrams.into_iter().map(unicode_bigram_to_string).collect())
   }
 }
 

@@ -16,8 +16,9 @@ class PreTokenizer:
     special_tokens: Sequence[str],
     eot_token: str | None = None,
     pat: str | None = None,
+    unicode_bigrams: Sequence[str] | None = None,
   ) -> None:
-    self._inner = _PreTokenizer(special_tokens, eot_token, pat)
+    self._inner = _PreTokenizer(special_tokens, eot_token, pat, unicode_bigrams)
 
   def find_chunk_boundaries(
     self,
@@ -44,3 +45,20 @@ class PreTokenizer:
     length: int,
   ) -> dict[str, int]:
     return self._inner.get_words_from_segment(path, offset, length)
+
+  def build_unicode_bigrams_from_file(
+    self,
+    path: str | PathLike,
+    *,
+    chunk_size: int = 1024 * 1024,
+    boundary: BoundaryMode = "auto",
+    top_k: int = 100_000,
+    min_freq: int = 16,
+  ) -> list[str]:
+    return self._inner.build_unicode_bigrams_from_file(
+      path,
+      chunk_size=chunk_size,
+      boundary=boundary,
+      top_k=top_k,
+      min_freq=min_freq,
+    )
