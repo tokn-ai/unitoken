@@ -169,6 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   rendered = json.dumps(result, indent=2)
   print(rendered)
   if args.json:
+    args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(rendered + "\n", encoding="utf-8")
   return 0
 

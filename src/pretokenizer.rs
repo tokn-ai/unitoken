@@ -570,8 +570,8 @@ mod tests {
 
   #[test]
   fn test_find_chunk_boundaries_falls_back_without_split_token() {
-    std::fs::create_dir_all("out").ok();
-    let path = std::path::Path::new("out/no_split_token.txt");
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/no_split_token.txt");
     std::fs::write(path, "abcdefgh").unwrap();
 
     let boundaries = _find_chunk_boundaries(path, 4, DEFAULT_EOT).unwrap();
@@ -581,8 +581,8 @@ mod tests {
 
   #[test]
   fn test_find_chunk_boundaries_line_mode() {
-    std::fs::create_dir_all("out").ok();
-    let path = std::path::Path::new("out/line_boundaries.txt");
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/line_boundaries.txt");
     std::fs::write(path, "aa\nbb\ncc\ndd\n").unwrap();
 
     let boundaries = _find_chunk_boundaries_with_options(
@@ -599,8 +599,8 @@ mod tests {
 
   #[test]
   fn test_find_chunk_boundaries_chunk_size_hint() {
-    std::fs::create_dir_all("out").ok();
-    let path = std::path::Path::new("out/chunk_size_hint.txt");
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/chunk_size_hint.txt");
     std::fs::write(path, "abcdefghij").unwrap();
 
     let boundaries = _find_chunk_boundaries_with_options(
@@ -631,8 +631,8 @@ mod tests {
     if NAME == "tinystories_sample_5M" {
       assert_eq!(words.get(" the").cloned().unwrap_or(0), 48886);
     }
-    std::fs::create_dir_all("out").ok();
-    serde_json::to_writer_pretty(std::fs::File::create(format!("out/_words.{NAME}.json")).unwrap(), &words).unwrap();
+    std::fs::create_dir_all(format!("out/data/{NAME}")).ok();
+    serde_json::to_writer_pretty(std::fs::File::create(format!("out/data/{NAME}/_words.json")).unwrap(), &words).unwrap();
     let answer = std::fs::read_to_string(format!("fixtures/_words.{NAME}.json")).unwrap();
     let expected: OrderMap<String, Freq> = serde_json::from_str(&answer).unwrap();
     assert_eq!(words, expected);

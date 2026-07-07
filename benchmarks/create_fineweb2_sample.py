@@ -11,7 +11,7 @@ from typing import Any
 import pyarrow.parquet as pq
 
 
-DEFAULT_OUTPUT = Path("out") / "fineweb2_1GiB.txt"
+DEFAULT_OUTPUT = Path("out") / "data" / "fineweb2" / "fineweb2_1GiB.txt"
 DEFAULT_SEPARATOR = "<|endoftext|>"
 GIB = 1024 ** 3
 
@@ -107,6 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   rendered = json.dumps(result, indent=2)
   print(rendered)
   if args.json:
+    args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(rendered + "\n", encoding="utf-8")
   return 0 if result["bytes_written"] >= args.size_bytes else 1
 

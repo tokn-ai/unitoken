@@ -693,11 +693,11 @@ mod tests {
       // let m = &bpe.merges.last().unwrap();
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
-    std::fs::create_dir_all("out").ok();
-    bpe.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/vocab.{NAME}.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/merges.{NAME}.txt")).unwrap()).unwrap();
+    std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
+    bpe.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/vocab.json")).unwrap()).unwrap();
+    bpe.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/merges.txt")).unwrap()).unwrap();
 
-    let merges_txt = std::fs::read_to_string(format!("out/merges.{NAME}.txt")).unwrap();
+    let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.txt")).unwrap();
     assert_eq!(merges_txt, merges_expect_txt);
   }
@@ -728,11 +728,11 @@ mod tests {
       // let m = &bpe.merges.last().unwrap();
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
-    std::fs::create_dir_all("out").ok();
-    bpe.save_vocab_json(&spec, std::fs::File::create(format!("out/vocab.{NAME}.uni.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&spec, std::fs::File::create(format!("out/merges.{NAME}.uni.txt")).unwrap()).unwrap();
+    std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
+    bpe.save_vocab_json(&spec, std::fs::File::create(format!("out/models/{NAME}/vocab.uni.json")).unwrap()).unwrap();
+    bpe.save_merges_txt(&spec, std::fs::File::create(format!("out/models/{NAME}/merges.uni.txt")).unwrap()).unwrap();
 
-    let merges_txt = std::fs::read_to_string(format!("out/merges.{NAME}.uni.txt")).unwrap();
+    let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.uni.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.uni.txt")).unwrap();
     let merges = merges_txt.trim_end().lines().collect::<Vec<_>>();
     assert_eq!(merges, merges_expect_txt.lines().take(merges.len()).collect::<Vec<_>>());

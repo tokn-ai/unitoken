@@ -40,15 +40,6 @@ impl Commands {
     }
   }
 
-  fn out_dir(&self) -> &PathBuf {
-    match self {
-      Commands::Train(args) => &args.out_dir,
-      Commands::Encode(args) => &args.out_dir,
-      #[cfg(feature = "plot")]
-      Commands::Plot(args) => &args.out_dir,
-    }
-  }
-
   fn input_file(&self) -> &PathBuf {
     match self {
       Commands::Train(args) => &args.input_file,
@@ -154,8 +145,10 @@ impl SpecOutput {
 struct TrainArgs {
   #[arg(short, long, action = clap::ArgAction::Count)]
   verbose: u8,
-  #[arg(short, long = "out", default_value = "out")]
+  #[arg(short, long = "out", default_value = "out/models")]
   out_dir: PathBuf,
+  #[arg(long = "data-dir", default_value = "out/data")]
+  data_dir: PathBuf,
   #[arg(short='n', long, default_value = "10000")]
   vocab_size: u32,
   #[arg(long = "chunks", default_value = "1024")]
@@ -180,8 +173,10 @@ struct TrainArgs {
 struct EncodeArgs {
   #[arg(short, long, action = clap::ArgAction::Count)]
   verbose: u8,
-  #[arg(short, long = "out", default_value = "out")]
+  #[arg(short, long = "out", default_value = "out/encoded")]
   out_dir: PathBuf,
+  #[arg(long = "model-dir", default_value = "out/models")]
+  model_dir: PathBuf,
   #[arg(long = "vocab")]
   vocab_name: Option<String>,
   #[arg(short='n', long)]
@@ -204,7 +199,7 @@ struct EncodeArgs {
 struct PlotArgs {
   #[arg(short, long, action = clap::ArgAction::Count)]
   verbose: u8,
-  #[arg(short, long = "out", default_value = "out")]
+  #[arg(short, long = "out", default_value = "out/reports")]
   out_dir: PathBuf,
   #[arg(value_parser = clap::value_parser!(PathBuf))]
   input_file: PathBuf,
@@ -285,6 +280,7 @@ pub struct BpeTrainParams {
   pub chunk_options: ChunkOptions,
   pub special_tokens: Vec<String>,
   pub out_dir: PathBuf,
+  pub data_dir: PathBuf,
   pub char_level: SpecLevel,
   pub output_spec: SpecOutput,
   pub vocab_name: String,
@@ -296,6 +292,7 @@ fn bpe_train(BpeTrainParams{
   chunk_options,
   special_tokens,
   out_dir,
+  data_dir,
   char_level: spec,
   output_spec,
   vocab_name,
@@ -310,8 +307,10 @@ fn bpe_train(BpeTrainParams{
   // use first special_token as split_special_token
 
   info!("Pretokenizing input file...");
+  let words_dir = data_dir.join(file_stem);
+  fs::create_dir_all(&words_dir).expect("Failed to create words output directory");
   let words = _pretokenize(
-    out_dir.join(format!("_words.{file_stem}.json")),
+    words_dir.join("_words.json"),
     &input_path,
     chunk_options,
     special_tokens.clone(),
@@ -412,6 +411,7 @@ fn run_train(args: TrainArgs) {
     chunk_options,
     special_tokens,
     out_dir: args.out_dir,
+    data_dir: args.data_dir,
     char_level: args.char,
     output_spec,
     vocab_name,
@@ -424,6 +424,7 @@ fn run_train(args: TrainArgs) {
   debug!("Chunk options: {:?}", params.chunk_options);
   debug!("Input file: {}", params.input_path.display());
   debug!("Output directory: {}", params.out_dir.display());
+  debug!("Data directory: {}", params.data_dir.display());
   bpe_train(params);
 }
 
@@ -438,9 +439,10 @@ fn run_encode(args: EncodeArgs) {
 
   let out_spec = args.output_spec.unwrap_or(args.char.default_spec());
   let char_level = args.char.as_str();
-  let vocab_file = args.out_dir.join(format!("vocab.{vocab_name}[{char_level}].json"));
-  let merges_file = args.out_dir.join(format!("merges.{vocab_name}[{char_level}].txt"));
+  let vocab_file = args.model_dir.join(format!("vocab.{vocab_name}[{char_level}].json"));
+  let merges_file = args.model_dir.join(format!("merges.{vocab_name}[{char_level}].txt"));
   let out_file = args.out_dir.join(format!("idxs.{file_stem}.npy"));
+  fs::create_dir_all(&args.out_dir).expect("Failed to create output directory");
 
   let special_tokens = if let Some(special_tokens_path) = args.special_tokens_path {
     let content = fs::read_to_string(special_tokens_path).expect("Failed to read special tokens file");
@@ -498,7 +500,8 @@ fn main() {
     1 => tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init(),
     _ => tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init(),
   }
-  let metrics_dir =  cli.command.out_dir().join(".metrics");
+  let metrics_dir = PathBuf::from("out/reports/metrics");
+  fs::create_dir_all(&metrics_dir).expect("Failed to create metrics directory");
   let name = cli.command.input_file().file_name()
     .and_then(|n| n.to_str())
     .unwrap_or("noname")
