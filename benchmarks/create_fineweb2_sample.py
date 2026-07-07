@@ -12,25 +12,14 @@ import pyarrow.parquet as pq
 
 
 DEFAULT_OUTPUT = Path("out") / "fineweb2_1GiB.txt"
+DEFAULT_SEPARATOR = "<|endoftext|>"
 GIB = 1024 ** 3
 
 
-def write_prefix(out, text: str, byte_budget: int) -> int:
+def write_document(out, text: str) -> int:
   encoded = text.encode("utf-8")
-  if len(encoded) <= byte_budget:
-    out.write(encoded)
-    return len(encoded)
-
-  prefix = encoded[:byte_budget]
-  while prefix:
-    try:
-      prefix.decode("utf-8")
-      break
-    except UnicodeDecodeError:
-      prefix = prefix[:-1]
-
-  out.write(prefix)
-  return len(prefix)
+  out.write(encoded)
+  return len(encoded)
 
 
 def parquet_files(input_dir: Path, limit: int | None) -> list[Path]:
@@ -50,36 +39,32 @@ def create_sample(args: argparse.Namespace) -> dict[str, Any]:
   bytes_written = 0
   docs_written = 0
   files_read = 0
+  separator = args.separator.encode("utf-8")
 
   with args.output.open("wb") as out:
     for path in files:
-      if bytes_written >= args.size_bytes:
+      if docs_written > 0 and bytes_written >= args.size_bytes:
         break
 
       files_read += 1
       parquet = pq.ParquetFile(path)
       for batch in parquet.iter_batches(batch_size=args.batch_size, columns=[args.column]):
-        if bytes_written >= args.size_bytes:
+        if docs_written > 0 and bytes_written >= args.size_bytes:
           break
         for scalar in batch.column(0):
-          if bytes_written >= args.size_bytes:
+          if docs_written > 0 and bytes_written >= args.size_bytes:
             break
           text = scalar.as_py()
           if text is None:
             continue
 
           if docs_written > 0:
-            separator_budget = args.size_bytes - bytes_written
-            if separator_budget > 0:
-              separator = b"\n\n"[:separator_budget]
-              out.write(separator)
-              bytes_written += len(separator)
-          if bytes_written >= args.size_bytes:
-            break
+            out.write(separator)
+            bytes_written += len(separator)
 
-          bytes_written += write_prefix(out, text, args.size_bytes - bytes_written)
+          bytes_written += write_document(out, text)
           docs_written += 1
-        if bytes_written >= args.size_bytes:
+        if docs_written > 0 and bytes_written >= args.size_bytes:
           break
 
   if bytes_written < args.size_bytes and args.pad:
@@ -95,6 +80,7 @@ def create_sample(args: argparse.Namespace) -> dict[str, Any]:
     "bytes_written": bytes_written,
     "docs_written": docs_written,
     "files_read": files_read,
+    "separator": args.separator,
     "elapsed_s": time.perf_counter() - started,
   }
 
@@ -107,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--column", default="text")
   parser.add_argument("--batch-size", type=int, default=1024)
   parser.add_argument("--max-files", type=int)
+  parser.add_argument("--separator", default=DEFAULT_SEPARATOR, help="String inserted between complete documents.")
   parser.add_argument("--pad", action="store_true", help="Pad with spaces if the source data is smaller than requested.")
   parser.add_argument("--json", type=Path)
   args = parser.parse_args(argv)
@@ -121,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   print(rendered)
   if args.json:
     args.json.write_text(rendered + "\n", encoding="utf-8")
-  return 0 if result["bytes_written"] == args.size_bytes else 1
+  return 0 if result["bytes_written"] >= args.size_bytes else 1
 
 
 if __name__ == "__main__":
