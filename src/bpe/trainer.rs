@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::{BTreeMap, HashMap}, sync::atomic::AtomicU64};
+use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, HashMap}, sync::atomic::AtomicU64};
 
 use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
@@ -97,8 +97,60 @@ pub struct BpeTrainer<C, I> {
   pub vocab: BTreeMap<I, Word<C>>,
   pub merges: Vec<Merge<C, I>>,
   pub pre_merges: HashMap<(I, I), Merge<C, I>>,
+  merge_heap: BinaryHeap<MergeCandidate<C, I>>,
   pub words: Vec<PreToken<C, I>>,
 }
+
+#[derive(Debug, Clone)]
+struct MergeCandidate<C, I> {
+  freq: Freq,
+  tp: (I, I),
+  content: (Word<C>, Word<C>),
+  tie_break: TieBreak,
+}
+
+impl<C, I> MergeCandidate<C, I> {
+  fn from_merge(merge: &Merge<C, I>, tie_break: TieBreak) -> Self
+  where
+    I: Copy,
+  {
+    Self {
+      freq: merge.data.freq,
+      tp: merge.tp,
+      content: merge.content.clone(),
+      tie_break,
+    }
+  }
+}
+
+impl<C: Ord, I: Ord> Ord for MergeCandidate<C, I> {
+  fn cmp(&self, other: &Self) -> Ordering {
+    match self.tie_break {
+      TieBreak::SmallestPairId => self
+        .freq
+        .cmp(&other.freq)
+        .then_with(|| other.tp.cmp(&self.tp)),
+      TieBreak::LargestContent => self
+        .freq
+        .cmp(&other.freq)
+        .then_with(|| self.content.cmp(&other.content)),
+    }
+  }
+}
+
+impl<C: Ord, I: Ord> PartialOrd for MergeCandidate<C, I> {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl<C: Ord, I: Ord> PartialEq for MergeCandidate<C, I> {
+  fn eq(&self, other: &Self) -> bool {
+    self.cmp(other) == Ordering::Equal
+  }
+}
+
+impl<C: Ord, I: Ord> Eq for MergeCandidate<C, I> {}
 
 impl<C, I: IdxLike> BpeTrainer<C, I>
 where
@@ -234,6 +286,7 @@ impl<C, I> BpeTrainer<C, I> {
       vocab: BTreeMap::new(),
       merges: Vec::new(),
       pre_merges: HashMap::new(),
+      merge_heap: BinaryHeap::new(),
       special_tokens: Vec::new(),
       words: Vec::new(),
     }
@@ -244,7 +297,7 @@ impl<C, I: IdxLike> BpeTrainer<C, I>
 where
   Word<C>: WordDebugExt,
   I: HasChar<C>,
-  C: CanStrToWord,
+  C: CanStrToWord + Ord,
 {
   /// Initialize the merge candidate map from `self.words`.
   ///
@@ -252,6 +305,7 @@ where
   pub fn _build_pre_merges(&mut self) {
     debug!("Initializing BPE training with {} words", self.words.len());
     self.pre_merges.clear();
+    self.merge_heap.clear();
     let vocab_get = |i: I| {
       self.vocab.get(&i).cloned().or_else(|| i.idx_to_word()).ok_or_else(|| MyError::OovIdx(i.to_u64()))
     };
@@ -292,6 +346,7 @@ where
         merge.add(i as u64, word.freq);
       }
     }
+    self.rebuild_merge_heap();
   }
 
   fn _set_vocab_idx(&mut self, start_idx: I) {
@@ -302,45 +357,56 @@ where
     I::from_u64(self.start_vocab_idx.fetch_add(1, std::sync::atomic::Ordering::AcqRel))
   }
 
+  fn push_merge_candidate(&mut self, tp: (I, I)) {
+    let Some(merge) = self.pre_merges.get(&tp) else {
+      return;
+    };
+    if merge.data.freq <= 0 {
+      return;
+    }
+    self.merge_heap.push(MergeCandidate::from_merge(merge, self.config.tie_break));
+  }
+
+  fn rebuild_merge_heap(&mut self) {
+    self.merge_heap = self
+      .pre_merges
+      .values()
+      .filter(|merge| merge.data.freq > 0)
+      .map(|merge| MergeCandidate::from_merge(merge, self.config.tie_break))
+      .collect();
+  }
+
   fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>) {
+    let changed_tps = changes.keys().copied().collect::<Vec<_>>();
     _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
+    for tp in changed_tps {
+      if tp != merge.tp {
+        self.push_merge_candidate(tp);
+      }
+    }
   }
 
   fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData> {
     _merge(&mut self.words, merge, target_idx)
   }
 
-  fn _get_largest_merge(&self) -> Option<Merge<C, I>> where C: Ord {
-    match self.config.tie_break {
-      TieBreak::SmallestPairId => self
-        .pre_merges
-        .values()
-        .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
-        .cloned(),
-      TieBreak::LargestContent => self
-        .pre_merges
-        .values()
-        .max_by_key(|m| (m.data.freq, &m.content))
-        .cloned(),
+  fn _get_largest_merge(&mut self) -> Option<Merge<C, I>> {
+    while let Some(candidate) = self.merge_heap.pop() {
+      if candidate.freq <= 0 {
+        continue;
+      }
+      let Some(merge) = self.pre_merges.get(&candidate.tp) else {
+        continue;
+      };
+      if merge.data.freq != candidate.freq {
+        continue;
+      }
+      if merge.content != candidate.content {
+        continue;
+      }
+      return Some(merge.clone());
     }
-  }
-
-  fn _get_largest_merge2(&self) -> Option<Merge<C, I>> where C: Ord + Send + Sync {
-    use rayon::prelude::*;
-    match self.config.tie_break {
-      TieBreak::SmallestPairId => self
-        .pre_merges
-        .par_iter()
-        .map(|(_, m)| m)
-        .max_by_key(|m| (m.data.freq, Reverse(m.tp)))
-        .cloned(),
-      TieBreak::LargestContent => self
-        .pre_merges
-        .par_iter()
-        .map(|(_, m)| m)
-        .max_by_key(|m| (m.data.freq, &m.content))
-        .cloned(),
-    }
+    None
   }
 
   /// Apply one merge operation and return the newly assigned vocab index.
@@ -425,11 +491,7 @@ where
   fn step(&mut self) -> MyResult<()> {
     // Find the most frequent merge. Hugging Face's BPE trainer resolves equal
     // frequencies by choosing the smallest pair ids, so keep that ordering here.
-    let merge = if self.pre_merges.len() < 100_000 {
-      self._get_largest_merge()
-    } else {
-      self._get_largest_merge2()
-    };
+    let merge = self._get_largest_merge();
     if let Some(merge) = merge {
       self._step(merge);
       if self.vocab_size() % 100 == 0 {
