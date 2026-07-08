@@ -13,10 +13,15 @@ from uni_tokenizer import BpeTrainer
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
 
-from compare_hf_training import SPECIAL_TOKENS
+from common import DEFAULT_CHUNK_SIZE
+from common import SPECIAL_TOKENS
+from common import add_report_args
+from common import benchmark_metadata
+from common import resolve_report_path
+from common import write_report
 
 
-DEFAULT_CHUNK_SIZE = 1024 * 1024
+SCRIPT_NAME = "unicode_bigram_split"
 
 
 def duration_summary(values: Sequence[float]) -> dict[str, Any]:
@@ -114,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--min-freq", type=int, default=16)
   parser.add_argument("--vocab-size", type=int, help="Optionally train unitoken on both inventories.")
   parser.add_argument("--save-words", type=Path, help="Save the Unicode bigram split word-frequency inventory as JSON.")
-  parser.add_argument("--json", type=Path)
+  add_report_args(parser)
   args = parser.parse_args(argv)
 
   if args.chunk_size < 1:
@@ -145,10 +150,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     save_words(args.save_words, split_words)
 
   result: dict[str, Any] = {
-    "text": str(args.text),
-    "text_bytes": args.text.stat().st_size,
-    "chunk_size": args.chunk_size,
-    "boundary": boundary,
+    "metadata": benchmark_metadata(
+      contract="unicode_bigram_split_experiment",
+      script_name=SCRIPT_NAME,
+      dataset_name=args.dataset_name,
+      config_name=args.config_name,
+      experiment_name=args.experiment_name,
+      notes=[
+        "Compares baseline pretokenization with unicode-bigram-guided splitting.",
+      ],
+    ),
+    "source": {
+      "input_kind": "raw_text",
+      "text": str(args.text),
+      "text_bytes": args.text.stat().st_size,
+      "chunk_size": args.chunk_size,
+      "boundary": boundary,
+    },
     "unicode_bigram": {
       "top_k": args.top_k,
       "min_freq": args.min_freq,
@@ -171,10 +189,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["unicode_bigram_split"]["training"] = train_unitoken(split_words, args.vocab_size)
 
   rendered = json.dumps(result, indent=2)
-  print(rendered)
-  if args.json:
-    args.json.parent.mkdir(parents=True, exist_ok=True)
-    args.json.write_text(rendered + "\n", encoding="utf-8")
+  if not args.quiet:
+    print(rendered)
+  write_report(resolve_report_path(args, script_name=SCRIPT_NAME, vocab_size=args.vocab_size), rendered)
   return 0
 
 

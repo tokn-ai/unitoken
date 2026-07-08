@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use memchr::memmem;
@@ -78,7 +78,7 @@ pub struct PreTokenizer {
   pub re_pat: Regex,
   pub re_special_tokens: Regex,
   pub end_of_text: String,
-  pub unicode_bigrams: Option<BTreeSet<(char, char)>>,
+  pub unicode_bigrams: Option<AHashSet<(char, char)>>,
   pub metrics: bool
 }
 
@@ -114,7 +114,7 @@ impl PreTokenizer {
     })
   }
 
-  pub fn with_unicode_bigrams(mut self, bigrams: BTreeSet<(char, char)>) -> Self {
+  pub fn with_unicode_bigrams(mut self, bigrams: AHashSet<(char, char)>) -> Self {
     self.unicode_bigrams = Some(bigrams);
     self
   }
@@ -221,7 +221,7 @@ impl PreTokenizer {
 
   pub fn build_unicode_bigram_set_from_file_with_options<P: AsRef<Path>>(
     &self, path: P, options: ChunkOptions, top_k: usize, min_freq: Freq,
-  ) -> MyResult<BTreeSet<(char, char)>> {
+  ) -> MyResult<AHashSet<(char, char)>> {
     let boundaries = _find_chunk_boundaries_with_options(&path, options, &self.end_of_text)?;
     let path = path.as_ref().to_path_buf();
     let params = boundaries
@@ -272,7 +272,7 @@ pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&
 }
 
 pub fn _pretokenizer_counter_with_unicode_bigrams(
-  s: &str, pat: &Regex, unicode_bigrams: Option<&BTreeSet<(char, char)>>,
+  s: &str, pat: &Regex, unicode_bigrams: Option<&AHashSet<(char, char)>>,
 ) -> MyResult<BTreeMap<String, Freq>> {
   let mut result = BTreeMap::new();
   for i in pat.find_iter(s) {
@@ -288,8 +288,8 @@ pub fn _pretokenizer_counter_with_unicode_bigrams(
   Ok(result)
 }
 
-pub fn parse_unicode_bigrams(bigrams: &[String]) -> MyResult<BTreeSet<(char, char)>> {
-  let mut parsed = BTreeSet::new();
+pub fn parse_unicode_bigrams(bigrams: &[String]) -> MyResult<AHashSet<(char, char)>> {
+  let mut parsed = AHashSet::new();
   for bigram in bigrams {
     let chars = bigram.chars().collect::<Vec<_>>();
     if chars.len() != 2 {
@@ -309,9 +309,9 @@ pub fn unicode_bigram_to_string(bigram: (char, char)) -> String {
 
 fn select_unicode_bigrams(
   counts: AHashMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
-) -> BTreeSet<(char, char)> {
+) -> AHashSet<(char, char)> {
   if top_k == 0 {
-    return BTreeSet::new();
+    return AHashSet::new();
   }
   let mut sorted = counts
     .into_iter()
@@ -343,7 +343,7 @@ fn count_unicode_bigrams(
   }
 }
 
-fn split_by_unicode_bigrams(token: &str, unicode_bigrams: &BTreeSet<(char, char)>) -> Vec<String> {
+fn split_by_unicode_bigrams(token: &str, unicode_bigrams: &AHashSet<(char, char)>) -> Vec<String> {
   let chars = token.char_indices().collect::<Vec<_>>();
   if chars.len() <= 1 {
     return vec![token.to_string()];
@@ -826,7 +826,7 @@ mod tests {
       selected,
       [('你', '好'), ('世', '界'), ('한', '글')]
         .into_iter()
-        .collect::<BTreeSet<_>>()
+        .collect::<AHashSet<_>>()
     );
   }
 

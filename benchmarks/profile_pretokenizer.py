@@ -12,9 +12,15 @@ from typing import Any, cast
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
 
+from common import DEFAULT_CHUNK_SIZE
+from common import SPECIAL_TOKENS
+from common import add_report_args
+from common import benchmark_metadata
+from common import resolve_report_path
+from common import write_report
 
-SPECIAL_TOKENS = ["<|endoftext|>"]
-DEFAULT_CHUNK_SIZE = 1024 * 1024
+
+SCRIPT_NAME = "profile_pretokenizer"
 
 
 def time_call(fn: Callable[[], Any], repeats: int) -> tuple[Any, dict[str, float]]:
@@ -76,10 +82,23 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
   )
 
   return {
-    "input": str(args.input),
-    "bytes": file_size,
-    "chunk_size": args.chunk_size,
-    "boundary": boundary,
+    "metadata": benchmark_metadata(
+      contract="raw_text_unitoken_pretokenizer_profile",
+      script_name=SCRIPT_NAME,
+      dataset_name=args.dataset_name,
+      config_name=args.config_name,
+      experiment_name=args.experiment_name,
+      notes=[
+        "Profiles unitoken pretokenizer chunk boundary and word inventory phases.",
+      ],
+    ),
+    "source": {
+      "input_kind": "raw_text",
+      "input": str(args.input),
+      "bytes": file_size,
+      "chunk_size": args.chunk_size,
+      "boundary": boundary,
+    },
     "repeats": args.repeats,
     "boundary_count": len(boundaries),
     "find_chunk_boundaries": boundary_timing,
@@ -98,7 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto")
   parser.add_argument("--segments", type=int, default=4)
   parser.add_argument("--repeats", type=int, default=1)
-  parser.add_argument("--json", type=Path)
+  add_report_args(parser)
   args = parser.parse_args(argv)
 
   if args.chunk_size < 1:
@@ -110,10 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
   result = profile(args)
   rendered = json.dumps(result, indent=2)
-  print(rendered)
-  if args.json:
-    args.json.parent.mkdir(parents=True, exist_ok=True)
-    args.json.write_text(rendered + "\n", encoding="utf-8")
+  if not args.quiet:
+    print(rendered)
+  write_report(resolve_report_path(args, script_name=SCRIPT_NAME), rendered)
   return 0
 
 
