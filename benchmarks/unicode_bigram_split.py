@@ -67,6 +67,11 @@ def inventory_summary(words: dict[str, int]) -> dict[str, Any]:
   }
 
 
+def save_words(path: Path, words: dict[str, int]) -> None:
+  sorted_words = dict(sorted(words.items(), key=lambda item: (item[1], item[0]), reverse=True))
+  path.write_text(json.dumps(sorted_words, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def train_unitoken(words: dict[str, int], vocab_size: int) -> dict[str, Any]:
   trainer = BpeTrainer(SPECIAL_TOKENS, ch="u8", initial_alphabet="byte_level")
   started = time.perf_counter()
@@ -108,6 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--top-k", type=int, default=100_000)
   parser.add_argument("--min-freq", type=int, default=16)
   parser.add_argument("--vocab-size", type=int, help="Optionally train unitoken on both inventories.")
+  parser.add_argument("--save-words", type=Path, help="Save the Unicode bigram split word-frequency inventory as JSON.")
   parser.add_argument("--json", type=Path)
   args = parser.parse_args(argv)
 
@@ -134,6 +140,9 @@ def main(argv: Sequence[str] | None = None) -> int:
   baseline_words, baseline_pretokenize_s = collect_words(base, args.text, args.chunk_size, boundary)
   split = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0], unicode_bigrams=unicode_bigrams)
   split_words, split_pretokenize_s = collect_words(split, args.text, args.chunk_size, boundary)
+  if args.save_words:
+    args.save_words.parent.mkdir(parents=True, exist_ok=True)
+    save_words(args.save_words, split_words)
 
   result: dict[str, Any] = {
     "text": str(args.text),
