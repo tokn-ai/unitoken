@@ -376,6 +376,8 @@ impl PreTokenizer {
     let bigrams = py.detach(||
       self.build_unicode_bigram_set_from_file_with_options(path, options, top_k, min_freq)
     ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let mut bigrams = bigrams.into_iter().collect::<Vec<_>>();
+    bigrams.sort();
     Ok(bigrams.into_iter().map(unicode_bigram_to_string).collect())
   }
 }
