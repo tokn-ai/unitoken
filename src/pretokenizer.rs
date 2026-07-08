@@ -1,3 +1,4 @@
+use ahash::AHashMap;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use memchr::memmem;
@@ -77,6 +78,7 @@ pub struct PreTokenizer {
   pub re_pat: Regex,
   pub re_special_tokens: Regex,
   pub end_of_text: String,
+  pub unicode_bigrams: Option<BTreeSet<(char, char)>>,
   pub metrics: bool
 }
 
@@ -107,8 +109,14 @@ impl PreTokenizer {
       re_pat,
       re_special_tokens,
       end_of_text: end_of_text.unwrap_or(DEFAULT_EOT).to_string(),
+      unicode_bigrams: None,
       metrics: true,
     })
+  }
+
+  pub fn with_unicode_bigrams(mut self, bigrams: BTreeSet<(char, char)>) -> Self {
+    self.unicode_bigrams = Some(bigrams);
+    self
   }
 
   /// Count pre-tokenized pieces in a string.
@@ -116,6 +124,10 @@ impl PreTokenizer {
   /// Returns a map from token slice to frequency. The keys borrow from `text`.
   pub fn count_tokens<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
     _pretokenizer_counter(text, &self.re_pat)
+  }
+
+  pub fn count_tokens_owned(&self, text: &str) -> MyResult<BTreeMap<String, Freq>> {
+    _pretokenizer_counter_with_unicode_bigrams(text, &self.re_pat, self.unicode_bigrams.as_ref())
   }
 
   /// Compute byte `(offset, len)` pairs that split a file into approximately `desired_num_chunks`.
@@ -153,7 +165,7 @@ impl PreTokenizer {
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut words = BTreeMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
-      for (token, count) in _pretokenizer_counter(part.as_str(), &self.re_pat)? {
+      for (token, count) in _pretokenizer_counter_with_unicode_bigrams(part.as_str(), &self.re_pat, self.unicode_bigrams.as_ref())? {
         *words.entry(token).or_default() += count;
       }
     }
@@ -206,6 +218,45 @@ impl PreTokenizer {
       )?;
     Ok(words)
   }
+
+  pub fn build_unicode_bigram_set_from_file_with_options<P: AsRef<Path>>(
+    &self, path: P, options: ChunkOptions, top_k: usize, min_freq: Freq,
+  ) -> MyResult<BTreeSet<(char, char)>> {
+    let boundaries = _find_chunk_boundaries_with_options(&path, options, &self.end_of_text)?;
+    let path = path.as_ref().to_path_buf();
+    let params = boundaries
+      .iter()
+      .zip(boundaries.iter().skip(1))
+      .map(|(start, end)| (*start, (*end - *start) as usize))
+      .collect::<Vec<_>>();
+
+    let counts = params
+      .into_par_iter()
+      .map(|(offset, len)| self.count_unicode_bigrams_from_segment(&path, offset, len))
+      .try_reduce(
+        || AHashMap::new(),
+        |mut a, b| {
+          for (k, v) in b {
+            *a.entry(k).or_default() += v;
+          }
+          Ok(a)
+        },
+      )?;
+    Ok(select_unicode_bigrams(counts, top_k, min_freq))
+  }
+
+  fn count_unicode_bigrams_from_segment<P: AsRef<Path>>(
+    &self, path: P, offset: u64, len: usize,
+  ) -> MyResult<AHashMap<(char, char), Freq>> {
+    let buffer = _read_file_to_buffer(&path, offset, len)?;
+    let content = String::from_utf8_lossy(&buffer);
+    let parts = split_special_tokens(&content, &self.re_special_tokens)?;
+    let mut counts = AHashMap::new();
+    for part in parts.iter().filter(|i| !i.is_special()) {
+      count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script);
+    }
+    Ok(counts)
+  }
 }
 
 /// Tokenize a string using `pat` and return token frequencies.
@@ -218,6 +269,155 @@ pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&
     *result.entry(token).or_default() += 1;
   }
   Ok(result)
+}
+
+pub fn _pretokenizer_counter_with_unicode_bigrams(
+  s: &str, pat: &Regex, unicode_bigrams: Option<&BTreeSet<(char, char)>>,
+) -> MyResult<BTreeMap<String, Freq>> {
+  let mut result = BTreeMap::new();
+  for i in pat.find_iter(s) {
+    let token = i?.as_str();
+    if let Some(unicode_bigrams) = unicode_bigrams.filter(|_| needs_unicode_bigram_split(token)) {
+      for segment in split_by_unicode_bigrams(token, unicode_bigrams) {
+        *result.entry(segment).or_default() += 1;
+      }
+    } else {
+      *result.entry(token.to_string()).or_default() += 1;
+    }
+  }
+  Ok(result)
+}
+
+pub fn parse_unicode_bigrams(bigrams: &[String]) -> MyResult<BTreeSet<(char, char)>> {
+  let mut parsed = BTreeSet::new();
+  for bigram in bigrams {
+    let chars = bigram.chars().collect::<Vec<_>>();
+    if chars.len() != 2 {
+      return Err(MyError::SpecError(format!("Unicode bigram must contain exactly two chars: {bigram:?}")));
+    }
+    parsed.insert((chars[0], chars[1]));
+  }
+  Ok(parsed)
+}
+
+pub fn unicode_bigram_to_string(bigram: (char, char)) -> String {
+  let mut s = String::new();
+  s.push(bigram.0);
+  s.push(bigram.1);
+  s
+}
+
+fn select_unicode_bigrams(
+  counts: AHashMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
+) -> BTreeSet<(char, char)> {
+  if top_k == 0 {
+    return BTreeSet::new();
+  }
+  let mut sorted = counts
+    .into_iter()
+    .filter(|(_, freq)| *freq >= min_freq)
+    .collect::<Vec<_>>();
+  sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+  let Some(cutoff_freq) = sorted.get(top_k - 1).map(|(_, freq)| *freq) else {
+    return sorted.into_iter().map(|(bigram, _)| bigram).collect();
+  };
+  sorted
+    .into_iter()
+    .take_while(|(_, freq)| *freq >= cutoff_freq)
+    .map(|(bigram, _)| bigram)
+    .collect()
+}
+
+fn count_unicode_bigrams(
+  token: &str, counts: &mut AHashMap<(char, char), Freq>, keep_char: impl Fn(char) -> bool,
+) {
+  let mut chars = token.chars();
+  let Some(mut prev) = chars.next() else {
+    return;
+  };
+  for next in chars {
+    if keep_char(prev) && keep_char(next) {
+      *counts.entry((prev, next)).or_default() += 1;
+    }
+    prev = next;
+  }
+}
+
+fn split_by_unicode_bigrams(token: &str, unicode_bigrams: &BTreeSet<(char, char)>) -> Vec<String> {
+  let chars = token.char_indices().collect::<Vec<_>>();
+  if chars.len() <= 1 {
+    return vec![token.to_string()];
+  }
+  let mut segments = Vec::new();
+  let mut start = 0;
+  for pair in chars.windows(2) {
+    let (_, left) = pair[0];
+    let (right_byte, right) = pair[1];
+    if !unicode_bigrams.contains(&(left, right)) {
+      if start < right_byte {
+        segments.push(token[start..right_byte].to_string());
+      }
+      start = right_byte;
+    }
+  }
+  if start < token.len() {
+    segments.push(token[start..].to_string());
+  }
+  segments
+}
+
+fn needs_unicode_bigram_split(s: &str) -> bool {
+  s.chars().any(is_unicode_bigram_script)
+}
+
+fn is_unicode_bigram_script(ch: char) -> bool {
+  matches!(
+    ch as u32,
+    // CJK Unified Ideographs Extension A.
+    0x3400..=0x4DBF
+      // CJK Unified Ideographs.
+      | 0x4E00..=0x9FFF
+      // CJK Compatibility Ideographs.
+      | 0xF900..=0xFAFF
+      // Hiragana.
+      | 0x3040..=0x309F
+      // Katakana.
+      | 0x30A0..=0x30FF
+      // Hangul Jamo.
+      | 0x1100..=0x11FF
+      // Hangul Compatibility Jamo.
+      | 0x3130..=0x318F
+      // Hangul Jamo Extended-A.
+      | 0xA960..=0xA97F
+      // Hangul Syllables.
+      | 0xAC00..=0xD7AF
+      // Hangul Jamo Extended-B.
+      | 0xD7B0..=0xD7FF
+      // Thai.
+      | 0x0E00..=0x0E7F
+      // Lao.
+      | 0x0E80..=0x0EFF
+      // Khmer.
+      | 0x1780..=0x17FF
+      // Myanmar.
+      | 0x1000..=0x109F
+      // Myanmar Extended-A.
+      | 0xAA60..=0xAA7F
+      // Myanmar Extended-B.
+      | 0xA9E0..=0xA9FF
+      // CJK Unified Ideographs Extension B.
+      | 0x20000..=0x2A6DF
+      // CJK Unified Ideographs Extension C.
+      | 0x2A700..=0x2B73F
+      // CJK Unified Ideographs Extension D.
+      | 0x2B740..=0x2B81F
+      // CJK Unified Ideographs Extension E and F.
+      | 0x2B820..=0x2CEAF
+      // CJK Unified Ideographs Extension I.
+      | 0x2CEB0..=0x2EBEF
+      // CJK Unified Ideographs Extension G and H.
+      | 0x30000..=0x3134F
+  )
 }
 
 #[hotpath::measure]
@@ -542,6 +742,92 @@ mod tests {
     .into_iter()
     .collect::<BTreeMap<_, _>>();
     assert_eq!(tokens, expected_tokens);
+  }
+
+  #[test]
+  fn test_unicode_bigram_split_keeps_non_cjk_regex_tokens() {
+    let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
+    let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
+    let tokens = pretokenizer.count_tokens_owned("Hello 世界你好 world").unwrap();
+    let expected_tokens = vec![
+      ("Hello".to_string(), 1),
+      (" ".to_string(), 1),
+      ("世界".to_string(), 1),
+      ("你".to_string(), 1),
+      ("好".to_string(), 1),
+      (" world".to_string(), 1),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(tokens, expected_tokens);
+  }
+
+  #[test]
+  fn test_unicode_bigram_split_is_bigram_agnostic() {
+    let bigrams = parse_unicode_bigrams(&["w是".to_string()]).unwrap();
+    let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
+    let tokens = pretokenizer.count_tokens_owned("Now是2024年").unwrap();
+    let expected_tokens = vec![
+      ("N".to_string(), 1),
+      ("o".to_string(), 1),
+      ("w是".to_string(), 1),
+      ("2024".to_string(), 1),
+      ("年".to_string(), 1),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(tokens, expected_tokens);
+  }
+
+  #[test]
+  fn test_unicode_bigram_count_scans_raw_text_without_crossing_eot() {
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/unicode_bigram_raw.txt");
+    std::fs::write(path, format!("ab你{DEFAULT_EOT}bc你好한글かな")).unwrap();
+
+    let pretokenizer = PreTokenizer::new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT));
+    let bigrams = pretokenizer
+      .build_unicode_bigram_set_from_file_with_options(
+        path,
+        ChunkOptions {
+          hint: ChunkHint::Count(1),
+          boundary: BoundaryMode::Utf8,
+        },
+        16,
+        1,
+      )
+      .unwrap();
+
+    assert!(bigrams.contains(&('你', '好')));
+    assert!(bigrams.contains(&('한', '글')));
+    assert!(bigrams.contains(&('か', 'な')));
+    assert!(!bigrams.contains(&('a', 'b')));
+    assert!(!bigrams.contains(&('b', 'c')));
+    assert!(!bigrams.contains(&('b', '你')));
+    assert!(!bigrams.contains(&('c', '你')));
+    assert!(!bigrams.contains(&('b', '<')));
+    assert!(!bigrams.contains(&('>', 'b')));
+  }
+
+  #[test]
+  fn test_select_unicode_bigrams_includes_cutoff_frequency_ties() {
+    let counts = [
+      (('你', '好'), 10),
+      (('世', '界'), 5),
+      (('한', '글'), 5),
+      (('か', 'な'), 4),
+    ]
+    .into_iter()
+    .collect::<AHashMap<_, _>>();
+
+    let selected = select_unicode_bigrams(counts, 2, 1);
+
+    assert_eq!(
+      selected,
+      [('你', '好'), ('世', '界'), ('한', '글')]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
   }
 
   #[test]
