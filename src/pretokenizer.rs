@@ -252,7 +252,7 @@ impl PreTokenizer {
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut counts = BTreeMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
-      count_unicode_bigrams(part.as_str(), &mut counts);
+      count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script);
     }
     Ok(counts)
   }
@@ -276,7 +276,7 @@ pub fn _pretokenizer_counter_with_unicode_bigrams(
   let mut result = BTreeMap::new();
   for i in pat.find_iter(s) {
     let token = i?.as_str();
-    if let Some(unicode_bigrams) = unicode_bigrams.filter(|_| contains_cjk(token)) {
+    if let Some(unicode_bigrams) = unicode_bigrams.filter(|_| needs_unicode_bigram_split(token)) {
       for segment in split_by_unicode_bigrams(token, unicode_bigrams) {
         *result.entry(segment).or_default() += 1;
       }
@@ -317,13 +317,17 @@ fn select_unicode_bigrams(
   sorted.into_iter().take(top_k).map(|(bigram, _)| bigram).collect()
 }
 
-fn count_unicode_bigrams(token: &str, counts: &mut BTreeMap<(char, char), Freq>) {
+fn count_unicode_bigrams(
+  token: &str, counts: &mut BTreeMap<(char, char), Freq>, keep_char: impl Fn(char) -> bool,
+) {
   let mut chars = token.chars();
   let Some(mut prev) = chars.next() else {
     return;
   };
   for next in chars {
-    *counts.entry((prev, next)).or_default() += 1;
+    if keep_char(prev) && keep_char(next) {
+      *counts.entry((prev, next)).or_default() += 1;
+    }
     prev = next;
   }
 }
@@ -351,21 +355,56 @@ fn split_by_unicode_bigrams(token: &str, unicode_bigrams: &BTreeSet<(char, char)
   segments
 }
 
-fn contains_cjk(s: &str) -> bool {
-  s.chars().any(is_cjk)
+fn needs_unicode_bigram_split(s: &str) -> bool {
+  s.chars().any(is_unicode_bigram_script)
 }
 
-fn is_cjk(ch: char) -> bool {
+fn is_unicode_bigram_script(ch: char) -> bool {
   matches!(
     ch as u32,
+    // CJK Unified Ideographs Extension A.
     0x3400..=0x4DBF
+      // CJK Unified Ideographs.
       | 0x4E00..=0x9FFF
+      // CJK Compatibility Ideographs.
       | 0xF900..=0xFAFF
+      // Hiragana.
+      | 0x3040..=0x309F
+      // Katakana.
+      | 0x30A0..=0x30FF
+      // Hangul Jamo.
+      | 0x1100..=0x11FF
+      // Hangul Compatibility Jamo.
+      | 0x3130..=0x318F
+      // Hangul Jamo Extended-A.
+      | 0xA960..=0xA97F
+      // Hangul Syllables.
+      | 0xAC00..=0xD7AF
+      // Hangul Jamo Extended-B.
+      | 0xD7B0..=0xD7FF
+      // Thai.
+      | 0x0E00..=0x0E7F
+      // Lao.
+      | 0x0E80..=0x0EFF
+      // Khmer.
+      | 0x1780..=0x17FF
+      // Myanmar.
+      | 0x1000..=0x109F
+      // Myanmar Extended-A.
+      | 0xAA60..=0xAA7F
+      // Myanmar Extended-B.
+      | 0xA9E0..=0xA9FF
+      // CJK Unified Ideographs Extension B.
       | 0x20000..=0x2A6DF
+      // CJK Unified Ideographs Extension C.
       | 0x2A700..=0x2B73F
+      // CJK Unified Ideographs Extension D.
       | 0x2B740..=0x2B81F
+      // CJK Unified Ideographs Extension E and F.
       | 0x2B820..=0x2CEAF
+      // CJK Unified Ideographs Extension I.
       | 0x2CEB0..=0x2EBEF
+      // CJK Unified Ideographs Extension G and H.
       | 0x30000..=0x3134F
   )
 }
@@ -733,7 +772,7 @@ mod tests {
   fn test_unicode_bigram_count_scans_raw_text_without_crossing_eot() {
     std::fs::create_dir_all("out/reports/smoke").ok();
     let path = std::path::Path::new("out/reports/smoke/unicode_bigram_raw.txt");
-    std::fs::write(path, format!("ab{DEFAULT_EOT}bc你好")).unwrap();
+    std::fs::write(path, format!("ab你{DEFAULT_EOT}bc你好한글かな")).unwrap();
 
     let pretokenizer = PreTokenizer::new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT));
     let bigrams = pretokenizer
@@ -748,10 +787,13 @@ mod tests {
       )
       .unwrap();
 
-    assert!(bigrams.contains(&('a', 'b')));
-    assert!(bigrams.contains(&('b', 'c')));
-    assert!(bigrams.contains(&('c', '你')));
     assert!(bigrams.contains(&('你', '好')));
+    assert!(bigrams.contains(&('한', '글')));
+    assert!(bigrams.contains(&('か', 'な')));
+    assert!(!bigrams.contains(&('a', 'b')));
+    assert!(!bigrams.contains(&('b', 'c')));
+    assert!(!bigrams.contains(&('b', '你')));
+    assert!(!bigrams.contains(&('c', '你')));
     assert!(!bigrams.contains(&('b', '<')));
     assert!(!bigrams.contains(&('>', 'b')));
   }
