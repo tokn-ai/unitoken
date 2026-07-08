@@ -1,3 +1,4 @@
+use ahash::AHashMap;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use memchr::memmem;
@@ -233,7 +234,7 @@ impl PreTokenizer {
       .into_par_iter()
       .map(|(offset, len)| self.count_unicode_bigrams_from_segment(&path, offset, len))
       .try_reduce(
-        || BTreeMap::new(),
+        || AHashMap::new(),
         |mut a, b| {
           for (k, v) in b {
             *a.entry(k).or_default() += v;
@@ -246,11 +247,11 @@ impl PreTokenizer {
 
   fn count_unicode_bigrams_from_segment<P: AsRef<Path>>(
     &self, path: P, offset: u64, len: usize,
-  ) -> MyResult<BTreeMap<(char, char), Freq>> {
+  ) -> MyResult<AHashMap<(char, char), Freq>> {
     let buffer = _read_file_to_buffer(&path, offset, len)?;
     let content = String::from_utf8_lossy(&buffer);
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
-    let mut counts = BTreeMap::new();
+    let mut counts = AHashMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
       count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script);
     }
@@ -307,18 +308,28 @@ pub fn unicode_bigram_to_string(bigram: (char, char)) -> String {
 }
 
 fn select_unicode_bigrams(
-  counts: BTreeMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
+  counts: AHashMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
 ) -> BTreeSet<(char, char)> {
+  if top_k == 0 {
+    return BTreeSet::new();
+  }
   let mut sorted = counts
     .into_iter()
     .filter(|(_, freq)| *freq >= min_freq)
     .collect::<Vec<_>>();
   sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-  sorted.into_iter().take(top_k).map(|(bigram, _)| bigram).collect()
+  let Some(cutoff_freq) = sorted.get(top_k - 1).map(|(_, freq)| *freq) else {
+    return sorted.into_iter().map(|(bigram, _)| bigram).collect();
+  };
+  sorted
+    .into_iter()
+    .take_while(|(_, freq)| *freq >= cutoff_freq)
+    .map(|(bigram, _)| bigram)
+    .collect()
 }
 
 fn count_unicode_bigrams(
-  token: &str, counts: &mut BTreeMap<(char, char), Freq>, keep_char: impl Fn(char) -> bool,
+  token: &str, counts: &mut AHashMap<(char, char), Freq>, keep_char: impl Fn(char) -> bool,
 ) {
   let mut chars = token.chars();
   let Some(mut prev) = chars.next() else {
@@ -796,6 +807,27 @@ mod tests {
     assert!(!bigrams.contains(&('c', '你')));
     assert!(!bigrams.contains(&('b', '<')));
     assert!(!bigrams.contains(&('>', 'b')));
+  }
+
+  #[test]
+  fn test_select_unicode_bigrams_includes_cutoff_frequency_ties() {
+    let counts = [
+      (('你', '好'), 10),
+      (('世', '界'), 5),
+      (('한', '글'), 5),
+      (('か', 'な'), 4),
+    ]
+    .into_iter()
+    .collect::<AHashMap<_, _>>();
+
+    let selected = select_unicode_bigrams(counts, 2, 1);
+
+    assert_eq!(
+      selected,
+      [('你', '好'), ('世', '界'), ('한', '글')]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
   }
 
   #[test]
