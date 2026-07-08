@@ -19,10 +19,18 @@ from uni_tokenizer import BpeTrainer
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
 
+from common import DEFAULT_CHUNK_SIZE
+from common import REPO_ROOT
+from common import SPECIAL_TOKENS
+from common import add_report_args
+from common import benchmark_metadata
+from common import load_words
+from common import resolve_report_path
+from common import write_report
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+
 DEFAULT_WORDS = REPO_ROOT / "fixtures" / "_words.tinystories_sample_5M.json"
-SPECIAL_TOKENS = ["<|endoftext|>"]
+SCRIPT_NAME = "compare_hf_training"
 
 
 def bytes_to_unicode() -> dict[int, str]:
@@ -46,47 +54,6 @@ BYTE_ENCODER = bytes_to_unicode()
 
 def to_byte_level_token(token: bytes) -> str:
   return "".join(BYTE_ENCODER[byte] for byte in token)
-
-
-def load_words(path: Path, max_occurrences: int | None) -> list[tuple[str, int]]:
-  raw_words = json.loads(path.read_text(encoding="utf-8"))
-  words = list(raw_words.items())
-
-  if max_occurrences is None:
-    return words
-
-  if max_occurrences <= 0:
-    return []
-
-  total = sum(freq for _, freq in words)
-  if total <= max_occurrences:
-    return words
-
-  if max_occurrences < len(words):
-    return [(word, 1) for word, _ in words[:max_occurrences]]
-
-  base_total = len(words)
-  remaining = max_occurrences - base_total
-  scaled = []
-  fractions = []
-  assigned = 0
-  for index, (word, freq) in enumerate(words):
-    exact_extra = remaining * freq / total
-    extra = int(exact_extra)
-    assigned += extra
-    scaled.append((word, 1 + extra))
-    fractions.append((exact_extra - extra, index))
-
-  leftover = remaining - assigned
-  extra_indexes = {
-    index
-    for _, index in sorted(fractions, reverse=True)[:leftover]
-  }
-  scaled = [
-    (word, freq + (1 if index in extra_indexes else 0))
-    for index, (word, freq) in enumerate(scaled)
-  ]
-  return scaled
 
 
 def expanded_words(words: Sequence[tuple[str, int]]) -> Iterable[str]:
@@ -160,9 +127,6 @@ def iter_text_chunks(path: Path, chunk_bytes: int) -> Iterable[str]:
 
     if pending:
       yield pending.decode("utf-8")
-
-
-DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
 def train_unitoken_from_text(path: Path, vocab_size: int, chunk_size: int, boundary: BoundaryMode) -> dict[str, Any]:
@@ -260,9 +224,26 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
   speedup = hf_median / unitoken_median if unitoken_median else None
 
   results = {
-    "words": str(args.words),
-    "unique_words": len(words),
-    "occurrences": occurrence_count,
+    "metadata": benchmark_metadata(
+      contract="fixed_words_unitoken_vs_hf_expanded_iterator",
+      script_name=SCRIPT_NAME,
+      dataset_name=args.dataset_name,
+      config_name=args.config_name,
+      experiment_name=args.experiment_name,
+      notes=[
+        "Unitoken receives compressed (word, frequency) pairs.",
+        "Hugging Face receives an expanded iterator of repeated words because the Python tokenizers API does not accept compressed counts.",
+        "Use raw_text_unitoken_vs_hf for end-to-end implementation comparison.",
+      ],
+    ),
+    "source": {
+      "input_kind": "words_json",
+      "words": str(args.words),
+      "unique_words": len(words),
+      "occurrences": occurrence_count,
+      "huggingface_input_kind": "expanded_word_iterator",
+      "unitoken_input_kind": "compressed_word_counts",
+    },
     "target_vocab_size": args.vocab_size,
     "same_vocab": same_vocab,
     "speedup_hf_over_unitoken_median": speedup,
@@ -329,10 +310,26 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
   train_phase_speedup = hf_median / unitoken_train_s if unitoken_train_s else None
 
   return {
-    "text": str(args.text),
-    "text_bytes": args.text.stat().st_size,
-    "boundary": boundary,
-    "chunk_size": args.chunk_size,
+    "metadata": benchmark_metadata(
+      contract="raw_text_unitoken_vs_hf",
+      script_name=SCRIPT_NAME,
+      dataset_name=args.dataset_name,
+      config_name=args.config_name,
+      experiment_name=args.experiment_name,
+      notes=[
+        "Raw-text mode compares end-to-end training contracts.",
+        "Unitoken timing includes unitoken pretokenization plus training.",
+        "By default Hugging Face receives unitoken chunk boundaries so vocab parity reflects tokenizer/trainer behavior instead of iterator boundary differences.",
+      ],
+    ),
+    "source": {
+      "input_kind": "raw_text",
+      "text": str(args.text),
+      "text_bytes": args.text.stat().st_size,
+      "boundary": boundary,
+      "chunk_size": args.chunk_size,
+      "huggingface_chunking": hf_chunking,
+    },
     "huggingface_chunking": hf_chunking,
     "target_vocab_size": args.vocab_size,
     "same_vocab": same_vocab,
@@ -358,7 +355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto", help="Boundary strategy for unitoken chunking in --text mode.")
   parser.add_argument("--hf-chunk-bytes", type=int, help="Force fixed byte chunks for Hugging Face in --text mode. Defaults to unitoken chunk boundaries.")
   parser.add_argument("--diff-limit", type=int, default=10)
-  parser.add_argument("--json", type=Path)
+  add_report_args(parser)
   args = parser.parse_args(argv)
   if args.words is None and args.text is None:
     args.words = DEFAULT_WORDS
@@ -371,10 +368,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
   results = run_text(args) if args.text else run_words(args)
   rendered = json.dumps(results, indent=2)
-  print(rendered)
-  if args.json:
-    args.json.parent.mkdir(parents=True, exist_ok=True)
-    args.json.write_text(rendered + "\n", encoding="utf-8")
+  if not args.quiet:
+    print(rendered)
+  write_report(resolve_report_path(args, script_name=SCRIPT_NAME, vocab_size=args.vocab_size), rendered)
   return 0 if args.text or results["same_vocab"] else 1
 
 

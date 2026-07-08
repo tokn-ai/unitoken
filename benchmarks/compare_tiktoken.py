@@ -13,8 +13,14 @@ from typing import Any
 from uni_tokenizer import Encoding
 from uni_tokenizer.tiktoken_compat import _load_gpt2_vocab
 
+from common import REPO_ROOT
+from common import add_report_args
+from common import benchmark_metadata
+from common import resolve_report_path
+from common import write_report
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+
+SCRIPT_NAME = "compare_tiktoken"
 DEFAULT_FIXTURE = REPO_ROOT / "fixtures" / "tinystories_sample_5M.txt"
 DEFAULT_PAT = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"
 
@@ -84,8 +90,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
   )
 
   results = {
-    "input": str(args.input),
-    "bytes": len(text.encode("utf-8")),
+    "metadata": benchmark_metadata(
+      contract="tiktoken_compat_compare",
+      script_name=SCRIPT_NAME,
+      dataset_name=args.dataset_name,
+      config_name=args.config_name,
+      experiment_name=args.experiment_name,
+      notes=[
+        "Compares unitoken's tiktoken-compatible encode/decode path with upstream tiktoken when available.",
+      ],
+    ),
+    "source": {
+      "input_kind": "raw_text",
+      "input": str(args.input),
+      "bytes": len(text.encode("utf-8")),
+    },
     "repeats": args.repeats,
     "unitoken_encoding": args.unitoken_encoding,
     "tiktoken_encoding": args.tiktoken_encoding,
@@ -116,15 +135,14 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--unitoken-encoding", default="tinystories_sample_5M")
   parser.add_argument("--tiktoken-encoding", default="gpt2")
   parser.add_argument("--use-upstream-registry", action="store_true", help="Use tiktoken.get_encoding instead of constructing upstream Encoding from local fixture ranks.")
-  parser.add_argument("--json", type=Path)
+  add_report_args(parser)
   args = parser.parse_args(argv)
 
   results = run(args)
   rendered = json.dumps(results, indent=2)
-  print(rendered)
-  if args.json:
-    args.json.parent.mkdir(parents=True, exist_ok=True)
-    args.json.write_text(rendered + "\n", encoding="utf-8")
+  if not args.quiet:
+    print(rendered)
+  write_report(resolve_report_path(args, script_name=SCRIPT_NAME), rendered)
   return 0
 
 
