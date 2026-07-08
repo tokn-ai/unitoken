@@ -252,12 +252,7 @@ impl PreTokenizer {
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut counts = BTreeMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
-      for i in self.re_pat.find_iter(part.as_str()) {
-        let token = i?.as_str();
-        if contains_cjk(token) {
-          count_unicode_bigrams(token, &mut counts);
-        }
-      }
+      count_unicode_bigrams(part.as_str(), &mut counts);
     }
     Ok(counts)
   }
@@ -732,6 +727,33 @@ mod tests {
     .into_iter()
     .collect::<BTreeMap<_, _>>();
     assert_eq!(tokens, expected_tokens);
+  }
+
+  #[test]
+  fn test_unicode_bigram_count_scans_raw_text_without_crossing_eot() {
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/unicode_bigram_raw.txt");
+    std::fs::write(path, format!("ab{DEFAULT_EOT}bc你好")).unwrap();
+
+    let pretokenizer = PreTokenizer::new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT));
+    let bigrams = pretokenizer
+      .build_unicode_bigram_set_from_file_with_options(
+        path,
+        ChunkOptions {
+          hint: ChunkHint::Count(1),
+          boundary: BoundaryMode::Utf8,
+        },
+        16,
+        1,
+      )
+      .unwrap();
+
+    assert!(bigrams.contains(&('a', 'b')));
+    assert!(bigrams.contains(&('b', 'c')));
+    assert!(bigrams.contains(&('c', '你')));
+    assert!(bigrams.contains(&('你', '好')));
+    assert!(!bigrams.contains(&('b', '<')));
+    assert!(!bigrams.contains(&('>', 'b')));
   }
 
   #[test]
