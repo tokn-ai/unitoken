@@ -108,7 +108,7 @@ struct MergeWordUpdate<I> {
 
 struct MergeBatchUpdate<I> {
   word_updates: Vec<(usize, Vec<I>)>,
-  changes: AHashMap<(I, I), MergeData>,
+  changes: Vec<(usize, (I, I), Freq)>,
 }
 
 const LARGE_WORD_DICT_THRESHOLD: usize = 1_000_000;
@@ -201,28 +201,19 @@ where
   })
 }
 
-fn merge_changes_hash<I>(changes: &mut AHashMap<(I, I), MergeData>, word_idx: usize, local_changes: Vec<((I, I), LocalMergeData)>)
+fn merge_flat_changes<I>(changes: Vec<(usize, (I, I), Freq)>) -> AHashMap<(I, I), MergeData>
 where
   I: Eq + Hash,
 {
-  for (tp, local) in local_changes {
-    let data = changes.entry(tp).or_default();
-    data.freq += local.freq;
-    if local.freq > 0 {
+  let mut merged = AHashMap::<(I, I), MergeData>::new();
+  for (word_idx, tp, freq) in changes {
+    let data = merged.entry(tp).or_default();
+    data.freq += freq;
+    if freq > 0 {
       data.occurs_in.insert(word_idx as _);
     }
   }
-}
-
-fn merge_change_map<I>(changes: &mut AHashMap<(I, I), MergeData>, local_changes: AHashMap<(I, I), MergeData>)
-where
-  I: Eq + Hash,
-{
-  for (tp, local) in local_changes {
-    let data = changes.entry(tp).or_default();
-    data.freq += local.freq;
-    data.occurs_in.extend(local.occurs_in);
-  }
+  merged
 }
 
 fn merge_words_sequential<C, I>(
@@ -312,14 +303,16 @@ where
     .fold(
       || MergeBatchUpdate {
         word_updates: Vec::new(),
-        changes: AHashMap::new(),
+        changes: Vec::new(),
       },
       |mut batch, &word_idx| {
         let word_idx = word_idx as usize;
         let word = &words[word_idx];
         if let Some(update) = merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx) {
           batch.word_updates.push((update.word_idx, update.idxs));
-          merge_changes_hash(&mut batch.changes, update.word_idx, update.changes);
+          batch.changes.extend(update.changes.into_iter().map(|(tp, data)| {
+            (update.word_idx, tp, data.freq)
+          }));
         }
         batch
       },
@@ -327,11 +320,11 @@ where
     .reduce(
       || MergeBatchUpdate {
         word_updates: Vec::new(),
-        changes: AHashMap::new(),
+        changes: Vec::new(),
       },
       |mut left, mut right| {
         left.word_updates.append(&mut right.word_updates);
-        merge_change_map(&mut left.changes, right.changes);
+        left.changes.append(&mut right.changes);
         left
       },
     );
@@ -339,7 +332,7 @@ where
   for (word_idx, idxs) in update.word_updates {
     words[word_idx].idxs = idxs;
   }
-  update.changes.into_iter().collect()
+  merge_flat_changes(update.changes).into_iter().collect()
 }
 
 pub(crate) fn _vocab_get<C, I>(vocab: &BTreeMap<I, Word<C>>, idx: I) -> MyResult<Word<C>>
