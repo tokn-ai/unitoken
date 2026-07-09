@@ -47,6 +47,11 @@ impl Default for TieBreak {
 pub struct BpeTrainerConfig {
   pub initial_alphabet: InitialAlphabet,
   pub tie_break: TieBreak,
+  /// Override the `occurs_in` cutoff for Rayon merge rewrites.
+  ///
+  /// `None` keeps the built-in heuristic: high cutoff for small word
+  /// dictionaries and lower cutoff for very large dictionaries.
+  pub parallel_merge_min_occurs_in: Option<usize>,
 }
 
 impl BpeTrainerConfig {
@@ -54,6 +59,7 @@ impl BpeTrainerConfig {
     Self {
       initial_alphabet: InitialAlphabet::ByteLevel,
       tie_break: TieBreak::SmallestPairId,
+      parallel_merge_min_occurs_in: None,
     }
   }
 }
@@ -389,7 +395,7 @@ where
   }
 
   fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData> {
-    _merge(&mut self.words, merge, target_idx)
+    _merge(&mut self.words, merge, target_idx, self.config.parallel_merge_min_occurs_in)
   }
 
   fn _get_largest_merge(&mut self) -> Option<Merge<C, I>> {
@@ -593,8 +599,8 @@ mod tests {
         let tp_idx = (lookup(&bpe, a).unwrap_or(target), lookup(&bpe, b).unwrap_or(target));
         let mut data = data.clone();
         // Lazy occurrence sets keep positive affected-word additions exact, but
-        // do not maintain exact removals for negative deltas.
-        if data.freq < 0 {
+        // do not maintain exact removals or zero-net changes.
+        if data.freq <= 0 {
           data.occurs_in.clear();
         }
         (tp_idx, data)
@@ -630,7 +636,7 @@ mod tests {
     _test_bpe_merge(&[("aaa", 10), ("aaaa", 1)],
     &[(("a", "a"), vec![
       ("a", "a", MergeData::new(-23).add_occurs_in([0, 1])),
-      ("aa", "a", MergeData::new(10).add_occurs_in([0, 1])),
+      ("aa", "a", MergeData::new(10).add_occurs_in([0])),
       ("aa", "aa", MergeData::new(1).add_occurs_in([1])),
     ])]);
   }
@@ -673,6 +679,45 @@ mod tests {
   }
 
   #[test]
+  fn test_bpe_step_parallel_merge_matches_sequential() {
+    fn train(parallel_merge_min_occurs_in: Option<usize>) -> (Vec<(Idx, String)>, Vec<(String, String, Freq)>, Vec<Vec<Idx>>) {
+      let mut bpe = BpeTrainer::<u8, Idx>::from_words_with_config(
+        vec![
+          ("ababc", 5),
+          ("ababcbabc", 30),
+          ("abcbabcab", 200),
+        ],
+        &vec![],
+        BpeTrainerConfig {
+          parallel_merge_min_occurs_in,
+          ..BpeTrainerConfig::default()
+        },
+      );
+      bpe.init_training();
+      for _ in 0..3 {
+        bpe.step().unwrap();
+      }
+      let vocab = bpe
+        .vocab
+        .iter()
+        .map(|(i, w)| (*i, w.debug_display()))
+        .skip(256)
+        .collect::<Vec<_>>();
+      let merges = bpe
+        .merges
+        .iter()
+        .map(|m| (m.content.0.debug_display(), m.content.1.debug_display(), m.data.freq))
+        .collect::<Vec<_>>();
+      let words = bpe.words.iter().map(|w| w.idxs.clone()).collect::<Vec<_>>();
+      (vocab, merges, words)
+    }
+
+    assert!(!crate::bpe::utils::should_parallel_merge(3, 3, None));
+    assert!(crate::bpe::utils::should_parallel_merge(3, 3, Some(1)));
+    assert_eq!(train(None), train(Some(1)));
+  }
+
+  #[test]
   fn test_bpe_step_tie_breaks_by_smallest_pair_id() {
     let mut bpe = BpeTrainer::<u8, Idx>::from_words(vec![
       ("ab", 1),
@@ -695,6 +740,7 @@ mod tests {
       BpeTrainerConfig {
         initial_alphabet: InitialAlphabet::RawBytes,
         tie_break: TieBreak::LargestContent,
+        ..BpeTrainerConfig::default()
       },
     );
     bpe.add_words(&mut vec![
@@ -750,6 +796,7 @@ mod tests {
       BpeTrainerConfig {
         initial_alphabet: InitialAlphabet::RawBytes,
         tie_break: TieBreak::LargestContent,
+        ..BpeTrainerConfig::default()
       },
     );
     bpe.init_training();

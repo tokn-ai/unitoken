@@ -45,8 +45,17 @@ def _train_hf_from_words(words: list[tuple[str, int]], vocab_size: int) -> dict[
   return tokenizer.get_vocab()
 
 
-def _train_ours_from_words(words: list[tuple[str, int]], vocab_size: int) -> dict[str, int]:
-  trainer = BpeTrainer(["<|endoftext|>"], ch="u8", initial_alphabet="byte_level")
+def _train_ours_from_words(
+  words: list[tuple[str, int]],
+  vocab_size: int,
+  parallel_merge_min_occurs_in: int | None = None,
+) -> dict[str, int]:
+  trainer = BpeTrainer(
+    ["<|endoftext|>"],
+    ch="u8",
+    initial_alphabet="byte_level",
+    parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
+  )
   trainer.add_words(words)
   trainer.train(vocab_size)
   return {
@@ -65,6 +74,17 @@ def test_bpe_training_tie_break_matches_hugging_face_byte_level() -> None:
   assert ours_vocab["ab"] == hf_vocab["ab"] == 257
   assert "cd" not in ours_vocab
   assert "cd" not in hf_vocab
+
+
+def test_bpe_training_forced_parallel_merge_matches_default() -> None:
+  words = [("ababc", 5), ("ababcbabc", 30), ("abcbabcab", 200)]
+
+  default_vocab = _train_ours_from_words(words, 259)
+  forced_parallel_vocab = _train_ours_from_words(words, 259, parallel_merge_min_occurs_in=1)
+
+  assert forced_parallel_vocab == default_vocab
+  assert forced_parallel_vocab["ab"] == 257
+  assert forced_parallel_vocab["abc"] == 258
 
 
 def test_bpe_training_learned_tokens_match_hugging_face_on_5m_fixture() -> None:

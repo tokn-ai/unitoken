@@ -415,7 +415,7 @@ where
       let Some(merge) = pre_merges.remove(&tp) else {
         continue;
       };
-      let changes = _merge(&mut words, &merge, *target);
+      let changes = _merge(&mut words, &merge, *target, None);
       _update_merge_map(&mut pre_merges, &merge, changes, None);
     }
 
@@ -461,7 +461,7 @@ where
       }
     }
     while let Some((_, merge)) = queue.pop_last() {
-      let changes = _merge(&mut words, merge, merge.target.unwrap());
+      let changes = _merge(&mut words, merge, merge.target.unwrap(), None);
       for (tp, data) in changes {
         if data.occurs_in.is_empty() {
           continue;

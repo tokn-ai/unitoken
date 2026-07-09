@@ -115,7 +115,14 @@ const LARGE_WORD_DICT_THRESHOLD: usize = 1_000_000;
 const LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 1024;
 const SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 64 * 1024;
 
-fn should_parallel_merge(words_len: usize, occurs_in_len: usize) -> bool {
+pub(crate) fn should_parallel_merge(
+  words_len: usize,
+  occurs_in_len: usize,
+  parallel_merge_min_occurs_in: Option<usize>,
+) -> bool {
+  if let Some(threshold) = parallel_merge_min_occurs_in {
+    return occurs_in_len >= threshold;
+  }
   let threshold = if words_len >= LARGE_WORD_DICT_THRESHOLD {
     LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
   } else {
@@ -221,81 +228,39 @@ fn merge_words_sequential<C, I>(
   affected_words: impl IntoIterator<Item = usize>,
   merge_tp: (I, I),
   target_idx: I,
-) -> BTreeMap<(I, I), MergeData>
+) -> AHashMap<(I, I), MergeData>
 where
-  I: Ord + Copy,
+  I: Ord + Copy + Hash,
 {
-  let mut changes = BTreeMap::<(I, I), MergeData>::new();
+  let mut changes = Vec::new();
   for word_idx in affected_words {
-    let w = &mut words[word_idx];
-    let w_idx = &w.idxs;
-    let w_freq = w.freq;
-    let mut new_idxs = Vec::with_capacity(w_idx.len());
-    let mut i = 0;
-    let mut last_tp: Option<(I, I)> = None;
-    let mut did_merge = false;
-    while i + 1 < w_idx.len() {
-      let tp = (w_idx[i], w_idx[i + 1]);
-      if tp == merge_tp {
-        did_merge = true;
-        new_idxs.push(target_idx);
-        i += 2;
-        changes.entry(tp).or_default().freq -= w_freq;
-        // deal with left neighbor,
-        // e.g. in "abcd", when merging "b" and "c",
-        // old_tp = ("a", "b"), new_tp = ("a", "bc")
-        if let Some(old_tp) = last_tp {
-          let new_tp = (old_tp.0, target_idx);
-          changes.entry(old_tp).or_default().freq -= w_freq;
-          let data = changes.entry(new_tp).or_default();
-          data.freq += w_freq;
-          data.occurs_in.insert(word_idx as _);
-          // if i >= w_idx.len(), loop is end, and last_tp never reads
-          // last_tp = Some(new_tp);
-        }
-        // deal with right neighbor, notice i+=2 above
-        // e.g. in "abcd", when merging "b" and "c",
-        // old_tp = ("c", "d"), new_tp = ("bc", "d")
-        if i < w_idx.len() {
-          let old_tp = (tp.1, w_idx[i]);
-          let new_tp = (target_idx, old_tp.1);
-          changes.entry(old_tp).or_default().freq -= w_freq;
-          let data = changes.entry(new_tp).or_default();
-          data.freq += w_freq;
-          data.occurs_in.insert(word_idx as _);
-          last_tp = Some(new_tp);
-        }
-      } else {
-        new_idxs.push(w_idx[i]);
-        last_tp = Some(tp);
-        i += 1;
-      }
+    let word = &mut words[word_idx];
+    if let Some(update) = merge_word(word_idx, &word.idxs, word.freq, merge_tp, target_idx) {
+      word.idxs = update.idxs;
+      changes.extend(update.changes.into_iter().map(|(tp, data)| {
+        (update.word_idx, tp, data.freq)
+      }));
     }
-    if i < w_idx.len() {
-      new_idxs.push(w_idx[i]);
-    }
-
-    if !did_merge {
-      continue;
-    }
-
-    w.idxs = new_idxs;
   }
-  changes
+  merge_flat_changes(changes)
 }
 
-pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData>
+pub(crate) fn _merge<C, I>(
+  words: &mut Vec<PreToken<C, I>>,
+  merge: &Merge<C, I>,
+  target_idx: I,
+  parallel_merge_min_occurs_in: Option<usize>,
+) -> AHashMap<(I, I), MergeData>
 where
   C: Send + Sync,
   I: Ord + Copy + Hash + Send + Sync,
 {
-  // all tp with target_idx MUST be positive, so that occurs_in should be added.
-  // while tp without target_idx MUST be negative, and occurs_in should be removed.
-  if !should_parallel_merge(words.len(), merge.data.occurs_in.len()) {
+  // Frequencies stay exact, but affected-word sets are lazy: positive deltas
+  // add possible word ids, negative deltas do not remove stale ids. Stale ids
+  // are filtered by `merge_word` when the selected pair is no longer present.
+  if !should_parallel_merge(words.len(), merge.data.occurs_in.len(), parallel_merge_min_occurs_in) {
     let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize);
-    return merge_words_sequential(words, affected_words, merge.tp, target_idx)
-      .into_iter()
-      .collect();
+    return merge_words_sequential(words, affected_words, merge.tp, target_idx);
   }
 
   let update = merge

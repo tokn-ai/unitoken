@@ -44,7 +44,11 @@ pub trait BpeTrainerBaseImpl: Sized {
 //   Char,
 // }
 
-fn trainer_config(initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<BpeTrainerConfig> {
+fn trainer_config(
+  initial_alphabet: Option<&str>,
+  tie_break: Option<&str>,
+  parallel_merge_min_occurs_in: Option<usize>,
+) -> PyResult<BpeTrainerConfig> {
   let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
     "raw" => InitialAlphabet::RawBytes,
     "byte_level" => InitialAlphabet::ByteLevel,
@@ -58,6 +62,7 @@ fn trainer_config(initial_alphabet: Option<&str>, tie_break: Option<&str>) -> Py
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
+    parallel_merge_min_occurs_in,
   })
 }
 
@@ -85,9 +90,14 @@ impl BpeTrainer_u8_Idx {
   /// Create a new BPE trainer (byte-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None))]
-  pub fn new_py(special_tokens: Vec<String>, initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break)?;
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  pub fn new_py(
+    special_tokens: Vec<String>,
+    initial_alphabet: Option<&str>,
+    tie_break: Option<&str>,
+    parallel_merge_min_occurs_in: Option<usize>,
+  ) -> PyResult<(Self, BpeTrainerBase)> {
+    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
@@ -175,9 +185,14 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None))]
-  pub fn new_py(special_tokens: Vec<String>, initial_alphabet: Option<&str>, tie_break: Option<&str>) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break)?;
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  pub fn new_py(
+    special_tokens: Vec<String>,
+    initial_alphabet: Option<&str>,
+    tie_break: Option<&str>,
+    parallel_merge_min_occurs_in: Option<usize>,
+  ) -> PyResult<(Self, BpeTrainerBase)> {
+    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),

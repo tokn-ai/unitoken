@@ -24,9 +24,13 @@ from common import write_report
 SCRIPT_NAME = "profile_training_core"
 
 
-def profile_training_core(words: Sequence[tuple[str, int]], vocab_size: int, bucket_size: int) -> dict[str, Any]:
+def profile_training_core(words: Sequence[tuple[str, int]], vocab_size: int, bucket_size: int, ch: str) -> dict[str, Any]:
   gc.collect()
-  trainer = BpeTrainer(SPECIAL_TOKENS, ch="u8", initial_alphabet="byte_level")
+  trainer = BpeTrainer(
+    SPECIAL_TOKENS,
+    ch=ch,
+    initial_alphabet="byte_level" if ch == "u8" else None,
+  )
 
   started = time.perf_counter()
   trainer.add_words(words)
@@ -60,6 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description="Profile unitoken BPE training core from a compressed word-frequency inventory.")
   parser.add_argument("--words", type=Path, required=True, help="JSON word-frequency inventory.")
   parser.add_argument("--vocab-size", type=int, default=10000)
+  parser.add_argument("--ch", choices=["u8", "char"], default="u8", help="Trainer character level. Use char for Uni training.")
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a faster smoke profile.")
   parser.add_argument("--bucket-size", type=int, default=500)
   add_report_args(parser)
@@ -89,9 +94,10 @@ def main(argv: Sequence[str] | None = None) -> int:
       "unique_words": len(words),
       "occurrences": sum(freq for _, freq in words),
       "unitoken_input_kind": "compressed_word_counts",
+      "ch": args.ch,
     },
     "target_vocab_size": args.vocab_size,
-    "unitoken": profile_training_core(words, args.vocab_size, args.bucket_size),
+    "unitoken": profile_training_core(words, args.vocab_size, args.bucket_size, args.ch),
   }
 
   rendered = json.dumps(result, indent=2)
