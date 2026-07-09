@@ -384,12 +384,13 @@ where
   vocab.get(&idx).cloned().or_else(|| idx.idx_to_word()).ok_or_else(|| MyError::OovIdx(idx.to_u64()))
 }
 
-pub(crate) fn _update_merge_map<C, I>(merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>)
+pub(crate) fn _update_merge_map<C, I>(merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>) -> Vec<(I, I)>
 where
   I: IdxLike + HasChar<C>,
   C: CanStrToWord,
   Word<C>: WordDebugExt,
 {
+  let mut updated_tps = Vec::new();
   for (tp, data) in changes {
     if tp == merge.tp {
       continue;
@@ -421,5 +422,7 @@ where
         entry.data.occurs_in.remove(doc_id);
       });
     }
+    updated_tps.push(tp);
   }
+  updated_tps
 }

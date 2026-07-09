@@ -380,12 +380,9 @@ where
   }
 
   fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>) {
-    let changed_tps = changes.keys().copied().collect::<Vec<_>>();
-    _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
+    let changed_tps = _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
     for tp in changed_tps {
-      if tp != merge.tp {
-        self.push_merge_candidate(tp);
-      }
+      self.push_merge_candidate(tp);
     }
   }
 
