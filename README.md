@@ -1,6 +1,11 @@
 unitoken
 =======
 
+[![CI](https://github.com/tokn-ai/unitoken/actions/workflows/ci.yml/badge.svg)](https://github.com/tokn-ai/unitoken/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/uni-tokenizer.svg)](https://pypi.org/project/uni-tokenizer/)
+[![crates.io](https://img.shields.io/crates/v/unitoken.svg)](https://crates.io/crates/unitoken)
+[![docs.rs](https://docs.rs/unitoken/badge.svg)](https://docs.rs/unitoken)
+
 `unitoken` is a fast BPE tokenizer/trainer with a Rust core and optional Python bindings.
 
 Install
