@@ -1,5 +1,7 @@
 use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, sync::atomic::AtomicU64};
 
+use ahash::AHashMap;
+
 use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
@@ -379,14 +381,14 @@ where
       .collect();
   }
 
-  fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>) {
+  fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: AHashMap<(I, I), MergeData>) {
     let changed_tps = _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
     for tp in changed_tps {
       self.push_merge_candidate(tp);
     }
   }
 
-  fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData> {
+  fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData> {
     _merge(&mut self.words, merge, target_idx)
   }
 
@@ -555,10 +557,11 @@ mod tests {
         }
       })
     }
-    fn display(bpe: &BpeTrainer<u8, Idx>, changes: &BTreeMap<(Idx, Idx), MergeData>) -> String {
+    fn display(bpe: &BpeTrainer<u8, Idx>, changes: &AHashMap<(Idx, Idx), MergeData>) -> String {
       let mut parts = Vec::new();
       let target = ("__target__").to_word();
-      for (tp, data) in changes.iter() {
+      let changes = changes.iter().collect::<BTreeMap<_, _>>();
+      for (tp, data) in changes {
         let left = bpe.vocab.get(&tp.0).unwrap_or(&target).debug_display();
         let right = bpe.vocab.get(&tp.1).unwrap_or(&target).debug_display();
         parts.push(format!("({:?}, {:?}, MergeData::new({}).occurs_in({:?}))", left, right, data.freq, data.occurs_in_vec()));
@@ -595,7 +598,7 @@ mod tests {
           data.occurs_in.clear();
         }
         (tp_idx, data)
-      }).collect::<BTreeMap<_, _>>();
+      }).collect::<AHashMap<_, _>>();
       assert_eq!(changes, expected, "\nExpected changes:\n{}\nActual changes:\n{}", display(&bpe, &expected), display(&bpe, &changes));
     }
   }

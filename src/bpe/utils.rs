@@ -284,7 +284,7 @@ where
   changes
 }
 
-pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData>
+pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData>
 where
   C: Send + Sync,
   I: Ord + Copy + Hash + Send + Sync,
@@ -293,7 +293,9 @@ where
   // while tp without target_idx MUST be negative, and occurs_in should be removed.
   if !should_parallel_merge(words.len(), merge.data.occurs_in.len()) {
     let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize);
-    return merge_words_sequential(words, affected_words, merge.tp, target_idx);
+    return merge_words_sequential(words, affected_words, merge.tp, target_idx)
+      .into_iter()
+      .collect();
   }
 
   let update = merge
@@ -332,7 +334,7 @@ where
   for (word_idx, idxs) in update.word_updates {
     words[word_idx].idxs = idxs;
   }
-  merge_flat_changes(update.changes).into_iter().collect()
+  merge_flat_changes(update.changes)
 }
 
 pub(crate) fn _vocab_get<C, I>(vocab: &BTreeMap<I, Word<C>>, idx: I) -> MyResult<Word<C>>
@@ -343,9 +345,9 @@ where
   vocab.get(&idx).cloned().or_else(|| idx.idx_to_word()).ok_or_else(|| MyError::OovIdx(idx.to_u64()))
 }
 
-pub(crate) fn _update_merge_map<C, I>(merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>) -> Vec<(I, I)>
+pub(crate) fn _update_merge_map<C, I>(merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>, changes: AHashMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>) -> Vec<(I, I)>
 where
-  I: IdxLike + HasChar<C>,
+  I: IdxLike + HasChar<C> + Hash,
   C: CanStrToWord,
   Word<C>: WordDebugExt,
 {
