@@ -107,6 +107,16 @@ class BpeTrainer:
     """Save `vocab.{name}[{ch}].json` and `merges.{name}[{ch}].txt` into `outdir`."""
     vocab_path = Path(outdir) / f"vocab.{name}[{self.char_level}].json"
     merges_path = Path(outdir) / f"merges.{name}[{self.char_level}].txt"
+    self.save_files(vocab_path, merges_path, output_format=output_format)
+
+  def save_files(
+    self,
+    vocab_path: str | PathLike,
+    merges_path: str | PathLike,
+    *,
+    output_format: OutputFormat | None = None,
+  ) -> None:
+    """Save vocab and merges to explicit paths."""
     spec = output_format or self.output_format
     self._trainer.save_vocab(vocab_path, spec)
     self._trainer.save_merges_txt(merges_path, spec)
