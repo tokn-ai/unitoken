@@ -593,8 +593,8 @@ mod tests {
         let tp_idx = (lookup(&bpe, a).unwrap_or(target), lookup(&bpe, b).unwrap_or(target));
         let mut data = data.clone();
         // Lazy occurrence sets keep positive affected-word additions exact, but
-        // do not maintain exact removals for negative deltas.
-        if data.freq < 0 {
+        // do not maintain exact removals or zero-net changes.
+        if data.freq <= 0 {
           data.occurs_in.clear();
         }
         (tp_idx, data)
@@ -630,7 +630,7 @@ mod tests {
     _test_bpe_merge(&[("aaa", 10), ("aaaa", 1)],
     &[(("a", "a"), vec![
       ("a", "a", MergeData::new(-23).add_occurs_in([0, 1])),
-      ("aa", "a", MergeData::new(10).add_occurs_in([0, 1])),
+      ("aa", "a", MergeData::new(10).add_occurs_in([0])),
       ("aa", "aa", MergeData::new(1).add_occurs_in([1])),
     ])]);
   }
