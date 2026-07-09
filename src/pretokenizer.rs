@@ -353,7 +353,8 @@ fn split_by_unicode_bigrams(token: &str, unicode_bigrams: &AHashSet<(char, char)
   for pair in chars.windows(2) {
     let (_, left) = pair[0];
     let (right_byte, right) = pair[1];
-    if !unicode_bigrams.contains(&(left, right)) {
+    if (is_unicode_bigram_script(left) || is_unicode_bigram_script(right))
+      && !unicode_bigrams.contains(&(left, right)) {
       if start < right_byte {
         segments.push(token[start..right_byte].to_string());
       }
@@ -763,16 +764,13 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_bigram_split_is_bigram_agnostic() {
-    let bigrams = parse_unicode_bigrams(&["w是".to_string()]).unwrap();
+  fn test_unicode_bigram_split_keeps_unmeasured_non_script_edges() {
+    let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("Now是2024年").unwrap();
+    let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();
     let expected_tokens = vec![
-      ("N".to_string(), 1),
-      ("o".to_string(), 1),
-      ("w是".to_string(), 1),
-      ("2024".to_string(), 1),
-      ("年".to_string(), 1),
+      ("er".to_string(), 1),
+      ("世界".to_string(), 1),
     ]
     .into_iter()
     .collect::<BTreeMap<_, _>>();
