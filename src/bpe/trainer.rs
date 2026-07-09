@@ -105,7 +105,7 @@ pub struct BpeTrainer<C, I> {
 struct MergeCandidate<C, I> {
   freq: Freq,
   tp: (I, I),
-  content: (Word<C>, Word<C>),
+  content: Option<(Word<C>, Word<C>)>,
   tie_break: TieBreak,
 }
 
@@ -117,7 +117,10 @@ impl<C, I> MergeCandidate<C, I> {
     Self {
       freq: merge.data.freq,
       tp: merge.tp,
-      content: merge.content.clone(),
+      content: match tie_break {
+        TieBreak::SmallestPairId => None,
+        TieBreak::LargestContent => Some(merge.content.clone()),
+      },
       tie_break,
     }
   }
@@ -133,7 +136,7 @@ impl<C: Ord, I: Ord> Ord for MergeCandidate<C, I> {
       TieBreak::LargestContent => self
         .freq
         .cmp(&other.freq)
-        .then_with(|| self.content.cmp(&other.content)),
+        .then_with(|| self.content.as_ref().unwrap().cmp(other.content.as_ref().unwrap())),
     }
   }
 }
@@ -401,10 +404,10 @@ where
       if merge.data.freq != candidate.freq {
         continue;
       }
-      if merge.content != candidate.content {
+      if candidate.content.as_ref().is_some_and(|content| merge.content != *content) {
         continue;
       }
-      return Some(merge.clone());
+      return self.pre_merges.remove(&candidate.tp);
     }
     None
   }
@@ -419,7 +422,6 @@ where
     // but we have to add it to vocab.
     if merge.target.is_some() {
       self.vocab.insert(target_idx, merge.content.1.clone());
-      self.pre_merges.remove(&merge.tp);
       return target_idx;
     }
     let changes = self.merge(&merge, target_idx);
@@ -432,7 +434,6 @@ where
     assert_eq!(-changes.get(&merge.tp).map(|i| i.freq).unwrap_or(0), merge.data.freq);
     metrics::histogram!("bpe_trainer.changes").record(changes.len() as f64);
     self.update_pre_merges(&merge, changes);
-    self.pre_merges.remove(&merge.tp);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
     self.merges.push(merge);
