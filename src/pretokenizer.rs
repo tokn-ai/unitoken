@@ -765,12 +765,13 @@ mod tests {
 
   #[test]
   fn test_unicode_bigram_split_keeps_unmeasured_non_script_edges() {
-    let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
+    let bigrams = parse_unicode_bigrams(&["w是".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();
+    let tokens = pretokenizer.count_tokens_owned("Now是2024年").unwrap();
     let expected_tokens = vec![
-      ("er".to_string(), 1),
-      ("世界".to_string(), 1),
+      ("Now是".to_string(), 1),
+      ("2024".to_string(), 1),
+      ("年".to_string(), 1),
     ]
     .into_iter()
     .collect::<BTreeMap<_, _>>();
