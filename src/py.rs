@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -336,17 +336,17 @@ impl PreTokenizer {
   /// - `special_tokens`: special tokens to treat as indivisible.
   /// - `eot_token`: end-of-text token used for chunk boundary alignment.
   /// - `pat`: optional regex pattern; defaults to the crate's default.
-  #[pyo3(signature = (special_tokens, eot_token=None, pat=None, unicode_bigrams=None, unicode_bigram_boundary="keep"))]
+  #[pyo3(signature = (special_tokens, eot_token=None, pat=None, unicode_bigrams=None, unicode_bigram_mixed_boundary="keep"))]
   pub fn new_py(
     special_tokens: Vec<String>,
     eot_token: Option<String>,
     pat: Option<String>,
     unicode_bigrams: Option<Vec<String>>,
-    unicode_bigram_boundary: &str,
+    unicode_bigram_mixed_boundary: &str,
   ) -> PyResult<Self> {
     let mut pretokenizer = Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let unicode_bigram_boundary = UnicodeBigramBoundary::parse(unicode_bigram_boundary)
+    let unicode_bigram_mixed_boundary = UnicodeBigramMixedBoundary::parse(unicode_bigram_mixed_boundary)
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     if let Some(unicode_bigrams) = unicode_bigrams {
       pretokenizer = pretokenizer.with_unicode_bigrams(
@@ -354,7 +354,7 @@ impl PreTokenizer {
           .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
       );
     }
-    pretokenizer = pretokenizer.with_unicode_bigram_boundary(unicode_bigram_boundary);
+    pretokenizer = pretokenizer.with_unicode_bigram_mixed_boundary(unicode_bigram_mixed_boundary);
     Ok(pretokenizer)
   }
 

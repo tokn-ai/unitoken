@@ -73,18 +73,18 @@ impl ChunkOptions {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum UnicodeBigramBoundary {
+pub enum UnicodeBigramMixedBoundary {
   #[default]
   Keep,
   Split,
 }
 
-impl UnicodeBigramBoundary {
+impl UnicodeBigramMixedBoundary {
   pub fn parse(value: &str) -> MyResult<Self> {
     match value {
       "keep" => Ok(Self::Keep),
       "split" => Ok(Self::Split),
-      _ => Err(MyError::SpecError(format!("Unknown unicode bigram boundary mode: {value}"))),
+      _ => Err(MyError::SpecError(format!("Unknown unicode bigram mixed boundary mode: {value}"))),
     }
   }
 }
@@ -96,7 +96,7 @@ pub struct PreTokenizer {
   pub re_special_tokens: Regex,
   pub end_of_text: String,
   pub unicode_bigrams: Option<AHashSet<(char, char)>>,
-  pub unicode_bigram_boundary: UnicodeBigramBoundary,
+  pub unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
   pub metrics: bool
 }
 
@@ -128,7 +128,7 @@ impl PreTokenizer {
       re_special_tokens,
       end_of_text: end_of_text.unwrap_or(DEFAULT_EOT).to_string(),
       unicode_bigrams: None,
-      unicode_bigram_boundary: UnicodeBigramBoundary::default(),
+      unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary::default(),
       metrics: true,
     })
   }
@@ -138,8 +138,8 @@ impl PreTokenizer {
     self
   }
 
-  pub fn with_unicode_bigram_boundary(mut self, boundary: UnicodeBigramBoundary) -> Self {
-    self.unicode_bigram_boundary = boundary;
+  pub fn with_unicode_bigram_mixed_boundary(mut self, boundary: UnicodeBigramMixedBoundary) -> Self {
+    self.unicode_bigram_mixed_boundary = boundary;
     self
   }
 
@@ -151,7 +151,7 @@ impl PreTokenizer {
   }
 
   pub fn count_tokens_owned(&self, text: &str) -> MyResult<BTreeMap<String, Freq>> {
-    _pretokenizer_counter_with_unicode_bigrams(text, &self.re_pat, self.unicode_bigrams.as_ref(), self.unicode_bigram_boundary)
+    _pretokenizer_counter_with_unicode_bigrams(text, &self.re_pat, self.unicode_bigrams.as_ref(), self.unicode_bigram_mixed_boundary)
   }
 
   /// Compute byte `(offset, len)` pairs that split a file into approximately `desired_num_chunks`.
@@ -193,7 +193,7 @@ impl PreTokenizer {
         part.as_str(),
         &self.re_pat,
         self.unicode_bigrams.as_ref(),
-        self.unicode_bigram_boundary,
+        self.unicode_bigram_mixed_boundary,
       )? {
         *words.entry(token).or_default() += count;
       }
@@ -301,13 +301,13 @@ pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&
 }
 
 pub fn _pretokenizer_counter_with_unicode_bigrams(
-  s: &str, pat: &Regex, unicode_bigrams: Option<&AHashSet<(char, char)>>, unicode_bigram_boundary: UnicodeBigramBoundary,
+  s: &str, pat: &Regex, unicode_bigrams: Option<&AHashSet<(char, char)>>, unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
 ) -> MyResult<BTreeMap<String, Freq>> {
   let mut result = BTreeMap::new();
   for i in pat.find_iter(s) {
     let token = i?.as_str();
     if let Some(unicode_bigrams) = unicode_bigrams.filter(|_| needs_unicode_bigram_split(token)) {
-      for segment in split_by_unicode_bigrams(token, unicode_bigrams, unicode_bigram_boundary) {
+      for segment in split_by_unicode_bigrams(token, unicode_bigrams, unicode_bigram_mixed_boundary) {
         *result.entry(segment).or_default() += 1;
       }
     } else {
@@ -375,7 +375,7 @@ fn count_unicode_bigrams(
 fn split_by_unicode_bigrams(
   token: &str,
   unicode_bigrams: &AHashSet<(char, char)>,
-  unicode_bigram_boundary: UnicodeBigramBoundary,
+  unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
 ) -> Vec<String> {
   let chars = token.char_indices().collect::<Vec<_>>();
   if chars.len() <= 1 {
@@ -386,7 +386,7 @@ fn split_by_unicode_bigrams(
   for pair in chars.windows(2) {
     let (_, left) = pair[0];
     let (right_byte, right) = pair[1];
-    if should_split_unicode_bigram_boundary(left, right, unicode_bigrams, unicode_bigram_boundary) {
+    if should_split_unicode_bigram_mixed_boundary(left, right, unicode_bigrams, unicode_bigram_mixed_boundary) {
       if start < right_byte {
         segments.push(token[start..right_byte].to_string());
       }
@@ -399,18 +399,18 @@ fn split_by_unicode_bigrams(
   segments
 }
 
-fn should_split_unicode_bigram_boundary(
+fn should_split_unicode_bigram_mixed_boundary(
   left: char,
   right: char,
   unicode_bigrams: &AHashSet<(char, char)>,
-  unicode_bigram_boundary: UnicodeBigramBoundary,
+  unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
 ) -> bool {
   if unicode_bigrams.contains(&(left, right)) {
     return false;
   }
   match (is_unicode_bigram_script(left), is_unicode_bigram_script(right)) {
     (true, true) => true,
-    (true, false) | (false, true) => unicode_bigram_boundary == UnicodeBigramBoundary::Split,
+    (true, false) | (false, true) => unicode_bigram_mixed_boundary == UnicodeBigramMixedBoundary::Split,
     (false, false) => false,
   }
 }
@@ -811,7 +811,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_bigram_split_keeps_unmeasured_mixed_edges_by_default() {
+  fn test_unicode_bigram_split_keeps_mixed_edges_by_default() {
     let bigrams = parse_unicode_bigrams(&["w是".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
     let tokens = pretokenizer.count_tokens_owned("Now是2024年").unwrap();
@@ -826,11 +826,11 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_bigram_split_can_split_unmeasured_mixed_edges() {
+  fn test_unicode_bigram_split_can_split_mixed_edges() {
     let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None)
       .with_unicode_bigrams(bigrams)
-      .with_unicode_bigram_boundary(UnicodeBigramBoundary::Split);
+      .with_unicode_bigram_mixed_boundary(UnicodeBigramMixedBoundary::Split);
     let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();
     let expected_tokens = vec![
       ("er".to_string(), 1),
@@ -842,7 +842,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_bigram_split_keeps_unmeasured_mixed_edges() {
+  fn test_unicode_bigram_split_keeps_mixed_edges() {
     let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
     let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();

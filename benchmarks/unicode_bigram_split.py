@@ -12,7 +12,7 @@ from typing import Any, cast
 from uni_tokenizer import BpeTrainer
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
-from uni_tokenizer import UnicodeBigramBoundary
+from uni_tokenizer import UnicodeBigramMixedBoundary
 
 from common import DEFAULT_CHUNK_SIZE
 from common import SPECIAL_TOKENS
@@ -118,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto")
   parser.add_argument("--top-k", type=int, default=100_000)
   parser.add_argument("--min-freq", type=int, default=16)
-  parser.add_argument("--unicode-bigram-boundary", choices=["keep", "split"], default="keep")
+  parser.add_argument("--unicode-bigram-mixed-boundary", choices=["keep", "split"], default="keep")
   parser.add_argument("--vocab-size", type=int, help="Optionally train unitoken on both inventories.")
   parser.add_argument("--save-words", type=Path, help="Save the Unicode bigram split word-frequency inventory as JSON.")
   add_report_args(parser)
@@ -132,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--min-freq must be at least 1")
 
   boundary = cast(BoundaryMode, args.boundary)
-  unicode_bigram_boundary = cast(UnicodeBigramBoundary, args.unicode_bigram_boundary)
+  unicode_bigram_mixed_boundary = cast(UnicodeBigramMixedBoundary, args.unicode_bigram_mixed_boundary)
   base = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
 
   started = time.perf_counter()
@@ -150,7 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     SPECIAL_TOKENS,
     SPECIAL_TOKENS[0],
     unicode_bigrams=unicode_bigrams,
-    unicode_bigram_boundary=unicode_bigram_boundary,
+    unicode_bigram_mixed_boundary=unicode_bigram_mixed_boundary,
   )
   split_words, split_pretokenize_s = collect_words(split, args.text, args.chunk_size, boundary)
   if args.save_words:
@@ -178,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     "unicode_bigram": {
       "top_k": args.top_k,
       "min_freq": args.min_freq,
-      "boundary": unicode_bigram_boundary,
+      "mixed_boundary": unicode_bigram_mixed_boundary,
       "retained": len(unicode_bigrams),
       "build_s": build_bigrams_s,
     },
