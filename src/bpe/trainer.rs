@@ -588,7 +588,13 @@ mod tests {
       }
       let expected = expected.into_iter().map(|(a, b, data)| {
         let tp_idx = (lookup(&bpe, a).unwrap_or(target), lookup(&bpe, b).unwrap_or(target));
-        (tp_idx, data.clone())
+        let mut data = data.clone();
+        // Lazy occurrence sets keep positive affected-word additions exact, but
+        // do not maintain exact removals for negative deltas.
+        if data.freq < 0 {
+          data.occurs_in.clear();
+        }
+        (tp_idx, data)
       }).collect::<BTreeMap<_, _>>();
       assert_eq!(changes, expected, "\nExpected changes:\n{}\nActual changes:\n{}", display(&bpe, &expected), display(&bpe, &changes));
     }

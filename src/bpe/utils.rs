@@ -88,28 +88,14 @@ impl WordDebugExt for Word<Character> {
   }
 }
 
-fn add_local_pair_delta<I: Eq + Copy>(
-  local_freq: &mut Vec<((I, I), Freq)>,
-  tp: (I, I),
-  delta: Freq,
-) {
-  if let Some((_, freq)) = local_freq.iter_mut().find(|(existing, _)| *existing == tp) {
-    *freq += delta;
-  } else {
-    local_freq.push((tp, delta));
-  }
-}
-
 struct LocalMergeData {
   freq: Freq,
-  occurs_in: bool,
 }
 
 impl LocalMergeData {
   fn new(freq: Freq) -> Self {
     Self {
       freq,
-      occurs_in: false,
     }
   }
 }
@@ -150,38 +136,28 @@ fn add_local_change<I: Eq + Copy>(
   }
 }
 
-fn add_local_occurs_in<I: Eq + Copy>(
-  changes: &mut Vec<((I, I), LocalMergeData)>,
-  tp: (I, I),
-) {
-  if let Some((_, data)) = changes.iter_mut().find(|(existing, _)| *existing == tp) {
-    data.occurs_in = true;
-  }
-}
-
 fn merge_word<I>(
   word_idx: usize,
   w_idx: &[I],
   w_freq: Freq,
   merge_tp: (I, I),
   target_idx: I,
-) -> MergeWordUpdate<I>
+) -> Option<MergeWordUpdate<I>>
 where
   I: Ord + Copy,
 {
   let mut changes = Vec::<((I, I), LocalMergeData)>::with_capacity(8);
-  let mut local_freq = Vec::<((I, I), Freq)>::with_capacity(w_idx.len().saturating_sub(1));
   let mut new_idxs = Vec::with_capacity(w_idx.len());
   let mut i = 0;
   let mut last_tp: Option<(I, I)> = None;
+  let mut did_merge = false;
   while i + 1 < w_idx.len() {
     let tp = (w_idx[i], w_idx[i + 1]);
-    add_local_pair_delta(&mut local_freq, tp, 1);
     if tp == merge_tp {
+      did_merge = true;
       new_idxs.push(target_idx);
       i += 2;
       add_local_change(&mut changes, tp, -w_freq);
-      add_local_pair_delta(&mut local_freq, tp, -1);
       // deal with left neighbor,
       // e.g. in "abcd", when merging "b" and "c",
       // old_tp = ("a", "b"), new_tp = ("a", "bc")
@@ -189,8 +165,6 @@ where
         let new_tp = (old_tp.0, target_idx);
         add_local_change(&mut changes, old_tp, -w_freq);
         add_local_change(&mut changes, new_tp, w_freq);
-        add_local_pair_delta(&mut local_freq, old_tp, -1);
-        add_local_pair_delta(&mut local_freq, new_tp, -1);
         // if i >= w_idx.len(), loop is end, and last_tp never reads
         // last_tp = Some(new_tp);
       }
@@ -202,12 +176,6 @@ where
         let new_tp = (target_idx, old_tp.1);
         add_local_change(&mut changes, old_tp, -w_freq);
         add_local_change(&mut changes, new_tp, w_freq);
-        // old_tp is not increased, so that it should not be decreased.
-        // Keep a zero local entry so occurrence-set membership is still updated.
-        add_local_pair_delta(&mut local_freq, old_tp, 0);
-        // when combining "b" and "c" in "bcbc",
-        // new_tp=("bc", "b") would be false positive occurs_in
-        add_local_pair_delta(&mut local_freq, new_tp, -1);
         last_tp = Some(new_tp);
       }
     } else {
@@ -220,15 +188,17 @@ where
     new_idxs.push(w_idx[i]);
   }
 
-  local_freq.iter().filter(|(_, i)| *i <= 0).for_each(|(tp, _)| {
-    add_local_occurs_in(&mut changes, *tp);
-  });
+  // `occurs_in` is maintained lazily, so it may contain stale word ids.
+  // Stale affected words should not rewrite or emit zero deltas.
+  if !did_merge {
+    return None;
+  }
 
-  MergeWordUpdate {
+  Some(MergeWordUpdate {
     word_idx,
     idxs: new_idxs,
     changes,
-  }
+  })
 }
 
 fn merge_changes_hash<I>(changes: &mut AHashMap<(I, I), MergeData>, word_idx: usize, local_changes: Vec<((I, I), LocalMergeData)>)
@@ -238,7 +208,7 @@ where
   for (tp, local) in local_changes {
     let data = changes.entry(tp).or_default();
     data.freq += local.freq;
-    if local.occurs_in {
+    if local.freq > 0 {
       data.occurs_in.insert(word_idx as _);
     }
   }
@@ -269,27 +239,26 @@ where
     let w = &mut words[word_idx];
     let w_idx = &w.idxs;
     let w_freq = w.freq;
-    let mut local_freq = Vec::<((I, I), Freq)>::with_capacity(w_idx.len().saturating_sub(1));
     let mut new_idxs = Vec::with_capacity(w_idx.len());
     let mut i = 0;
     let mut last_tp: Option<(I, I)> = None;
+    let mut did_merge = false;
     while i + 1 < w_idx.len() {
       let tp = (w_idx[i], w_idx[i + 1]);
-      add_local_pair_delta(&mut local_freq, tp, 1);
       if tp == merge_tp {
+        did_merge = true;
         new_idxs.push(target_idx);
         i += 2;
         changes.entry(tp).or_default().freq -= w_freq;
-        add_local_pair_delta(&mut local_freq, tp, -1);
         // deal with left neighbor,
         // e.g. in "abcd", when merging "b" and "c",
         // old_tp = ("a", "b"), new_tp = ("a", "bc")
         if let Some(old_tp) = last_tp {
           let new_tp = (old_tp.0, target_idx);
           changes.entry(old_tp).or_default().freq -= w_freq;
-          changes.entry(new_tp).or_default().freq += w_freq;
-          add_local_pair_delta(&mut local_freq, old_tp, -1);
-          add_local_pair_delta(&mut local_freq, new_tp, -1);
+          let data = changes.entry(new_tp).or_default();
+          data.freq += w_freq;
+          data.occurs_in.insert(word_idx as _);
           // if i >= w_idx.len(), loop is end, and last_tp never reads
           // last_tp = Some(new_tp);
         }
@@ -300,13 +269,9 @@ where
           let old_tp = (tp.1, w_idx[i]);
           let new_tp = (target_idx, old_tp.1);
           changes.entry(old_tp).or_default().freq -= w_freq;
-          changes.entry(new_tp).or_default().freq += w_freq;
-          // old_tp is not increased, so that it should not be decreased.
-          // Keep a zero local entry so occurrence-set membership is still updated.
-          add_local_pair_delta(&mut local_freq, old_tp, 0);
-          // when combining "b" and "c" in "bcbc",
-          // new_tp=("bc", "b") would be false positive occurs_in
-          add_local_pair_delta(&mut local_freq, new_tp, -1);
+          let data = changes.entry(new_tp).or_default();
+          data.freq += w_freq;
+          data.occurs_in.insert(word_idx as _);
           last_tp = Some(new_tp);
         }
       } else {
@@ -319,9 +284,9 @@ where
       new_idxs.push(w_idx[i]);
     }
 
-    local_freq.iter().filter(|(_, i)| *i <= 0).for_each(|(tp, _)| {
-      changes.entry(*tp).and_modify(|d| { d.occurs_in.insert(word_idx as _); });
-    });
+    if !did_merge {
+      continue;
+    }
 
     w.idxs = new_idxs;
   }
@@ -352,9 +317,10 @@ where
       |mut batch, &word_idx| {
         let word_idx = word_idx as usize;
         let word = &words[word_idx];
-        let update = merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx);
-        batch.word_updates.push((update.word_idx, update.idxs));
-        merge_changes_hash(&mut batch.changes, update.word_idx, update.changes);
+        if let Some(update) = merge_word(word_idx, &word.idxs, word.freq, merge.tp, target_idx) {
+          batch.word_updates.push((update.word_idx, update.idxs));
+          merge_changes_hash(&mut batch.changes, update.word_idx, update.changes);
+        }
         batch
       },
     )
@@ -415,12 +381,10 @@ where
     };
     // println!("  Change {:?} {:?} {:?}: freq {} -> {}", tp, entry.content.0.display(), entry.content.1.display(), entry.data.freq, entry.data.freq + data.freq);
     entry.data.freq += data.freq;
+    // Keep affected-word sets lazy: positive deltas add possible positions,
+    // negative deltas only repair frequency and leave stale positions behind.
     if data.freq > 0 {
       entry.data.occurs_in.extend(data.occurs_in);
-    } else {
-      data.occurs_in.iter().for_each(|doc_id| {
-        entry.data.occurs_in.remove(doc_id);
-      });
     }
     updated_tps.push(tp);
   }
