@@ -115,7 +115,14 @@ const LARGE_WORD_DICT_THRESHOLD: usize = 1_000_000;
 const LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 1024;
 const SMALL_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD: usize = 64 * 1024;
 
-fn should_parallel_merge(words_len: usize, occurs_in_len: usize) -> bool {
+pub(crate) fn should_parallel_merge(
+  words_len: usize,
+  occurs_in_len: usize,
+  parallel_merge_min_occurs_in: Option<usize>,
+) -> bool {
+  if let Some(threshold) = parallel_merge_min_occurs_in {
+    return occurs_in_len >= threshold;
+  }
   let threshold = if words_len >= LARGE_WORD_DICT_THRESHOLD {
     LARGE_DICT_PARALLEL_MERGE_OCCURS_IN_THRESHOLD
   } else {
@@ -238,7 +245,12 @@ where
   merge_flat_changes(changes)
 }
 
-pub(crate) fn _merge<C, I>(words: &mut Vec<PreToken<C, I>>, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData>
+pub(crate) fn _merge<C, I>(
+  words: &mut Vec<PreToken<C, I>>,
+  merge: &Merge<C, I>,
+  target_idx: I,
+  parallel_merge_min_occurs_in: Option<usize>,
+) -> AHashMap<(I, I), MergeData>
 where
   C: Send + Sync,
   I: Ord + Copy + Hash + Send + Sync,
@@ -246,7 +258,7 @@ where
   // Frequencies stay exact, but affected-word sets are lazy: positive deltas
   // add possible word ids, negative deltas do not remove stale ids. Stale ids
   // are filtered by `merge_word` when the selected pair is no longer present.
-  if !should_parallel_merge(words.len(), merge.data.occurs_in.len()) {
+  if !should_parallel_merge(words.len(), merge.data.occurs_in.len(), parallel_merge_min_occurs_in) {
     let affected_words = merge.data.occurs_in.iter().copied().map(|i| i as usize);
     return merge_words_sequential(words, affected_words, merge.tp, target_idx);
   }
