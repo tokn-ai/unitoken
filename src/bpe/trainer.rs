@@ -1,4 +1,6 @@
-use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, HashMap}, sync::atomic::AtomicU64};
+use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, sync::atomic::AtomicU64};
+
+use ahash::AHashMap;
 
 use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
@@ -105,7 +107,7 @@ pub struct BpeTrainer<C, I> {
 struct MergeCandidate<C, I> {
   freq: Freq,
   tp: (I, I),
-  content: (Word<C>, Word<C>),
+  content: Option<(Word<C>, Word<C>)>,
   tie_break: TieBreak,
 }
 
@@ -117,7 +119,10 @@ impl<C, I> MergeCandidate<C, I> {
     Self {
       freq: merge.data.freq,
       tp: merge.tp,
-      content: merge.content.clone(),
+      content: match tie_break {
+        TieBreak::SmallestPairId => None,
+        TieBreak::LargestContent => Some(merge.content.clone()),
+      },
       tie_break,
     }
   }
@@ -133,7 +138,7 @@ impl<C: Ord, I: Ord> Ord for MergeCandidate<C, I> {
       TieBreak::LargestContent => self
         .freq
         .cmp(&other.freq)
-        .then_with(|| self.content.cmp(&other.content)),
+        .then_with(|| self.content.as_ref().unwrap().cmp(other.content.as_ref().unwrap())),
     }
   }
 }
@@ -376,17 +381,14 @@ where
       .collect();
   }
 
-  fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: BTreeMap<(I, I), MergeData>) {
-    let changed_tps = changes.keys().copied().collect::<Vec<_>>();
-    _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
+  fn update_pre_merges(&mut self, merge: &Merge<C, I>, changes: AHashMap<(I, I), MergeData>) {
+    let changed_tps = _update_merge_map(&mut self.pre_merges, merge, changes, Some(&self.vocab));
     for tp in changed_tps {
-      if tp != merge.tp {
-        self.push_merge_candidate(tp);
-      }
+      self.push_merge_candidate(tp);
     }
   }
 
-  fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> BTreeMap<(I, I), MergeData> {
+  fn merge(&mut self, merge: &Merge<C, I>, target_idx: I) -> AHashMap<(I, I), MergeData> {
     _merge(&mut self.words, merge, target_idx)
   }
 
@@ -401,10 +403,10 @@ where
       if merge.data.freq != candidate.freq {
         continue;
       }
-      if merge.content != candidate.content {
+      if candidate.content.as_ref().is_some_and(|content| merge.content != *content) {
         continue;
       }
-      return Some(merge.clone());
+      return self.pre_merges.remove(&candidate.tp);
     }
     None
   }
@@ -419,7 +421,6 @@ where
     // but we have to add it to vocab.
     if merge.target.is_some() {
       self.vocab.insert(target_idx, merge.content.1.clone());
-      self.pre_merges.remove(&merge.tp);
       return target_idx;
     }
     let changes = self.merge(&merge, target_idx);
@@ -432,7 +433,6 @@ where
     assert_eq!(-changes.get(&merge.tp).map(|i| i.freq).unwrap_or(0), merge.data.freq);
     metrics::histogram!("bpe_trainer.changes").record(changes.len() as f64);
     self.update_pre_merges(&merge, changes);
-    self.pre_merges.remove(&merge.tp);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
     self.merges.push(merge);
@@ -557,10 +557,11 @@ mod tests {
         }
       })
     }
-    fn display(bpe: &BpeTrainer<u8, Idx>, changes: &BTreeMap<(Idx, Idx), MergeData>) -> String {
+    fn display(bpe: &BpeTrainer<u8, Idx>, changes: &AHashMap<(Idx, Idx), MergeData>) -> String {
       let mut parts = Vec::new();
       let target = ("__target__").to_word();
-      for (tp, data) in changes.iter() {
+      let changes = changes.iter().collect::<BTreeMap<_, _>>();
+      for (tp, data) in changes {
         let left = bpe.vocab.get(&tp.0).unwrap_or(&target).debug_display();
         let right = bpe.vocab.get(&tp.1).unwrap_or(&target).debug_display();
         parts.push(format!("({:?}, {:?}, MergeData::new({}).occurs_in({:?}))", left, right, data.freq, data.occurs_in_vec()));
@@ -590,8 +591,14 @@ mod tests {
       }
       let expected = expected.into_iter().map(|(a, b, data)| {
         let tp_idx = (lookup(&bpe, a).unwrap_or(target), lookup(&bpe, b).unwrap_or(target));
-        (tp_idx, data.clone())
-      }).collect::<BTreeMap<_, _>>();
+        let mut data = data.clone();
+        // Lazy occurrence sets keep positive affected-word additions exact, but
+        // do not maintain exact removals for negative deltas.
+        if data.freq < 0 {
+          data.occurs_in.clear();
+        }
+        (tp_idx, data)
+      }).collect::<AHashMap<_, _>>();
       assert_eq!(changes, expected, "\nExpected changes:\n{}\nActual changes:\n{}", display(&bpe, &expected), display(&bpe, &changes));
     }
   }

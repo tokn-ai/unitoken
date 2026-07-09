@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, sync::Arc};
+use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 pub mod trainer;
 pub mod encoder;
@@ -8,6 +8,7 @@ pub use trainer::{BpeTrainer, BpeTrainerConfig, InitialAlphabet, TieBreak};
 pub use encoder::BpeEncoder;
 use utils::*;
 
+use ahash::AHashSet;
 use ordermap::OrderMap;
 
 pub type Idx = u32;
@@ -85,7 +86,7 @@ impl<C, I> Merge<C, I> {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct MergeData {
-  pub occurs_in: BTreeSet<u64>,
+  pub occurs_in: AHashSet<u64>,
   pub freq: Freq,
 }
 
@@ -93,7 +94,7 @@ impl MergeData {
   /// Create a new [`MergeData`] with the given frequency.
   pub fn new(freq: Freq) -> Self {
     Self {
-      occurs_in: BTreeSet::new(),
+      occurs_in: AHashSet::new(),
       freq,
     }
   }
@@ -109,7 +110,9 @@ impl MergeData {
 
   /// Return `occurs_in` as a `Vec`.
   pub fn occurs_in_vec(&self) -> Vec<u64> {
-    self.occurs_in.iter().copied().collect::<Vec<u64>>()
+    let mut occurs_in = self.occurs_in.iter().copied().collect::<Vec<u64>>();
+    occurs_in.sort_unstable();
+    occurs_in
   }
 }
 

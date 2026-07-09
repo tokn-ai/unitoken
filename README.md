@@ -96,6 +96,21 @@ default, Hugging Face receives the same chunk boundaries as unitoken so vocab
 parity is not affected by iterator boundary differences. Pass
 `--hf-chunk-bytes` to force fixed byte chunks for Hugging Face.
 
+Latest fixed-word trainer profile on the release build, using compressed
+`_words.json` inventories and `vocab_size=10000`:
+
+| dataset | unique words | occurrences | total train | train steps |
+|---|---:|---:|---:|---:|
+| FineWeb English 64MiB | 298,156 | 13,720,494 | 1.151s | 0.968s |
+| FineWeb English 1GiB | 1,656,501 | 219,082,524 | 4.522s | 3.258s |
+| FineWeb2 Chinese 64MiB | 1,803,009 | 5,774,521 | 26.681s | 20.416s |
+| FineWeb2 Chinese bigram 64MiB | 606,153 | 15,901,831 | 3.702s | 3.034s |
+| FineWeb2 Chinese bigram 1GiB | 3,855,974 | 249,919,657 | 20.197s | 14.169s |
+
+The Chinese bigram rows use the unicode-bigram split inventory. The default
+Chinese 1GiB inventory is intentionally omitted from this run; only the bigram
+1GiB Chinese inventory was profiled.
+
 Chunking supports explicit boundary modes:
 
 - `auto`: split on the EOT token when present, otherwise line boundaries, then UTF-8 byte boundaries as a last resort.
