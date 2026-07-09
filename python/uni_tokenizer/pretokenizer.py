@@ -8,6 +8,7 @@ from ._lib import PreTokenizer as _PreTokenizer
 
 
 BoundaryMode = Literal["auto", "eot", "line", "utf8"]
+UnicodeBigramBoundary = Literal["keep", "split"]
 
 
 class PreTokenizer:
@@ -17,8 +18,9 @@ class PreTokenizer:
     eot_token: str | None = None,
     pat: str | None = None,
     unicode_bigrams: Sequence[str] | None = None,
+    unicode_bigram_boundary: UnicodeBigramBoundary = "keep",
   ) -> None:
-    self._inner = _PreTokenizer(special_tokens, eot_token, pat, unicode_bigrams)
+    self._inner = _PreTokenizer(special_tokens, eot_token, pat, unicode_bigrams, unicode_bigram_boundary)
 
   def find_chunk_boundaries(
     self,
