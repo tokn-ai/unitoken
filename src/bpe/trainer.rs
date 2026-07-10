@@ -787,7 +787,7 @@ mod tests {
     // const NAME: &str = "tinystories_sample_5M";
     // const NAME: &str = "TinyStoriesV2-GPT4-train";
     const NAME: &str = "TinyStories_all_data_zh_1M-sample";
-    let spec = crate::spec::uni::UniSpec;
+    let spec = crate::spec::unitoken::UnitokenSpec;
     let input = std::fs::read_to_string(format!("fixtures/_words.{NAME}.json")).unwrap();
     let words: BTreeMap<String, Freq> = serde_json::from_str(&input).unwrap();
     let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(

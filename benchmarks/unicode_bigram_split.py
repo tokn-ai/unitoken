@@ -79,7 +79,7 @@ def save_words(path: Path, words: dict[str, int]) -> None:
 
 
 def train_unitoken(words: dict[str, int], vocab_size: int) -> dict[str, Any]:
-  trainer = BpeTrainer(SPECIAL_TOKENS, ch="u8", initial_alphabet="byte_level")
+  trainer = BpeTrainer(SPECIAL_TOKENS, unit="byte", initial_alphabet="byte_level")
   started = time.perf_counter()
   trainer.add_words(list(words.items()))
   add_words_s = time.perf_counter() - started

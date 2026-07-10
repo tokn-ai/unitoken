@@ -6,16 +6,16 @@ use ordermap::OrderMap;
 
 use crate::{MyError, MyResult, bpe::{CharSplit, Character, HasChar, IdxLike, Merge, Word}, spec::{Spec, WordDisplay}};
 
-pub struct UniSpec;
+pub struct UnitokenSpec;
 
-impl<C: Ord, I: IdxLike> Spec<C, I> for UniSpec
+impl<C: Ord, I: IdxLike> Spec<C, I> for UnitokenSpec
 where
   Self: WordDisplay<C>,
   I: HasChar<C>,
   C: CharSplit,
 {
   fn suffix(&self) -> Option<&str> {
-    Some("uni")
+    Some("unitoken")
   }
 
   fn encode_vocab(&self, w: &mut dyn std::io::Write, vocab: &BTreeMap<I, Word<C>>) -> MyResult<()> {
@@ -109,7 +109,7 @@ where
   }
 }
 
-impl WordDisplay<Character> for UniSpec {
+impl WordDisplay<Character> for UnitokenSpec {
   fn word_display(&self, word: &Word<Character>) -> String {
     _printable(word)
   }
@@ -120,7 +120,7 @@ impl WordDisplay<Character> for UniSpec {
   }
 }
 
-impl WordDisplay<u8> for UniSpec {
+impl WordDisplay<u8> for UnitokenSpec {
   fn word_display(&self, word: &Word<u8>) -> String {
     _printable(&CharSplit::from_vec_u8(word.as_ref()))
   }

@@ -1,14 +1,12 @@
 from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
-from typing import cast, TYPE_CHECKING
+from typing import cast
 from ._lib import BpeEncoderBase
+from .trainer import FileFormat, Unit, _resolve_format, _validate_unit
 import numpy as np
 
 IdxArray = np.ndarray[tuple[int], np.dtype[np.uint32]]
-
-if TYPE_CHECKING:
-  from .trainer import CharLevel, OutputFormat
 
 class BpeEncoder:
   """BPE encoder.
@@ -17,50 +15,54 @@ class BpeEncoder:
 
   Parameters
   ----------
-  ch:
-    Character level: `"u8"` (byte-level, GPT-2-style) or `"char"` (Unicode-aware, Uni spec).
+  unit:
+    Atomic BPE unit: `"byte"` or `"unicode"`.
   special_tokens:
     Optional list of special tokens. When provided, they are treated as indivisible tokens.
-  merges / vocabs:
+  merges / vocab:
     In-memory merge rules and vocabulary. If omitted, use :meth:`load` to load from files.
   """
   def __init__(
       self,
-      ch: "CharLevel" = "u8",
+      unit: "Unit" = "byte",
       *,
       special_tokens: Sequence[str] | None = None,
       merges: list[tuple[bytes, bytes]] | None = None,
-      vocabs: dict[bytes, int] | None = None,
+      vocab: dict[bytes, int] | None = None,
       pat_str: str | None = None,
-      _encoder: BpeEncoderBase | None = None,
   ) -> None:
-    self.char_level = ch
-    if _encoder is not None:
-      self._encoder = _encoder
-    else:
-      spec = "uni" if ch == "char" else "gpt2"
-      self._encoder = BpeEncoderBase(
-        spec=spec,
-        char_level=ch,
-        merges_filename=None,
-        vocab_filename=None,
-        merges=merges,
-        vocabs=cast(dict[Sequence[int], int], vocabs),
-        special_tokens=special_tokens,
-        pat_str=pat_str,
-      )
+    _validate_unit(unit)
+    self.unit = unit
+    file_format = _resolve_format(unit, None)
+    self._encoder = BpeEncoderBase(
+      format=file_format,
+      unit=unit,
+      merges_file=None,
+      vocab_file=None,
+      merges=merges,
+      vocab=cast(dict[Sequence[int], int], vocab),
+      special_tokens=special_tokens,
+      pat_str=pat_str,
+    )
+
+  @classmethod
+  def _from_encoder(cls, unit: "Unit", encoder: BpeEncoderBase) -> "BpeEncoder":
+    instance = cls.__new__(cls)
+    instance.unit = unit
+    instance._encoder = encoder
+    return instance
 
   @classmethod
   def load(
     cls,
     name: str | None = None,
     *,
-    ch: "CharLevel" = "u8",
-    output_format: "OutputFormat | None" = None,
+    unit: "Unit" = "byte",
+    format: "FileFormat | None" = None,
     special_tokens: Sequence[str] | None = None,
     input_dir: str | PathLike | None = None,
     merges_file: str | PathLike | None = None,
-    vocabs_file: str | PathLike | None = None,
+    vocab_file: str | PathLike | None = None,
     pat_str: str | None = None,
   ) -> "BpeEncoder":
     """Load an encoder from vocab/merge files.
@@ -69,41 +71,39 @@ class BpeEncoder:
     ----------
     name:
       Optional model name used to derive default filenames:
-      `merges.{name}[{ch}].txt` and `vocab.{name}[{ch}].json`.
-    ch:
-      Character level (`"u8"` or `"char"`).
-    output_format:
-      Override the spec used to decode the files (`"gpt2"` or `"uni"`).
-      If omitted, defaults to `"gpt2"` for `ch="u8"` and `"uni"` for `ch="char"`.
+      `merges.{name}[{unit}].txt` and `vocab.{name}[{unit}].json`.
+    unit:
+      Atomic BPE unit (`"byte"` or `"unicode"`).
+    format:
+      Override the format used to decode the files (`"gpt2"` or `"unitoken"`).
+      If omitted, defaults to `"gpt2"` for byte units and `"unitoken"` for Unicode units.
     special_tokens:
       Optional list of special tokens to configure the encoder.
     input_dir:
-      Optional directory to resolve `merges_file`/`vocabs_file` relative to.
-    merges_file / vocabs_file:
+      Optional directory to resolve `merges_file`/`vocab_file` relative to.
+    merges_file / vocab_file:
       Explicit filenames/paths for merges and vocab.
     """
-    spec = output_format
-    if spec is None:
-      spec = "uni" if ch == "char" else "gpt2"
+    resolved_format = _resolve_format(unit, format)
     if name is not None:
       if merges_file is None:
-        merges_file = f"merges.{name}[{ch}].txt"
-      if vocabs_file is None:
-        vocabs_file = f"vocab.{name}[{ch}].json"
+        merges_file = f"merges.{name}[{unit}].txt"
+      if vocab_file is None:
+        vocab_file = f"vocab.{name}[{unit}].json"
     if input_dir is not None:
       if merges_file is not None:
         merges_file = Path(input_dir) / merges_file
-      if vocabs_file is not None:
-        vocabs_file = Path(input_dir) / vocabs_file
-    return cls(
-      ch=ch,
-      _encoder=BpeEncoderBase(
-        spec=spec,
-        char_level=ch,
-        merges_filename=merges_file,
-        vocab_filename=vocabs_file,
+      if vocab_file is not None:
+        vocab_file = Path(input_dir) / vocab_file
+    return cls._from_encoder(
+      unit,
+      BpeEncoderBase(
+        format=resolved_format,
+        unit=unit,
+        merges_file=merges_file,
+        vocab_file=vocab_file,
         merges=None,
-        vocabs=None,
+        vocab=None,
         special_tokens=special_tokens,
         pat_str=pat_str,
       ),
@@ -117,13 +117,13 @@ class BpeEncoder:
     """Encode multiple words into token ids."""
     return self._encoder.encode_words(words)
 
-  def encode_string(self, /, s: str) -> IdxArray:
-    """Encode an arbitrary string into a NumPy array of token ids."""
-    return self._encoder.encode_string(s)
+  def encode(self, /, text: str) -> list[int]:
+    """Encode text into a Python list of token ids."""
+    return self._encoder.encode(text)
 
-  def encode_string_to_list(self, /, s: str) -> list[int]:
-    """Encode an arbitrary string into a Python list of token ids."""
-    return self._encoder.encode_string_to_list(s)
+  def encode_to_numpy(self, /, text: str) -> IdxArray:
+    """Encode text into a NumPy array of token ids."""
+    return self._encoder.encode_to_numpy(text)
 
   def encode_file(self, /, path: str | PathLike, num_chunks: int = 1024) -> IdxArray:
     """Encode a text file into a NumPy array of token ids.

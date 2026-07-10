@@ -1,6 +1,5 @@
-from .trainer import BpeTrainer
+from .trainer import BpeTrainer, FileFormat, Unit
 from .encoder import BpeEncoder
-from ._lib import Vocabs
 from .pretokenizer import BoundaryMode, PreTokenizer, UnicodeBigramMixedBoundary
 from .tiktoken_compat import (
   Encoding,
@@ -21,9 +20,10 @@ __all__ = [
   "BpeEncoder",
   "BoundaryMode",
   "Encoding",
+  "FileFormat",
   "PreTokenizer",
   "UnicodeBigramMixedBoundary",
-  "Vocabs",
+  "Unit",
   "encoding_for_model",
   "encoding_name_for_model",
   "get_encoding",

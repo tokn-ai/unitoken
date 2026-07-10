@@ -41,7 +41,7 @@ def pretokenize(path: Path, chunk_size: int, boundary: BoundaryMode) -> tuple[li
 
 def train(words: Sequence[tuple[str, int]], vocab_size: int, bucket_size: int) -> dict[str, Any]:
   gc.collect()
-  trainer = BpeTrainer(SPECIAL_TOKENS, ch="u8", initial_alphabet="byte_level")
+  trainer = BpeTrainer(SPECIAL_TOKENS, unit="byte", initial_alphabet="byte_level")
 
   started = time.perf_counter()
   trainer.add_words(words)

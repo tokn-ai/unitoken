@@ -5,15 +5,15 @@ words = pre.get_words_from_file("fixtures/tinystories_sample_5M.txt", chunk_size
 
 # %%
 
-bpe = BpeTrainer(["<|endoftext|>"], ch="char")
+bpe = BpeTrainer(["<|endoftext|>"], unit="unicode")
 assert bpe.vocab_size == 257
 bpe.add_words(words)
 bpe.train(500)
 assert bpe.vocab_size == 500
 
 # %%
-vocabs = dict(bpe.vocabs.items())
-assert len(vocabs) == 500
+vocab = bpe.vocab
+assert len(vocab) == 500
 
 # %%
 bpe.save("test")
@@ -21,8 +21,8 @@ bpe.save("test")
 # %%
 from uni_tokenizer import BpeEncoder
 import numpy as np
-encoder = BpeEncoder.load("test", ch="char")
-a = encoder.encode_string("Hello, world!")
+encoder = BpeEncoder.load("test", unit="unicode")
+a = encoder.encode_to_numpy("Hello, world!")
 print(a)
 assert isinstance(a, np.ndarray)
 assert a.tolist() == [73, 102, 293, 112, 45, 261, 304, 341, 34]
@@ -36,8 +36,8 @@ with open("fixtures/tinystories_sample_5M.txt", "rb") as f:
 assert s == original
 
 # %%
-encoder = BpeEncoder.load("test", ch="char", special_tokens=[])
-a1 = encoder.encode_string("<|endoftext|>")
+encoder = BpeEncoder.load("test", unit="unicode", special_tokens=[])
+a1 = encoder.encode_to_numpy("<|endoftext|>")
 print(a1)
 assert a1.tolist() == [61, 125, 355, 112, 103, 117, 102, 121, 117, 125, 63]
 

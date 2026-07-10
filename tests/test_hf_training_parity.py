@@ -52,7 +52,7 @@ def _train_ours_from_words(
 ) -> dict[str, int]:
   trainer = BpeTrainer(
     ["<|endoftext|>"],
-    ch="u8",
+    unit="byte",
     initial_alphabet="byte_level",
     parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
   )
@@ -60,7 +60,7 @@ def _train_ours_from_words(
   trainer.train(vocab_size)
   return {
     _to_byte_level_token(token): rank
-    for token, rank in dict(trainer.vocabs.items()).items()
+    for token, rank in trainer.vocab.items()
   }
 
 

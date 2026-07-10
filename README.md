@@ -29,13 +29,13 @@ Quickstart (Python)
 ```python
 from uni_tokenizer import BpeTrainer, BpeEncoder
 
-trainer = BpeTrainer(["<|endoftext|>"])  # first token is treated as EOT
+trainer = BpeTrainer(["<|endoftext|>"], unit="byte")
 trainer.add_words({"hello": 10, "world": 7})
 trainer.train(vocab_size=256)
-trainer.save("demo")
+trainer.save("demo", format="gpt2")
 
 enc = BpeEncoder.load("demo")
-ids = enc.encode_word("hello")
+ids = enc.encode("hello")
 ```
 
 Tiktoken-compatible API

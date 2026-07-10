@@ -24,12 +24,10 @@ fn bench_pretokenizer(c: &mut Criterion) {
   let base = "Once upon a time, in a small village, there lived a cat named Mango.";
   let input = base.repeat(200);
 
-  c.bench_function("pretokenizer/get_tokens_index_from_segment", |b| {
+  c.bench_function("pretokenizer/get_words", |b| {
     b.iter(|| {
-      let (tokens_index, special_tokens_index) = pre
-        .get_tokens_index_from_segment(black_box(&input))
-        .unwrap();
-      black_box((tokens_index.len(), special_tokens_index.len()))
+      let words = pre.get_words(black_box(&input)).unwrap();
+      black_box(words.len())
     })
   });
 }
