@@ -1,16 +1,20 @@
 use std::{collections::BTreeMap, hash::Hash, io::{Read, Write}};
 
 use ahash::AHashMap;
+use hashbrown::HashMap;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
   MyError, MyResult,
   bpe::Freq,
   pretokenizer::{
-    PreTokenizer, _pretokenizer_counter_with_unicode_bigrams, count_unicode_bigrams,
-    is_unicode_bigram_script, select_unicode_bigrams, split_special_tokens,
+    PreTokenizer, count_unicode_bigrams, for_each_pretoken, for_each_regular_chunk,
+    is_unicode_bigram_script, select_unicode_bigrams,
   },
 };
+
+type WordCounts = HashMap<String, Freq, ahash::RandomState>;
+type BorrowedWordCounts<'a> = HashMap<&'a str, Freq, ahash::RandomState>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceBatchOptions {
@@ -57,32 +61,81 @@ fn count_bigrams_into(
   text: &str,
   counts: &mut AHashMap<(char, char), Freq>,
 ) -> MyResult<()> {
-  for part in split_special_tokens(text, &pre_tokenizer.re_special_tokens)?
-    .into_iter()
-    .filter(|part| !part.is_special())
-  {
-    count_unicode_bigrams(part.as_str(), counts, is_unicode_bigram_script)?;
+  if text.is_empty() {
+    return Ok(());
+  }
+  if pre_tokenizer.re_special_tokens.as_str() == "$^" {
+    return count_unicode_bigrams(text, counts, is_unicode_bigram_script);
+  }
+  for_each_regular_chunk(text, &pre_tokenizer.re_special_tokens, |chunk| {
+    count_unicode_bigrams(chunk, counts, is_unicode_bigram_script)
+  })
+}
+
+fn count_words_borrowed<'a>(
+  pre_tokenizer: &PreTokenizer,
+  text: &'a str,
+  counts: &mut BorrowedWordCounts<'a>,
+) -> MyResult<()> {
+  if text.is_empty() {
+    return Ok(());
+  }
+  if pre_tokenizer.re_special_tokens.as_str() == "$^" {
+    return count_words_in_regular_text_borrowed(pre_tokenizer, text, counts);
+  }
+  for_each_regular_chunk(text, &pre_tokenizer.re_special_tokens, |chunk| {
+    count_words_in_regular_text_borrowed(pre_tokenizer, chunk, counts)
+  })
+}
+
+fn count_words_in_regular_text_borrowed<'a>(
+  pre_tokenizer: &PreTokenizer,
+  text: &'a str,
+  counts: &mut BorrowedWordCounts<'a>,
+) -> MyResult<()> {
+  for_each_pretoken(
+    text,
+    &pre_tokenizer.re_pat,
+    pre_tokenizer.unicode_bigrams.as_ref(),
+    pre_tokenizer.unicode_bigram_mixed_boundary,
+    |word| {
+      let frequency = counts.entry(word).or_insert(0);
+      *frequency = frequency.checked_add(1).ok_or(MyError::FrequencyOverflow)?;
+      Ok(())
+    },
+  )
+}
+
+fn merge_borrowed_word_counts<'a>(
+  mut left: BorrowedWordCounts<'a>,
+  mut right: BorrowedWordCounts<'a>,
+) -> MyResult<BorrowedWordCounts<'a>> {
+  if left.len() < right.len() {
+    std::mem::swap(&mut left, &mut right);
+  }
+  for (word, frequency) in right {
+    let current = left.entry(word).or_default();
+    *current = current.checked_add(frequency).ok_or(MyError::FrequencyOverflow)?;
+  }
+  Ok(left)
+}
+
+fn merge_borrowed_into_word_counts(
+  target: &mut WordCounts,
+  source: BorrowedWordCounts<'_>,
+) -> MyResult<()> {
+  target.reserve(source.len());
+  for (word, frequency) in source {
+    let current = target.entry_ref(word).or_insert(0);
+    *current = current.checked_add(frequency).ok_or(MyError::FrequencyOverflow)?;
   }
   Ok(())
 }
 
-fn count_words_into(
-  pre_tokenizer: &PreTokenizer,
-  text: &str,
-  counts: &mut AHashMap<String, Freq>,
-) -> MyResult<()> {
-  for part in split_special_tokens(text, &pre_tokenizer.re_special_tokens)?
-    .into_iter()
-    .filter(|part| !part.is_special())
-  {
-    for (word, frequency) in _pretokenizer_counter_with_unicode_bigrams(
-      part.as_str(),
-      &pre_tokenizer.re_pat,
-      pre_tokenizer.unicode_bigrams.as_ref(),
-      pre_tokenizer.unicode_bigram_mixed_boundary,
-    )? {
-      checked_add(counts, word, frequency)?;
-    }
+fn merge_word_counts(target: &mut WordCounts, source: WordCounts) -> MyResult<()> {
+  for (word, frequency) in source {
+    let current = target.entry(word).or_default();
+    *current = current.checked_add(frequency).ok_or(MyError::FrequencyOverflow)?;
   }
   Ok(())
 }
@@ -168,33 +221,32 @@ impl BigramCounter {
 #[cfg_attr(feature = "py", pyo3::pyclass(from_py_object))]
 pub struct WordCounter {
   pre_tokenizer: PreTokenizer,
-  counts: AHashMap<String, Freq>,
+  counts: WordCounts,
 }
 
 impl WordCounter {
   pub fn new(pre_tokenizer: PreTokenizer) -> Self {
     Self {
       pre_tokenizer,
-      counts: AHashMap::new(),
+      counts: WordCounts::default(),
     }
   }
 
   pub fn add_text(&mut self, text: &str) -> MyResult<()> {
-    count_words_into(&self.pre_tokenizer, text, &mut self.counts)
+    let mut counts = BorrowedWordCounts::default();
+    count_words_borrowed(&self.pre_tokenizer, text, &mut counts)?;
+    merge_borrowed_into_word_counts(&mut self.counts, counts)
   }
 
-  pub fn add_batch<S: AsRef<str> + Sync>(&mut self, texts: &[S]) -> MyResult<()> {
+  pub fn add_batch<'a, S: AsRef<str> + Sync>(&mut self, texts: &'a [S]) -> MyResult<()> {
     let batch_counts = texts
       .par_iter()
-      .try_fold(AHashMap::new, |mut counts, text| {
-        count_words_into(&self.pre_tokenizer, text.as_ref(), &mut counts)?;
+      .try_fold(BorrowedWordCounts::default, |mut counts, text| {
+        count_words_borrowed(&self.pre_tokenizer, text.as_ref(), &mut counts)?;
         Ok::<_, MyError>(counts)
       })
-      .try_reduce(AHashMap::new, |mut left, right| {
-        merge_counts(&mut left, right)?;
-        Ok::<_, MyError>(left)
-      })?;
-    merge_counts(&mut self.counts, batch_counts)
+      .try_reduce(BorrowedWordCounts::default, merge_borrowed_word_counts)?;
+    merge_borrowed_into_word_counts(&mut self.counts, batch_counts)
   }
 
   pub fn add_source<I, S>(&mut self, source: I, options: SourceBatchOptions) -> MyResult<()>
@@ -225,7 +277,7 @@ impl WordCounter {
   }
 
   pub fn merge(&mut self, other: Self) -> MyResult<()> {
-    merge_counts(&mut self.counts, other.counts)
+    merge_word_counts(&mut self.counts, other.counts)
   }
 
   pub fn words(&self) -> BTreeMap<String, Freq> {
@@ -244,7 +296,7 @@ impl WordCounter {
     self.counts.clear();
   }
 
-  pub fn take_counts(&mut self) -> AHashMap<String, Freq> {
+  pub fn take_counts(&mut self) -> WordCounts {
     std::mem::take(&mut self.counts)
   }
 
@@ -258,7 +310,7 @@ impl WordCounter {
     Ok(Self { pre_tokenizer, counts })
   }
 
-  pub fn counts(&self) -> &AHashMap<String, Freq> {
+  pub fn counts(&self) -> &WordCounts {
     &self.counts
   }
 }
@@ -297,5 +349,46 @@ mod tests {
     assert_eq!(words.get("世"), Some(&1));
     assert_eq!(words.get("界"), Some(&1));
     assert!(!words.contains_key("<eot>"));
+  }
+
+  #[test]
+  fn word_counter_borrowed_batch_matches_owned_pretokenization() {
+    let bigrams = parse_unicode_bigrams(&["世界".to_string(), "你好".to_string()]).unwrap();
+    let pre_tokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
+    let texts = ["Hello 世界你好 world", "世界你好", "Hello"];
+    let mut expected = BTreeMap::new();
+    for text in texts {
+      for (word, frequency) in pre_tokenizer.get_words_owned(text).unwrap() {
+        *expected.entry(word).or_default() += frequency;
+      }
+    }
+
+    let mut counter = WordCounter::new(pre_tokenizer);
+    counter.add_batch(&texts).unwrap();
+
+    assert_eq!(counter.words(), expected);
+  }
+
+  #[test]
+  fn word_counter_streams_around_adjacent_special_tokens() {
+    let pre_tokenizer = PreTokenizer::new(&["<eot>".to_string()], Some("<eot>"));
+    let mut counter = WordCounter::new(pre_tokenizer);
+    counter.add_text("<eot>Hello<eot><eot> world<eot>").unwrap();
+
+    assert_eq!(
+      counter.words(),
+      [("Hello".to_string(), 1), (" world".to_string(), 1)].into_iter().collect(),
+    );
+  }
+
+  #[test]
+  fn word_counter_preserves_empty_custom_pattern_matches() {
+    let pre_tokenizer = PreTokenizer::try_new(&[], None, Some("")).unwrap()
+      .with_unicode_bigrams(ahash::AHashSet::new());
+    let expected = pre_tokenizer.get_words_owned("ab").unwrap();
+    let mut counter = WordCounter::new(pre_tokenizer);
+    counter.add_text("ab").unwrap();
+
+    assert_eq!(counter.words(), expected);
   }
 }
