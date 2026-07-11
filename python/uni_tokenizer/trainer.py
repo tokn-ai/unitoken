@@ -4,10 +4,23 @@ from pathlib import Path
 from typing import Literal
 from ._lib import BpeTrainer_Character_CharIdx, BpeTrainer_u8_Idx
 
-CharLevel = Literal["char", "u8"]
-OutputFormat = Literal["uni", "gpt2"]
+Unit = Literal["byte", "unicode"]
+FileFormat = Literal["unitoken", "gpt2"]
 InitialAlphabet = Literal["raw", "byte_level"]
 TieBreak = Literal["smallest_pair_id", "largest_content"]
+
+def _validate_unit(unit: str) -> None:
+  if unit not in ("byte", "unicode"):
+    raise ValueError(f"Unknown unit: {unit}")
+
+def _resolve_format(unit: Unit, format: FileFormat | None) -> FileFormat:
+  _validate_unit(unit)
+  resolved_format = format or ("unitoken" if unit == "unicode" else "gpt2")
+  if resolved_format not in ("gpt2", "unitoken"):
+    raise ValueError(f"Unknown format: {resolved_format}")
+  if unit == "unicode" and resolved_format == "gpt2":
+    raise ValueError('format="gpt2" is not compatible with unit="unicode"')
+  return resolved_format
 
 class BpeTrainer:
   """Train a BPE model from a word-frequency inventory.
@@ -17,34 +30,29 @@ class BpeTrainer:
   Parameters
   ----------
   special_tokens:
-    Sequence of special tokens. The first token is treated as the end-of-text marker.
-  ch:
-    Character level: `"u8"` (byte-level, GPT-2-style) or `"char"` (Unicode-aware, Uni spec).
-  output_format:
-    Output spec for serialization (`"gpt2"` or `"uni"`). For `ch="char"`, only `"uni"` is supported.
+    Sequence of tokens reserved in the vocabulary.
+  unit:
+    Atomic BPE unit: `"byte"` or `"unicode"`.
   """
   def __init__(
     self,
     special_tokens: Sequence[str],
     *,
-    ch: CharLevel = "u8",
-    output_format: OutputFormat | None = None,
+    unit: Unit = "byte",
     initial_alphabet: InitialAlphabet | None = None,
     tie_break: TieBreak | None = None,
     parallel_merge_min_occurs_in: int | None = None,
   ) -> None:
-    # super().__init__()
-    self._ch: CharLevel = ch
-    self.output_format: OutputFormat = "uni"
-    if ch == "char":
+    _validate_unit(unit)
+    self._unit = unit
+    if unit == "unicode":
       self._trainer = BpeTrainer_Character_CharIdx(
         special_tokens=special_tokens,
         initial_alphabet=initial_alphabet,
         tie_break=tie_break,
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
       )
-    else:
-      self.output_format = output_format or "gpt2"
+    elif unit == "byte":
       self._trainer = BpeTrainer_u8_Idx(
         special_tokens=special_tokens,
         initial_alphabet=initial_alphabet,
@@ -58,17 +66,14 @@ class BpeTrainer:
     return self._trainer.vocab_size()
 
   @property
-  def char_level(self) -> CharLevel:
-    """Character level used by this trainer."""
-    return self._ch
+  def unit(self) -> Unit:
+    """Atomic BPE unit used by this trainer."""
+    return self._unit
 
   @property
-  def vocabs(self):
-    """Vocabulary view.
-
-    Returns a `Vocabs` object (from the extension module) supporting `len`, `get`, and `items`.
-    """
-    return self._trainer.get_vocabs()
+  def vocab(self) -> dict[bytes, int]:
+    """Return a snapshot of the current token-to-id vocabulary."""
+    return dict(self._trainer.get_vocab().items())
 
   def add_words(self, words: Mapping[str, int] | Sequence[tuple[str, int]]) -> None:
     """Add training data.
@@ -88,35 +93,29 @@ class BpeTrainer:
 
     Training runs inside Rust until the target is reached.
     """
-    try:
-      self._trainer.train_until(vocab_size)
-    except:
-      return
+    self._trainer.train_until(vocab_size)
 
-  def step(self) -> int | None:
+  def step(self) -> int:
     """Perform one training step.
 
-    Returns the updated vocabulary size, or `None` if no further merges can be made.
+    Returns the updated vocabulary size.
     """
-    try:
-      return self._trainer.step() or self._trainer.vocab_size()
-    except:
-      return None
+    return self._trainer.step()
 
-  def save(self, name: str, *, outdir: str | PathLike = ".", output_format: OutputFormat | None = None) -> None:
-    """Save `vocab.{name}[{ch}].json` and `merges.{name}[{ch}].txt` into `outdir`."""
-    vocab_path = Path(outdir) / f"vocab.{name}[{self.char_level}].json"
-    merges_path = Path(outdir) / f"merges.{name}[{self.char_level}].txt"
-    self.save_files(vocab_path, merges_path, output_format=output_format)
+  def save(self, name: str, *, outdir: str | PathLike = ".", format: FileFormat | None = None) -> None:
+    """Save `vocab.{name}[{unit}].json` and `merges.{name}[{unit}].txt` into `outdir`."""
+    vocab_path = Path(outdir) / f"vocab.{name}[{self.unit}].json"
+    merges_path = Path(outdir) / f"merges.{name}[{self.unit}].txt"
+    self.save_files(vocab_path, merges_path, format=format)
 
   def save_files(
     self,
     vocab_path: str | PathLike,
     merges_path: str | PathLike,
     *,
-    output_format: OutputFormat | None = None,
+    format: FileFormat | None = None,
   ) -> None:
     """Save vocab and merges to explicit paths."""
-    spec = output_format or self.output_format
-    self._trainer.save_vocab(vocab_path, spec)
-    self._trainer.save_merges_txt(merges_path, spec)
+    resolved_format = _resolve_format(self.unit, format)
+    self._trainer.save_vocab(vocab_path, resolved_format)
+    self._trainer.save_merges_txt(merges_path, resolved_format)

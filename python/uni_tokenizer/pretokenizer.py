@@ -16,11 +16,15 @@ class PreTokenizer:
     self,
     special_tokens: Sequence[str],
     eot_token: str | None = None,
-    pat: str | None = None,
+    pat_str: str | None = None,
     unicode_bigrams: Sequence[str] | None = None,
     unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary = "keep",
   ) -> None:
-    self._inner = _PreTokenizer(special_tokens, eot_token, pat, unicode_bigrams, unicode_bigram_mixed_boundary)
+    self._inner = _PreTokenizer(special_tokens, eot_token, pat_str, unicode_bigrams, unicode_bigram_mixed_boundary)
+
+  def get_words(self, text: str) -> dict[str, int]:
+    """Pretokenize text and return word frequencies."""
+    return self._inner.get_words(text)
 
   def find_chunk_boundaries(
     self,

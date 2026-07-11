@@ -61,7 +61,7 @@ pub trait WordDebugExt {
 
 impl WordDebugExt for Word<u8> {
   fn debug_display(&self) -> String {
-    crate::spec::uni::UniSpec.word_display(self)
+    crate::spec::unitoken::UnitokenSpec.word_display(self)
   }
   fn to_string_lossy(&self) -> String {
     String::from_utf8_lossy(self).to_string()

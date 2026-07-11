@@ -114,12 +114,12 @@ impl PreTokenizer {
 
   /// Create a pre-tokenizer with an optional custom regex pattern.
   ///
-  /// When `pat` is `None`, uses `DEFAULT_PAT`.
+  /// When `pat_str` is `None`, uses `DEFAULT_PAT`.
   pub fn try_new(
-    special_tokens: &[String], end_of_text: Option<&str>, pat: Option<&str>,
+    special_tokens: &[String], end_of_text: Option<&str>, pat_str: Option<&str>,
   ) -> MyResult<Self> {
-    let re_pat = match pat {
-      Some(pat) => Regex::new(pat)?,
+    let re_pat = match pat_str {
+      Some(pat_str) => Regex::new(pat_str)?,
       None => DEFAULT_PAT.clone(),
     };
     let re_special_tokens = create_special_token_regex(special_tokens);
@@ -143,14 +143,15 @@ impl PreTokenizer {
     self
   }
 
-  /// Count pre-tokenized pieces in a string.
+  /// Pretokenize a string and return borrowed words with their frequencies.
   ///
-  /// Returns a map from token slice to frequency. The keys borrow from `text`.
-  pub fn count_tokens<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
+  /// The map keys borrow from `text`.
+  pub fn get_words<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
     _pretokenizer_counter(text, &self.re_pat)
   }
 
-  pub fn count_tokens_owned(&self, text: &str) -> MyResult<BTreeMap<String, Freq>> {
+  /// Pretokenize a string and return owned words with their frequencies.
+  pub fn get_words_owned(&self, text: &str) -> MyResult<BTreeMap<String, Freq>> {
     _pretokenizer_counter_with_unicode_bigrams(text, &self.re_pat, self.unicode_bigrams.as_ref(), self.unicode_bigram_mixed_boundary)
   }
 
@@ -288,7 +289,7 @@ impl PreTokenizer {
   }
 }
 
-/// Tokenize a string using `pat` and return token frequencies.
+/// Pretokenize a string using `pat` and return word frequencies.
 ///
 /// The returned keys borrow from `s`.
 pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&'a str, Freq>> {
@@ -797,7 +798,7 @@ mod tests {
   fn test_unicode_bigram_split_keeps_non_cjk_regex_tokens() {
     let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("Hello 世界你好 world").unwrap();
+    let tokens = pretokenizer.get_words_owned("Hello 世界你好 world").unwrap();
     let expected_tokens = vec![
       ("Hello".to_string(), 1),
       (" 世界".to_string(), 1),
@@ -814,7 +815,7 @@ mod tests {
   fn test_unicode_bigram_split_keeps_mixed_edges_by_default() {
     let bigrams = parse_unicode_bigrams(&["w是".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("Now是2024年").unwrap();
+    let tokens = pretokenizer.get_words_owned("Now是2024年").unwrap();
     let expected_tokens = vec![
       ("Now是".to_string(), 1),
       ("2024".to_string(), 1),
@@ -831,7 +832,7 @@ mod tests {
     let pretokenizer = PreTokenizer::new(&[], None)
       .with_unicode_bigrams(bigrams)
       .with_unicode_bigram_mixed_boundary(UnicodeBigramMixedBoundary::Split);
-    let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();
+    let tokens = pretokenizer.get_words_owned("er世界").unwrap();
     let expected_tokens = vec![
       ("er".to_string(), 1),
       ("世界".to_string(), 1),
@@ -845,7 +846,7 @@ mod tests {
   fn test_unicode_bigram_split_keeps_mixed_edges() {
     let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("er世界").unwrap();
+    let tokens = pretokenizer.get_words_owned("er世界").unwrap();
     let expected_tokens = vec![
       ("er世界".to_string(), 1),
     ]
@@ -858,7 +859,7 @@ mod tests {
   fn test_unicode_bigram_split_cuts_unretained_script_edges() {
     let bigrams = parse_unicode_bigrams(&["世界".to_string()]).unwrap();
     let pretokenizer = PreTokenizer::new(&[], None).with_unicode_bigrams(bigrams);
-    let tokens = pretokenizer.count_tokens_owned("你好世界").unwrap();
+    let tokens = pretokenizer.get_words_owned("你好世界").unwrap();
     let expected_tokens = vec![
       ("你".to_string(), 1),
       ("好".to_string(), 1),
@@ -1029,11 +1030,11 @@ mod tests {
   #[test]
   fn test_custom_pat_is_used_everywhere() {
     // Split into single characters, ignoring whitespace.
-    let pat = r"[^\s]";
-    let t = PreTokenizer::try_new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT), Some(pat)).unwrap();
+    let pat_str = r"[^\s]";
+    let t = PreTokenizer::try_new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT), Some(pat_str)).unwrap();
 
     let s = "ab cd";
-    let counts = t.count_tokens(s).unwrap();
+    let counts = t.get_words(s).unwrap();
     assert_eq!(counts.get("a").cloned().unwrap_or(0), 1);
     assert_eq!(counts.get("b").cloned().unwrap_or(0), 1);
     assert_eq!(counts.get("c").cloned().unwrap_or(0), 1);

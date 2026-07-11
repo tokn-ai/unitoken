@@ -679,7 +679,7 @@ where
 
 #[cfg(test)]
 mod tests {
-  use crate::{spec::{gpt2::Gpt2Spec, uni::UniSpec}, traits::CanEncode};
+  use crate::{spec::{gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::CanEncode};
 
   use super::*;
 
@@ -755,7 +755,7 @@ mod tests {
   #[test]
   fn test_bpe_encode_file_uni() {
     const NAME: &str = "TinyStories_all_data_zh_1M-sample";
-    let bpe = _setup_bpe::<Character>(&format!("{NAME}.uni"), &UniSpec);
+    let bpe = _setup_bpe::<Character>(&format!("{NAME}.uni"), &UnitokenSpec);
     let result = bpe.encode_file(
       format!("fixtures/{NAME}.txt").as_ref(),
       1,

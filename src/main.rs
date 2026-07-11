@@ -8,7 +8,7 @@ use std::{
 };
 
 use unitoken::{
-  bpe::{BpeEncoder, BpeTrainer, CharIdx, Character, Idx, encoder::BpeBuilder}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanTrain, Encode, Train}
+  bpe::{BpeEncoder, BpeTrainer, CharIdx, Character, Idx, encoder::BpeBuilder}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanTrain, Encode, Train}
 };
 
 mod _metrics;
@@ -71,7 +71,7 @@ impl SpecLevel {
   pub fn default_spec(&self) -> SpecOutput {
     match self {
       Self::U8 => SpecOutput::Gpt2,
-      Self::Char => SpecOutput::Uni,
+      Self::Char => SpecOutput::Unitoken,
     }
   }
 }
@@ -80,8 +80,8 @@ impl SpecLevel {
 pub enum SpecOutput {
   #[clap(name = "gpt2")]
   Gpt2,
-  #[clap(name = "uni")]
-  Uni,
+  #[clap(name = "unitoken")]
+  Unitoken,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -112,7 +112,7 @@ impl SpecOutput {
   pub fn as_str(&self) -> &'static str {
     match self {
       Self::Gpt2 => "gpt2",
-      Self::Uni => "uni",
+      Self::Unitoken => "unitoken",
     }
   }
 
@@ -120,7 +120,7 @@ impl SpecOutput {
   pub fn get_u8(&self) -> Box<dyn Spec<u8, Idx>> {
     match self {
       Self::Gpt2 => Box::new(Gpt2Spec),
-      Self::Uni => Box::new(UniSpec),
+      Self::Unitoken => Box::new(UnitokenSpec),
     }
   }
 
@@ -128,7 +128,7 @@ impl SpecOutput {
   pub fn get_char(&self) -> Box<dyn Spec<Character, CharIdx>> {
     match self {
       Self::Gpt2 => unimplemented!(),
-      Self::Uni => Box::new(UniSpec),
+      Self::Unitoken => Box::new(UnitokenSpec),
     }
   }
 
@@ -136,7 +136,7 @@ impl SpecOutput {
   pub fn get_char_idx(&self) -> Box<dyn Spec<Character, Idx>> {
     match self {
       Self::Gpt2 => unimplemented!(),
-      Self::Uni => Box::new(UniSpec),
+      Self::Unitoken => Box::new(UnitokenSpec),
     }
   }
 }
@@ -327,7 +327,7 @@ fn bpe_train(BpeTrainParams{
       _bpe_save_train(&bpe, output_spec.get_u8().as_ref(), &out_dir, &vocab_name);
     }
     SpecLevel::Char => {
-      info!("Using Uni BPE specification");
+      info!("Using unitoken BPE format");
 
       info!("Training BPE model...");
       let bpe = _bpe_train::<Character, CharIdx>(words, vocab_size, &special_tokens);
@@ -481,7 +481,7 @@ fn run_encode(args: EncodeArgs) {
       return;
     }
     SpecLevel::Char => {
-      info!("Using Uni BPE specification");
+      info!("Using unitoken BPE format");
 
       bpe_encode::<Character>(
         params,

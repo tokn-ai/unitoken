@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::{MyResult, bpe::{Merge, Word}};
 
 pub mod gpt2;
-pub mod uni;
+pub mod unitoken;
 
 pub trait Spec<Char, Idx> {
   fn suffix(&self) -> Option<&str> {

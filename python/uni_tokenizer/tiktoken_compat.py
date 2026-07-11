@@ -100,8 +100,8 @@ class Encoding:
       mergeable_ranks: Mapping[bytes, int] | None = None,
       special_tokens: Mapping[str, int] | None = None,
       explicit_n_vocab: int | None = None,
-      ch: Literal["u8", "char"] = "u8",
-      output_format: Literal["gpt2", "uni"] | None = None,
+      unit: Literal["byte", "unicode"] = "byte",
+      format: Literal["gpt2", "unitoken"] | None = None,
       _encoder: BpeEncoder | None = None,
       _ordinary_encoder: BpeEncoder | None = None,
       _token_bytes: Mapping[int, bytes] | None = None,
@@ -113,8 +113,8 @@ class Encoding:
     self._special_tokens_set = set(self._special_tokens)
     self._mergeable_ranks = dict(mergeable_ranks or {})
     self._explicit_n_vocab = explicit_n_vocab
-    self._ch = ch
-    self._output_format = output_format or ("uni" if ch == "char" else "gpt2")
+    self._unit = unit
+    self._format = format or ("unitoken" if unit == "unicode" else "gpt2")
 
     token_bytes = dict(_token_bytes or {})
     for token, idx in self._mergeable_ranks.items():
@@ -126,25 +126,25 @@ class Encoding:
     if _encoder is not None:
       self._encoder = _encoder
     else:
-      vocabs = {token: idx for idx, token in self._token_bytes.items()}
+      vocab = {token: idx for idx, token in self._token_bytes.items()}
       merges = list(_merges) if _merges is not None else _infer_merges_from_ranks(self._mergeable_ranks)
       self._encoder = BpeEncoder(
-        ch=ch,
+        unit=unit,
         special_tokens=list(self._special_tokens),
         merges=merges,
-        vocabs=vocabs,
+        vocab=vocab,
         pat_str=pat_str,
       )
     if _ordinary_encoder is not None:
       self._ordinary_encoder = _ordinary_encoder
     else:
-      vocabs = {token: idx for idx, token in self._token_bytes.items()}
+      vocab = {token: idx for idx, token in self._token_bytes.items()}
       merges = list(_merges) if _merges is not None else _infer_merges_from_ranks(self._mergeable_ranks)
       self._ordinary_encoder = BpeEncoder(
-        ch=ch,
+        unit=unit,
         special_tokens=[],
         merges=merges,
-        vocabs=vocabs,
+        vocab=vocab,
         pat_str=pat_str,
       )
 
@@ -159,29 +159,29 @@ class Encoding:
       vocab_file: str | PathLike,
       merges_file: str | PathLike,
       special_tokens: Mapping[str, int] | None = None,
-      ch: Literal["u8", "char"] = "u8",
-      output_format: Literal["gpt2", "uni"] | None = None,
+      unit: Literal["byte", "unicode"] = "byte",
+      format: Literal["gpt2", "unitoken"] | None = None,
       pat_str: str | None = None,
   ) -> "Encoding":
-    spec = output_format or ("uni" if ch == "char" else "gpt2")
-    if spec != "gpt2":
+    resolved_format = format or ("unitoken" if unit == "unicode" else "gpt2")
+    if resolved_format != "gpt2":
       encoder = BpeEncoder.load(
-        ch=ch,
-        output_format=spec,
+        unit=unit,
+        format=resolved_format,
         special_tokens=list(special_tokens or {}),
         merges_file=merges_file,
-        vocabs_file=vocab_file,
+        vocab_file=vocab_file,
         pat_str=pat_str,
       )
       ordinary_encoder = BpeEncoder.load(
-        ch=ch,
-        output_format=spec,
+        unit=unit,
+        format=resolved_format,
         special_tokens=[],
         merges_file=merges_file,
-        vocabs_file=vocab_file,
+        vocab_file=vocab_file,
         pat_str=pat_str,
       )
-      return cls(name, special_tokens=special_tokens, ch=ch, output_format=spec, _encoder=encoder, _ordinary_encoder=ordinary_encoder)
+      return cls(name, special_tokens=special_tokens, unit=unit, format=resolved_format, _encoder=encoder, _ordinary_encoder=ordinary_encoder)
 
     ranks = _load_gpt2_vocab(vocab_file)
     token_bytes = {idx: token for token, idx in ranks.items()}
@@ -189,27 +189,27 @@ class Encoding:
     if special_tokens:
       ranks = {token: idx for token, idx in ranks.items() if token.decode("utf-8", "ignore") not in special_tokens}
     encoder = BpeEncoder.load(
-      ch=ch,
-      output_format=spec,
+      unit=unit,
+      format=resolved_format,
       special_tokens=list(special_tokens or {}),
       merges_file=merges_file,
-      vocabs_file=vocab_file,
+      vocab_file=vocab_file,
       pat_str=pat_str,
     )
     ordinary_encoder = BpeEncoder.load(
-      ch=ch,
-      output_format=spec,
+      unit=unit,
+      format=resolved_format,
       special_tokens=[],
       merges_file=merges_file,
-      vocabs_file=vocab_file,
+      vocab_file=vocab_file,
       pat_str=pat_str,
     )
     return cls(
       name,
       mergeable_ranks=ranks,
       special_tokens=special_tokens,
-      ch=ch,
-      output_format=spec,
+      unit=unit,
+      format=resolved_format,
       _encoder=encoder,
       _ordinary_encoder=ordinary_encoder,
       _token_bytes=token_bytes,
@@ -249,10 +249,10 @@ class Encoding:
 
   def _encode_impl(self, text: str, allowed_special: AllowedSpecial) -> list[int]:
     if allowed_special == "all":
-      return self._encoder.encode_string_to_list(text)
+      return self._encoder.encode(text)
     if not set(allowed_special):
-      return self._ordinary_encoder.encode_string_to_list(text)
-    return self._encoder.encode_string_to_list(text)
+      return self._ordinary_encoder.encode(text)
+    return self._encoder.encode(text)
 
   def encode(
       self,
@@ -262,12 +262,12 @@ class Encoding:
       disallowed_special: DisallowedSpecial = "all",
   ) -> list[int]:
     if allowed_special == "all":
-      return self._encoder.encode_string_to_list(text)
+      return self._encoder.encode(text)
     self._raise_if_disallowed(text, allowed_special, disallowed_special)
     return self._encode_impl(text, allowed_special)
 
   def encode_ordinary(self, text: str) -> list[int]:
-    return self._ordinary_encoder.encode_string_to_list(text)
+    return self._ordinary_encoder.encode(text)
 
   def encode_to_numpy(
       self,
@@ -278,8 +278,8 @@ class Encoding:
   ) -> IdxArray:
     self._raise_if_disallowed(text, allowed_special, disallowed_special)
     if allowed_special == "all" or set(allowed_special):
-      return self._encoder.encode_string(text)
-    return self._ordinary_encoder.encode_string(text)
+      return self._encoder.encode_to_numpy(text)
+    return self._ordinary_encoder.encode_to_numpy(text)
 
   def encode_single_token(self, text_or_bytes: str | bytes) -> int:
     token = text_or_bytes.encode("utf-8") if isinstance(text_or_bytes, str) else text_or_bytes

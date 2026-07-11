@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, uni::UniSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -21,28 +21,10 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn init_training(&mut self, py: Python);
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
-  fn get_vocabs(&self) -> Vocabs;
-  fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()>;
-  fn save_merges_txt(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()>;
+  fn get_vocab(&self) -> Vocabulary;
+  fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
+  fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
 }
-
-// #[pyclass(eq, eq_int)]
-// #[derive(PartialEq)]
-// pub enum SpecEnum {
-//   #[pyo3(name = "gpt2")]
-//   Gpt2,
-//   #[pyo3(name = "uni")]
-//   Uni,
-// }
-
-// #[pyclass(eq, eq_int)]
-// #[derive(PartialEq)]
-// pub enum CharLevel {
-//   #[pyo3(name = "u8")]
-//   U8,
-//   #[pyo3(name = "char")]
-//   Char,
-// }
 
 fn trainer_config(
   initial_alphabet: Option<&str>,
@@ -140,34 +122,34 @@ impl BpeTrainer_u8_Idx {
   }
 
   /// Return a view of the current vocabulary.
-  pub fn get_vocabs(&self) -> Vocabs {
-    Vocabs {
-      inner: Box::new(VocabsInner::new(&self.inner.vocab)),
+  pub fn get_vocab(&self) -> Vocabulary {
+    Vocabulary {
+      inner: Box::new(VocabularyInner::new(&self.inner.vocab)),
     }
   }
 
-  /// Save the vocabulary JSON to `path` using the requested spec (`"gpt2"` or `"uni"`).
-  pub fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
+  /// Save the vocabulary JSON using the requested format.
+  pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
       let mut writer = std::io::BufWriter::new(&mut file);
-      match spec {
+      match format {
         "gpt2" => self.inner.save_vocab_json(&Gpt2Spec, &mut writer),
-        "uni" => self.inner.save_vocab_json(&UniSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown spec: {}", spec))),
+        "unitoken" => self.inner.save_vocab_json(&UnitokenSpec, &mut writer),
+        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
       }
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 
-  /// Save merges to `path` using the requested spec (`"gpt2"` or `"uni"`).
-  pub fn save_merges_txt(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
+  /// Save merges using the requested format.
+  pub fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
       let mut writer = std::io::BufWriter::new(&mut file);
-      match spec {
+      match format {
         "gpt2" => self.inner.save_merges_txt(&Gpt2Spec, &mut writer),
-        "uni" => self.inner.save_merges_txt(&UniSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown spec: {}", spec))),
+        "unitoken" => self.inner.save_merges_txt(&UnitokenSpec, &mut writer),
+        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
       }
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
@@ -235,23 +217,23 @@ impl BpeTrainer_Character_CharIdx {
   }
 
   /// Return a view of the current vocabulary.
-  pub fn get_vocabs(&self) -> Vocabs {
-    Vocabs {
-      inner: Box::new(VocabsInner::new(&self.inner.vocab)),
+  pub fn get_vocab(&self) -> Vocabulary {
+    Vocabulary {
+      inner: Box::new(VocabularyInner::new(&self.inner.vocab)),
     }
   }
 
   /// Save the vocabulary JSON to `path`.
   ///
   /// Note: `"gpt2"` is not supported for the character tokenizer.
-  pub fn save_vocab(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
+  pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
       let mut writer = std::io::BufWriter::new(&mut file);
-      match spec {
-        "gpt2" => Err(MyError::SpecError("gpt2 spec not supported for Character tokenizer".to_string())),
-        "uni" => self.inner.save_vocab_json(&UniSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown spec: {}", spec))),
+      match format {
+        "gpt2" => Err(MyError::SpecError("gpt2 format is not supported for the Unicode unit".to_string())),
+        "unitoken" => self.inner.save_vocab_json(&UnitokenSpec, &mut writer),
+        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
       }
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
@@ -259,35 +241,35 @@ impl BpeTrainer_Character_CharIdx {
   /// Save merges to `path`.
   ///
   /// Note: `"gpt2"` is not supported for the character tokenizer.
-  pub fn save_merges_txt(&self, py: Python, path: PathBuf, spec: &str) -> PyResult<()> {
+  pub fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
     py.detach(|| {
       let mut file = std::fs::File::create(&path)?;
       let mut writer = std::io::BufWriter::new(&mut file);
-      match spec {
-        "gpt2" => Err(MyError::SpecError("gpt2 spec not supported for Character tokenizer".to_string())),
-        "uni" => self.inner.save_merges_txt(&UniSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown spec: {}", spec))),
+      match format {
+        "gpt2" => Err(MyError::SpecError("gpt2 format is not supported for the Unicode unit".to_string())),
+        "unitoken" => self.inner.save_merges_txt(&UnitokenSpec, &mut writer),
+        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
       }
     }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
   }
 }
 
-pub struct VocabsInner<C, I>(OrderMap<Word<C>, I>);
+pub struct VocabularyInner<C, I>(OrderMap<Word<C>, I>);
 
-impl<C: std::hash::Hash + Eq, I: IdxLike> VocabsInner<C, I> {
+impl<C: std::hash::Hash + Eq, I: IdxLike> VocabularyInner<C, I> {
   /// Build a reverse map from token bytes to token id.
   pub fn new(vocab: &BTreeMap<I, Word<C>>) -> Self {
     Self(vocab.iter().map(|(i, c)| (c.clone(), i.clone())).collect())
   }
 }
 
-trait VocabsImpl {
+trait VocabularyImpl {
   fn len(&self) -> usize;
   fn get(&self, word: &str) -> Option<i64>;
   fn items(&self) -> Vec<(Vec<u8>, i64)>;
 }
 
-impl<C: CanStrToWord + CharSplit + std::hash::Hash + Eq, I: IdxLike> VocabsImpl for VocabsInner<C, I> {
+impl<C: CanStrToWord + CharSplit + std::hash::Hash + Eq, I: IdxLike> VocabularyImpl for VocabularyInner<C, I> {
   fn len(&self) -> usize {
     self.0.len()
   }
@@ -302,12 +284,12 @@ impl<C: CanStrToWord + CharSplit + std::hash::Hash + Eq, I: IdxLike> VocabsImpl 
 }
 
 #[pyclass]
-pub struct Vocabs {
-  inner: Box<dyn VocabsImpl + Send + Sync>,
+pub struct Vocabulary {
+  inner: Box<dyn VocabularyImpl + Send + Sync>,
 }
 
 #[pymethods]
-impl Vocabs {
+impl Vocabulary {
   #[getter]
   /// Number of entries in the vocabulary.
   pub fn len(&self) -> usize {
@@ -335,16 +317,16 @@ impl PreTokenizer {
   ///
   /// - `special_tokens`: special tokens to treat as indivisible.
   /// - `eot_token`: end-of-text token used for chunk boundary alignment.
-  /// - `pat`: optional regex pattern; defaults to the crate's default.
-  #[pyo3(signature = (special_tokens, eot_token=None, pat=None, unicode_bigrams=None, unicode_bigram_mixed_boundary="keep"))]
+  /// - `pat_str`: optional regex pattern; defaults to the crate's default.
+  #[pyo3(signature = (special_tokens, eot_token=None, pat_str=None, unicode_bigrams=None, unicode_bigram_mixed_boundary="keep"))]
   pub fn new_py(
     special_tokens: Vec<String>,
     eot_token: Option<String>,
-    pat: Option<String>,
+    pat_str: Option<String>,
     unicode_bigrams: Option<Vec<String>>,
     unicode_bigram_mixed_boundary: &str,
   ) -> PyResult<Self> {
-    let mut pretokenizer = Self::try_new(&special_tokens, eot_token.as_deref(), pat.as_deref())
+    let mut pretokenizer = Self::try_new(&special_tokens, eot_token.as_deref(), pat_str.as_deref())
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let unicode_bigram_mixed_boundary = UnicodeBigramMixedBoundary::parse(unicode_bigram_mixed_boundary)
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -377,6 +359,13 @@ impl PreTokenizer {
     py.detach(||
       self.get_words_from_segment(path, offset, length)
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+  }
+
+  #[pyo3(name = "get_words")]
+  /// Pretokenize text and return a word-frequency mapping.
+  pub fn py_get_words(&self, py: Python, text: &str) -> PyResult<BTreeMap<String, i64>> {
+    py.detach(|| self.get_words_owned(text))
+      .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 
   #[pyo3(name = "get_words_from_file", signature = (path, *, chunk_size=1048576, boundary="auto"))]
@@ -412,10 +401,10 @@ fn _arc_to_vec<I: Copy>(i: Arc<[I]>) -> Vec<I> {
 }
 
 fn new_bpe<C: Clone>(
-  vocabs: Option<BTreeMap<Vec<u8>, Idx>>,
+  vocab: Option<BTreeMap<Vec<u8>, Idx>>,
   merges: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-  vocab_filename: Option<PathBuf>,
-  merges_filename: Option<PathBuf>,
+  vocab_file: Option<PathBuf>,
+  merges_file: Option<PathBuf>,
   special_tokens: Option<Vec<String>>,
   pat_str: Option<String>,
   spec: &dyn Spec<C, Idx>,
@@ -424,19 +413,19 @@ where
   BpeEncoder<C>: CanEncode<C, Idx>
 {
   let mut builder = BpeBuilder::new();
-  if let Some(filename) = vocab_filename {
+  if let Some(filename) = vocab_file {
     builder = builder.load_vocab_file(filename, spec)?;
-  } else if let Some(vocabs) = vocabs {
-    builder = builder.set_vocab(vocabs.into_iter().map(|(k, v)| (v, k)).collect());
+  } else if let Some(vocab) = vocab {
+    builder = builder.set_vocab(vocab.into_iter().map(|(k, v)| (v, k)).collect());
   } else {
-    return Err(MyError::BpeBuilder("Either vocab_filename or vocabs must be provided".to_string()));
+    return Err(MyError::BpeBuilder("Either vocab_file or vocab must be provided".to_string()));
   }
-  if let Some(filename) = merges_filename {
+  if let Some(filename) = merges_file {
     builder = builder.load_merges_file(filename, spec)?;
   } else if let Some(merges) = merges {
     builder = builder.set_merges_raw(merges);
   } else {
-    return Err(MyError::BpeBuilder("Either merges_filename or merges must be provided".to_string()));
+    return Err(MyError::BpeBuilder("Either merges_file or merges must be provided".to_string()));
   }
   builder= builder.set_special_tokens(special_tokens);
   builder = builder.set_pat_str(pat_str);
@@ -447,27 +436,27 @@ where
 #[pymethods]
 impl BpeEncoderBase {
   #[new]
-  #[pyo3(signature = (spec, char_level, vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str=None))]
+  #[pyo3(signature = (format, unit, vocab, merges, vocab_file, merges_file, special_tokens, pat_str=None))]
   /// Create a Python BPE encoder.
   ///
-  /// The encoder can be created from in-memory `vocabs`/`merges` or from file paths.
-  /// `spec` and `char_level` must be compatible (e.g. `("gpt2", "u8")`, `("uni", "char")`).
+  /// The encoder can be created from in-memory `vocab`/`merges` or from file paths.
+  /// `format` and `unit` must be compatible.
   pub fn new_py(
     py: Python,
-    spec: &str, char_level: &str,
-    vocabs: Option<BTreeMap<Vec<u8>, Idx>>,
+    format: &str, unit: &str,
+    vocab: Option<BTreeMap<Vec<u8>, Idx>>,
     merges: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-    vocab_filename: Option<PathBuf>,
-    merges_filename: Option<PathBuf>,
+    vocab_file: Option<PathBuf>,
+    merges_file: Option<PathBuf>,
     special_tokens: Option<Vec<String>>,
     pat_str: Option<String>,
   ) -> PyResult<Self> {
     py.detach(||
-      match (spec, char_level) {
-        ("gpt2", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &Gpt2Spec),
-        ("uni", "u8") => new_bpe::<u8>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &UniSpec),
-        ("uni", "char") => new_bpe::<Character>(vocabs, merges, vocab_filename, merges_filename, special_tokens, pat_str, &UniSpec),
-        _ => Err(MyError::SpecError(format!("spec {spec} not compatibale with {char_level}"))),
+      match (format, unit) {
+        ("gpt2", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &Gpt2Spec),
+        ("unitoken", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &UnitokenSpec),
+        ("unitoken", "unicode") => new_bpe::<Character>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &UnitokenSpec),
+        _ => Err(MyError::SpecError(format!("format {format} is not compatible with unit {unit}"))),
       }
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
@@ -496,11 +485,11 @@ impl BpeEncoderBase {
     }).map_err(|e: MyError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 
-  #[pyo3(name = "encode_string")]
+  #[pyo3(name = "encode_to_numpy")]
   /// Encode an arbitrary string into a NumPy `uint32` array of token ids.
-  pub fn py_encode_string<'py>(&self, py: Python<'py>, s: &str) -> PyResult<Bound<'py, PyArray1<Idx>>> {
+  pub fn py_encode_to_numpy<'py>(&self, py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyArray1<Idx>>> {
     let result = py.detach(|| {
-      self.0.encode_string(s)
+      self.0.encode_string(text)
     });
     match result {
       Ok(v) => Ok(v.into_pyarray(py)),
@@ -508,11 +497,11 @@ impl BpeEncoderBase {
     }
   }
 
-  #[pyo3(name = "encode_string_to_list")]
+  #[pyo3(name = "encode")]
   /// Encode an arbitrary string into a Python list of token ids.
-  pub fn py_encode_string_to_list(&self, py: Python, s: &str) -> PyResult<Vec<Idx>> {
+  pub fn py_encode(&self, py: Python, text: &str) -> PyResult<Vec<Idx>> {
     py.detach(|| {
-      self.0.encode_string(s)
+      self.0.encode_string(text)
     }).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 

@@ -20,11 +20,8 @@ pub trait Train {
   /// This calls [`Self::init_training`] and then repeatedly calls [`Self::step`].
   fn train(&mut self, vocab_size: usize) -> MyResult<()> {
     self.init_training();
-    loop {
+    while self.vocab_size() < vocab_size {
       self.step()?;
-      if self.vocab_size() >= vocab_size {
-        break;
-      }
     }
     Ok(())
   }

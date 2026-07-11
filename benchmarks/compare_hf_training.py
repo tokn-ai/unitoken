@@ -63,12 +63,12 @@ def expanded_words(words: Sequence[tuple[str, int]]) -> Iterable[str]:
 
 
 def train_unitoken(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[str, Any]:
-  trainer = BpeTrainer(SPECIAL_TOKENS, ch="u8", initial_alphabet="byte_level")
+  trainer = BpeTrainer(SPECIAL_TOKENS, unit="byte", initial_alphabet="byte_level")
   trainer.add_words(words)
   trainer.train(vocab_size)
   vocab = {
     to_byte_level_token(token): rank
-    for token, rank in dict(trainer.vocabs.items()).items()
+    for token, rank in trainer.vocab.items()
   }
   return {
     "vocab": vocab,

@@ -21,11 +21,11 @@ def file_sha256_prefix(path: Path, length: int = 12) -> str:
   return digest.hexdigest()[:length]
 
 
-def train(words: Sequence[tuple[str, int]], vocab_size: int, ch: str) -> BpeTrainer:
+def train(words: Sequence[tuple[str, int]], vocab_size: int, unit: str) -> BpeTrainer:
   trainer = BpeTrainer(
     SPECIAL_TOKENS,
-    ch=ch,
-    initial_alphabet="byte_level" if ch == "u8" else None,
+    unit=unit,
+    initial_alphabet="byte_level" if unit == "byte" else None,
   )
   trainer.add_words(words)
   trainer.train(vocab_size)
@@ -37,29 +37,29 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--words", type=Path, required=True, help="JSON word-frequency inventory.")
   parser.add_argument("--dataset-name", required=True, help="Dataset directory name under out/models/golden.")
   parser.add_argument("--vocab-size", type=int, required=True)
-  parser.add_argument("--ch", choices=["u8", "char"], default="char", help="Trainer character level. Use char for Uni models.")
-  parser.add_argument("--output-format", choices=["gpt2", "uni"], default="uni")
+  parser.add_argument("--unit", choices=["byte", "unicode"], default="unicode", help="BPE unit used for training.")
+  parser.add_argument("--format", choices=["gpt2", "unitoken"], default="unitoken")
   parser.add_argument("--out-dir", type=Path, default=Path("out") / "models" / "golden")
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a smaller smoke model.")
   args = parser.parse_args(argv)
 
   if args.vocab_size < 1:
     parser.error("--vocab-size must be at least 1")
-  if args.ch == "char" and args.output_format != "uni":
-    parser.error("--output-format must be uni when --ch=char")
+  if args.unit == "unicode" and args.format != "unitoken":
+    parser.error("--format must be unitoken when --unit=unicode")
 
   words = load_words(args.words, args.max_occurrences)
   started = time.perf_counter()
-  trainer = train(words, args.vocab_size, args.ch)
+  trainer = train(words, args.vocab_size, args.unit)
   train_s = time.perf_counter() - started
 
   input_hash = file_sha256_prefix(args.words)
   model_dir = args.out_dir / f"{args.dataset_name}.{input_hash}"
   model_dir.mkdir(parents=True, exist_ok=True)
-  suffix = f"vocab{args.vocab_size}.{args.output_format}"
+  suffix = f"vocab{args.vocab_size}.{args.format}"
   vocab_path = model_dir / f"vocab.{suffix}.json"
   merges_path = model_dir / f"merges.{suffix}.txt"
-  trainer.save_files(vocab_path, merges_path, output_format=args.output_format)
+  trainer.save_files(vocab_path, merges_path, format=args.format)
 
   print(f"saved {vocab_path}")
   print(f"saved {merges_path}")
