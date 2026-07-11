@@ -63,6 +63,8 @@ trainer.add_word_counter(word_counter)
 
 `add_source` defaults to at most 4,096 records or 64 MiB per batch. Override
 `max_records` and `max_bytes` for the record sizes and worker memory available.
+By default, it overlaps Python source iteration with Rust processing using one
+bounded look-ahead batch; pass `prefetch=0` for synchronous processing.
 Counters can also be merged, so separately counted corpus partitions can be
 reduced before selecting bigrams or training. `add_word_counter` consumes the
 native word inventory without constructing a Python dictionary; the counter is

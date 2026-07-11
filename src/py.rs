@@ -1,10 +1,10 @@
 #[pyo3::pymodule(gil_used = false)]
 mod _lib {
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, mpsc::sync_channel}};
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
-use pyo3::{prelude::*, pymethods, types::PyAny};
+use pyo3::{prelude::*, pymethods, types::{PyAny, PyIterator}};
 
 use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
@@ -441,6 +441,181 @@ fn should_flush_batch(batch_len: usize, batch_bytes: usize, next_bytes: usize, o
   batch_len > 0 && (batch_len >= options.max_records || batch_bytes.saturating_add(next_bytes) > options.max_bytes)
 }
 
+trait SourceCounter: Send {
+  fn add_source_batch(&mut self, texts: &[String]) -> MyResult<()>;
+}
+
+impl SourceCounter for BigramCounter {
+  fn add_source_batch(&mut self, texts: &[String]) -> MyResult<()> {
+    self.add_batch(texts)
+  }
+}
+
+impl SourceCounter for WordCounter {
+  fn add_source_batch(&mut self, texts: &[String]) -> MyResult<()> {
+    self.add_batch(texts)
+  }
+}
+
+fn source_counter_error(error: MyError) -> PyErr {
+  pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+}
+
+fn validate_prefetch(prefetch: i64) -> PyResult<usize> {
+  if !(0..=1).contains(&prefetch) {
+    return Err(pyo3::exceptions::PyValueError::new_err("prefetch must be 0 or 1"));
+  }
+  Ok(prefetch as usize)
+}
+
+fn for_each_source_batch(
+  iterator: Bound<PyIterator>,
+  options: SourceBatchOptions,
+  mut consume: impl FnMut(Vec<String>) -> PyResult<()>,
+) -> PyResult<()> {
+  let mut batch = Vec::new();
+  let mut batch_bytes = 0usize;
+  for item in iterator {
+    let text = item?.extract::<String>()?;
+    if should_flush_batch(batch.len(), batch_bytes, text.len(), options) {
+      consume(std::mem::take(&mut batch))?;
+      batch_bytes = 0;
+    }
+    batch_bytes = batch_bytes.checked_add(text.len())
+      .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("batch byte size overflow"))?;
+    batch.push(text);
+  }
+  if !batch.is_empty() {
+    consume(batch)?;
+  }
+  Ok(())
+}
+
+fn add_source_sync<C: SourceCounter>(
+  counter: &mut C,
+  py: Python,
+  source: &Bound<PyAny>,
+  options: SourceBatchOptions,
+) -> PyResult<()> {
+  for_each_source_batch(source.try_iter()?, options, |batch| {
+    py.detach(|| counter.add_source_batch(&batch)).map_err(source_counter_error)
+  })
+}
+
+fn add_source_prefetched<C: SourceCounter>(
+  counter: &mut C,
+  py: Python,
+  source: &Bound<PyAny>,
+  options: SourceBatchOptions,
+) -> PyResult<()> {
+  let iterator = source.try_iter()?;
+  std::thread::scope(|scope| {
+    let (sender, receiver) = sync_channel::<Vec<String>>(0);
+    let worker = scope.spawn(move || -> MyResult<()> {
+      for batch in receiver {
+        counter.add_source_batch(&batch)?;
+      }
+      Ok(())
+    });
+
+    let producer_result = for_each_source_batch(iterator, options, |batch| {
+      py.detach(|| sender.send(batch))
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("source counter worker stopped"))
+    });
+    drop(sender);
+
+    match py.detach(|| worker.join()) {
+      Ok(Ok(())) => producer_result,
+      Ok(Err(error)) => Err(source_counter_error(error)),
+      Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err("source counter worker panicked")),
+    }
+  })
+}
+
+#[cfg(test)]
+fn run_prefetched_batches<C: SourceCounter, E>(
+  counter: &mut C,
+  produce: impl FnOnce(&std::sync::mpsc::SyncSender<Vec<String>>) -> Result<(), E>,
+) -> (Result<(), E>, std::thread::Result<MyResult<()>>) {
+  std::thread::scope(|scope| {
+    let (sender, receiver) = sync_channel::<Vec<String>>(0);
+    let worker = scope.spawn(move || -> MyResult<()> {
+      for batch in receiver {
+        counter.add_source_batch(&batch)?;
+      }
+      Ok(())
+    });
+
+    let producer_result = produce(&sender);
+    drop(sender);
+    (producer_result, worker.join())
+  })
+}
+
+fn add_python_source<C: SourceCounter>(
+  counter: &mut C,
+  py: Python,
+  source: &Bound<PyAny>,
+  max_records: usize,
+  max_bytes: usize,
+  prefetch: i64,
+) -> PyResult<()> {
+  let options = source_options(max_records, max_bytes)?;
+  let prefetch = validate_prefetch(prefetch)?;
+  match prefetch {
+    0 => add_source_sync(counter, py, source, options),
+    1 => add_source_prefetched(counter, py, source, options),
+    _ => unreachable!(),
+  }
+}
+
+#[cfg(test)]
+mod source_prefetch_tests {
+  use std::{sync::mpsc::sync_channel, time::Duration};
+
+  use super::*;
+
+  struct BlockingCounter {
+    processing_started: std::sync::mpsc::SyncSender<()>,
+    next_batch_started: std::sync::mpsc::Receiver<()>,
+    calls: usize,
+  }
+
+  impl SourceCounter for BlockingCounter {
+    fn add_source_batch(&mut self, _texts: &[String]) -> MyResult<()> {
+      if self.calls == 0 {
+        self.processing_started.send(()).unwrap();
+        self.next_batch_started.recv_timeout(Duration::from_secs(1)).unwrap();
+      }
+      self.calls += 1;
+      Ok(())
+    }
+  }
+
+  #[test]
+  fn prefetched_batches_overlap_production_and_processing() {
+    let (processing_started_tx, processing_started_rx) = sync_channel(0);
+    let (next_batch_started_tx, next_batch_started_rx) = sync_channel(0);
+    let mut counter = BlockingCounter {
+      processing_started: processing_started_tx,
+      next_batch_started: next_batch_started_rx,
+      calls: 0,
+    };
+
+    let (producer, worker) = run_prefetched_batches(&mut counter, |sender| {
+      sender.send(vec!["first".to_string()]).unwrap();
+      processing_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+      next_batch_started_tx.send(()).unwrap();
+      sender.send(vec!["second".to_string()]).unwrap();
+      Ok::<_, ()>(())
+    });
+
+    assert_eq!(producer, Ok(()));
+    assert!(worker.unwrap().is_ok());
+    assert_eq!(counter.calls, 2);
+  }
+}
+
 #[pymethods]
 impl BigramCounter {
   #[new]
@@ -460,30 +635,11 @@ impl BigramCounter {
       .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
   }
 
-  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864))]
+  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864, prefetch=1))]
   pub fn py_add_source(
-    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize,
+    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize, prefetch: i64,
   ) -> PyResult<()> {
-    let options = source_options(max_records, max_bytes)?;
-    let mut batch = Vec::new();
-    let mut batch_bytes = 0usize;
-    for item in source.try_iter()? {
-      let text = item?.extract::<String>()?;
-      if should_flush_batch(batch.len(), batch_bytes, text.len(), options) {
-        py.detach(|| self.add_batch(&batch))
-          .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
-        batch.clear();
-        batch_bytes = 0;
-      }
-      batch_bytes = batch_bytes.checked_add(text.len())
-        .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("batch byte size overflow"))?;
-      batch.push(text);
-    }
-    if !batch.is_empty() {
-      py.detach(|| self.add_batch(&batch))
-        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
-    }
-    Ok(())
+    add_python_source(self, py, source, max_records, max_bytes, prefetch)
   }
 
   #[pyo3(name = "merge")]
@@ -528,30 +684,11 @@ impl WordCounter {
       .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
   }
 
-  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864))]
+  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864, prefetch=1))]
   pub fn py_add_source(
-    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize,
+    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize, prefetch: i64,
   ) -> PyResult<()> {
-    let options = source_options(max_records, max_bytes)?;
-    let mut batch = Vec::new();
-    let mut batch_bytes = 0usize;
-    for item in source.try_iter()? {
-      let text = item?.extract::<String>()?;
-      if should_flush_batch(batch.len(), batch_bytes, text.len(), options) {
-        py.detach(|| self.add_batch(&batch))
-          .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
-        batch.clear();
-        batch_bytes = 0;
-      }
-      batch_bytes = batch_bytes.checked_add(text.len())
-        .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("batch byte size overflow"))?;
-      batch.push(text);
-    }
-    if !batch.is_empty() {
-      py.detach(|| self.add_batch(&batch))
-        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
-    }
-    Ok(())
+    add_python_source(self, py, source, max_records, max_bytes, prefetch)
   }
 
   #[pyo3(name = "merge")]
