@@ -98,10 +98,11 @@ def max_rss_bytes() -> int:
   return rss if sys.platform == "darwin" else rss * 1024
 
 
-def scan_result(source: ParquetSource) -> dict[str, int | float]:
+def scan_result(source: ParquetSource, elapsed_s: float) -> dict[str, int | float]:
   result = dict(source.last_scan)
-  elapsed = float(result["elapsed_s"])
-  result["throughput_mib_s"] = int(result["bytes"]) / 1024 ** 2 / elapsed
+  result["source_elapsed_s"] = result.pop("elapsed_s")
+  result["elapsed_s"] = elapsed_s
+  result["throughput_mib_s"] = int(result["bytes"]) / 1024 ** 2 / elapsed_s
   result["max_rss_bytes"] = max_rss_bytes()
   return result
 
@@ -116,12 +117,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
   pretokenizer = PreTokenizer([])
 
   bigram_counter = pretokenizer.bigram_counter()
+  started = time.perf_counter()
   bigram_counter.add_source(
     source.scan(),
     max_records=args.max_records,
     max_bytes=args.max_bytes,
+    prefetch=args.prefetch,
   )
-  bigram_pass = scan_result(source)
+  bigram_pass = scan_result(source, time.perf_counter() - started)
 
   started = time.perf_counter()
   bigrams = bigram_counter.selected(top_k=args.top_k, min_freq=args.min_freq)
@@ -129,12 +132,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
   del bigram_counter
 
   word_counter = pretokenizer.with_unicode_bigrams(bigrams).word_counter()
+  started = time.perf_counter()
   word_counter.add_source(
     source.scan(),
     max_records=args.max_records,
     max_bytes=args.max_bytes,
+    prefetch=args.prefetch,
   )
-  word_pass = scan_result(source)
+  word_pass = scan_result(source, time.perf_counter() - started)
 
   args.words_output.parent.mkdir(parents=True, exist_ok=True)
   started = time.perf_counter()
@@ -150,6 +155,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     "source_batch": {
       "max_records": args.max_records,
       "max_bytes": args.max_bytes,
+      "prefetch": args.prefetch,
     },
     "unicode_bigrams": {
       "top_k": args.top_k,
@@ -177,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--parquet-batch-size", type=int, default=2048)
   parser.add_argument("--max-records", type=int, default=4096)
   parser.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
+  parser.add_argument("--prefetch", type=int, choices=[0, 1], default=1)
   parser.add_argument("--top-k", type=int, default=100_000)
   parser.add_argument("--min-freq", type=int, default=16)
   parser.add_argument("--words-output", type=Path, default=DEFAULT_WORDS_OUTPUT)

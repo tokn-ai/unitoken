@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 
 import numpy as np
 import pytest
@@ -97,6 +98,95 @@ def test_source_counter_rejects_empty_batch_limits() -> None:
 
   with pytest.raises(ValueError, match="max_bytes"):
     counter.add_source(iter(["text"]), max_bytes=0)
+
+  for prefetch in [-1, 2]:
+    advanced = False
+
+    def source():
+      nonlocal advanced
+      advanced = True
+      yield "text"
+
+    with pytest.raises(ValueError, match="prefetch"):
+      counter.add_source(source(), prefetch=prefetch)  # type: ignore[arg-type]
+    assert not advanced
+
+
+@pytest.mark.parametrize("prefetch", [0, 1])
+def test_source_counter_prefetch_preserves_counts_and_source_thread(prefetch: int) -> None:
+  caller_thread = threading.get_ident()
+  source_threads: list[int] = []
+
+  def source():
+    for text in ["你好世界", "你好", "世界"]:
+      source_threads.append(threading.get_ident())
+      yield text
+
+  pretokenizer = PreTokenizer([])
+  bigram_counter = pretokenizer.bigram_counter()
+  bigram_counter.add_source(source(), max_records=1, prefetch=prefetch)
+  bigrams = bigram_counter.selected(top_k=2, min_freq=1)
+
+  word_counter = pretokenizer.with_unicode_bigrams(bigrams).word_counter()
+  word_counter.add_source(source(), max_records=1, prefetch=prefetch)
+
+  assert source_threads == [caller_thread] * 6
+  assert word_counter.words() == {"你好": 2, "世界": 2}
+
+
+def test_source_counter_prefetch_acquires_iterator_once() -> None:
+  caller_thread = threading.get_ident()
+
+  class ThreadAffineIterator:
+    def __init__(self) -> None:
+      self.iter_calls = 0
+      self.index = 0
+
+    def __iter__(self):
+      assert threading.get_ident() == caller_thread
+      self.iter_calls += 1
+      return self
+
+    def __next__(self):
+      assert threading.get_ident() == caller_thread
+      if self.index == 2:
+        raise StopIteration
+      self.index += 1
+      return "text"
+
+  source = ThreadAffineIterator()
+  counter = PreTokenizer([], pat_str=r"\S+").word_counter()
+  counter.add_source(source, max_records=1)
+
+  assert source.iter_calls == 1
+  assert counter.words() == {"text": 2}
+
+
+def test_source_counter_prefetch_matches_sync_for_boundaries_and_oversized_records() -> None:
+  texts = ["", "ascii", "你好<eot>世界", "x" * 100]
+  pretokenizer = PreTokenizer(["<eot>"], eot_token="<eot>", pat_str=r"\S+")
+
+  sync = pretokenizer.word_counter()
+  sync.add_source(iter(texts), max_records=2, max_bytes=5, prefetch=0)
+  prefetched = pretokenizer.word_counter()
+  prefetched.add_source(iter(texts), max_records=2, max_bytes=5, prefetch=1)
+
+  assert prefetched.words() == sync.words()
+
+
+@pytest.mark.parametrize("prefetch", [0, 1])
+def test_source_counter_prefetch_preserves_iterator_error_boundary(prefetch: int) -> None:
+  def source():
+    yield "first"
+    yield "unfinished"
+    raise ValueError("source failed")
+
+  counter = PreTokenizer([], pat_str=r"\S+").word_counter()
+
+  with pytest.raises(ValueError, match="source failed"):
+    counter.add_source(source(), max_records=1, prefetch=prefetch)
+
+  assert counter.words() == {"first": 1}
 
 
 @pytest.mark.parametrize("unit", ["byte", "unicode"])
