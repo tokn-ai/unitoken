@@ -22,6 +22,7 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
   fn get_vocab(&self) -> Vocabulary;
+  fn validate_model(&self, py: Python) -> PyResult<()>;
   fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
   fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
 }
@@ -137,6 +138,12 @@ impl BpeTrainer_u8_Idx {
     }
   }
 
+  /// Validate the current vocabulary and merge history.
+  pub fn validate_model(&self, py: Python) -> PyResult<()> {
+    py.detach(|| self.inner.validate_model())
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+  }
+
   /// Save the vocabulary JSON using the requested format.
   pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
     py.detach(|| {
@@ -239,6 +246,12 @@ impl BpeTrainer_Character_CharIdx {
     Vocabulary {
       inner: Box::new(VocabularyInner::new(&self.inner.vocab)),
     }
+  }
+
+  /// Validate the current vocabulary and merge history.
+  pub fn validate_model(&self, py: Python) -> PyResult<()> {
+    py.detach(|| self.inner.validate_model())
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 
   /// Save the vocabulary JSON to `path`.

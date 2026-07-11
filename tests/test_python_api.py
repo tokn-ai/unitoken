@@ -52,6 +52,82 @@ def test_gpt2_format_rejects_unicode_unit_without_creating_files(tmp_path: Path)
   assert not merges_file.exists()
 
 
+@pytest.mark.parametrize("unit", ["byte", "unicode"])
+def test_validate_model_rejects_duplicate_serialized_vocab(unit: str) -> None:
+  # A one-character special token collides with the mandatory initial alphabet.
+  trainer = BpeTrainer(["a"], unit=unit)  # type: ignore[arg-type]
+
+  with pytest.raises(ValueError, match="duplicate vocabulary token a"):
+    trainer.validate_model()
+
+
+@pytest.mark.parametrize(
+  ("tie_break", "expected_tail"),
+  [
+    ("smallest_pair_id", ["你", "好", "你好"]),
+    ("largest_content", ["好", "你", "你好"]),
+  ],
+)
+def test_unicode_trainer_saves_only_loadable_merge_dependencies(
+  tmp_path: Path,
+  tie_break: str,
+  expected_tail: list[str],
+) -> None:
+  trainer = BpeTrainer([], unit="unicode", tie_break=tie_break)  # type: ignore[arg-type]
+  trainer.add_words({"你好": 1})
+
+  for vocab_size, encoded_length in [(257, 4), (258, 2), (259, 1)]:
+    # Repeated calls exercise rebuilding the candidate heap when training resumes.
+    trainer.train(vocab_size=vocab_size)
+    trainer.validate_model()
+
+    tail = [
+      token.decode("utf-8")
+      for token, token_id in sorted(trainer.vocab.items(), key=lambda item: item[1])
+      if token_id >= 256
+    ]
+    assert tail == expected_tail[:vocab_size - 256]
+
+    vocab_file = tmp_path / f"vocab-{tie_break}-{vocab_size}.json"
+    merges_file = tmp_path / f"merges-{tie_break}-{vocab_size}.txt"
+    trainer.save_files(vocab_file, merges_file, format="unitoken")
+
+    merge_lines = merges_file.read_text().splitlines()
+    assert merge_lines == ([] if vocab_size < 259 else ["你 好 => 1"])
+
+    encoder = BpeEncoder.load(
+      unit="unicode",
+      format="unitoken",
+      vocab_file=vocab_file,
+      merges_file=merges_file,
+    )
+    encoded = encoder.encode_word("你好")
+    assert len(encoded) == encoded_length
+    assert encoder.decode(encoded) == "你好"
+
+
+def test_unicode_saved_merge_round_trips_ascii_byte_operand(tmp_path: Path) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"a你": 1})
+  trainer.train(vocab_size=258)
+  trainer.validate_model()
+  vocab_file = tmp_path / "vocab.json"
+  merges_file = tmp_path / "merges.txt"
+
+  trainer.save_files(vocab_file, merges_file, format="unitoken")
+
+  assert merges_file.read_text() == "a 你 => 1\n"
+  encoder = BpeEncoder.load(
+    unit="unicode",
+    format="unitoken",
+    vocab_file=vocab_file,
+    merges_file=merges_file,
+  )
+  encoded = encoder.encode_word("a你")
+  assert len(encoded) == 1
+  assert encoder.decode(encoded) == "a你"
+
+
 def test_source_counters_support_two_pass_replay_and_bounded_batches() -> None:
   class MemorySource:
     def __init__(self) -> None:

@@ -110,6 +110,10 @@ class BpeTrainer:
     """
     return self._trainer.step()
 
+  def validate_model(self) -> None:
+    """Validate vocabulary uniqueness and merge dependency order."""
+    self._trainer.validate_model()
+
   def save(self, name: str, *, outdir: str | PathLike = ".", format: FileFormat | None = None) -> None:
     """Save `vocab.{name}[{unit}].json` and `merges.{name}[{unit}].txt` into `outdir`."""
     vocab_path = Path(outdir) / f"vocab.{name}[{self.unit}].json"
