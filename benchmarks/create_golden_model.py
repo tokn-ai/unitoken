@@ -59,7 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
   suffix = f"vocab{args.vocab_size}.{args.format}"
   vocab_path = model_dir / f"vocab.{suffix}.json"
   merges_path = model_dir / f"merges.{suffix}.txt"
-  trainer.save_files(vocab_path, merges_path, format=args.format)
+  model = trainer.validate_model()
+  model.save_files(vocab_path, merges_path, format=args.format)
 
   print(f"saved {vocab_path}")
   print(f"saved {merges_path}")

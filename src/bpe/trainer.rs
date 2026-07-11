@@ -2,7 +2,7 @@ use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap},
 
 use ahash::AHashMap;
 
-use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
+use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
 
@@ -289,22 +289,12 @@ where
     I::from_u64(start_idx + length as u64)
   }
 
-  /// Serialize the current vocabulary to JSON using `spec`.
-  pub fn save_vocab_json<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
-    spec.encode_vocab(&mut w, &self.vocab)
-  }
-
-  /// Serialize the current merge list to a text format using `spec`.
-  pub fn save_merges_txt<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
-    spec.encode_merges(&mut w, &self.merges)
-  }
-
-  /// Validate that the vocabulary and merge history form a valid BPE model.
+  /// Validate the current state and return an immutable model snapshot.
   ///
   /// Merge targets are removed from the initial vocabulary, then introduced by
   /// replaying merges in rank order. This catches missing operands and merges
   /// emitted before their dependencies.
-  pub fn validate_model(&self) -> MyResult<()>
+  pub fn validate_model(&self) -> MyResult<BpeModel<C, I>>
   where
     C: CharSplit + Clone + Ord,
     I: HasChar<C>,
@@ -397,7 +387,29 @@ where
       }
     }
 
-    Ok(())
+    let vocab_by_content = self
+      .vocab
+      .iter()
+      .map(|(idx, token)| (token.clone(), *idx))
+      .collect::<BTreeMap<_, _>>();
+    let merges = self
+      .merges
+      .iter()
+      .map(|merge| {
+        let tp = (
+          *vocab_by_content.get(&merge.content.0).unwrap(),
+          *vocab_by_content.get(&merge.content.1).unwrap(),
+        );
+        let mut model_merge = Merge::new(tp, merge.content.clone()).with_target(merge.target.unwrap());
+        model_merge.data.freq = merge.data.freq;
+        model_merge
+      })
+      .collect();
+    Ok(BpeModel::new(
+      self.special_tokens.clone(),
+      self.vocab.clone(),
+      merges,
+    ))
   }
 }
 
@@ -914,6 +926,10 @@ mod tests {
       assert_eq!(merge.content.0.debug_display(), "你");
       assert_eq!(merge.content.1.debug_display(), "好");
       assert_eq!(merge.merged_content().debug_display(), "你好");
+      let model = bpe.validate_model().unwrap();
+      let model_merge = model.merges().first().unwrap();
+      assert!(matches!(model_merge.tp, (CharIdx::Idx(_), CharIdx::Idx(_))));
+      assert!(model_merge.data.occurs_in.is_empty());
     }
   }
 
@@ -1019,8 +1035,9 @@ mod tests {
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
     std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
-    bpe.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/vocab.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/merges.txt")).unwrap()).unwrap();
+    let model = bpe.validate_model().unwrap();
+    model.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/vocab.json")).unwrap()).unwrap();
+    model.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/merges.txt")).unwrap()).unwrap();
 
     let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.txt")).unwrap();
@@ -1055,8 +1072,9 @@ mod tests {
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
     std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
-    bpe.save_vocab_json(&spec, std::fs::File::create(format!("out/models/{NAME}/vocab.uni.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&spec, std::fs::File::create(format!("out/models/{NAME}/merges.uni.txt")).unwrap()).unwrap();
+    let model = bpe.validate_model().unwrap();
+    model.save_vocab_json(&spec, std::fs::File::create(format!("out/models/{NAME}/vocab.uni.json")).unwrap()).unwrap();
+    model.save_merges_txt(&spec, std::fs::File::create(format!("out/models/{NAME}/merges.uni.txt")).unwrap()).unwrap();
 
     let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.uni.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.uni.txt")).unwrap();

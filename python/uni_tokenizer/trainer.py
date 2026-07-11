@@ -1,8 +1,11 @@
 from collections.abc import Mapping, Sequence
 from os import PathLike
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from ._lib import BpeTrainer_Character_CharIdx, BpeTrainer_u8_Idx, WordCounter
+
+if TYPE_CHECKING:
+  from .model import BpeModel
 
 Unit = Literal["byte", "unicode"]
 FileFormat = Literal["unitoken", "gpt2"]
@@ -110,12 +113,13 @@ class BpeTrainer:
     """
     return self._trainer.step()
 
-  def validate_model(self) -> None:
-    """Validate vocabulary uniqueness and merge dependency order."""
-    self._trainer.validate_model()
+  def validate_model(self) -> "BpeModel":
+    """Validate the trainer state and return an immutable model snapshot."""
+    from .model import BpeModel
+    return BpeModel(self._trainer.validate_model())
 
   def save(self, name: str, *, outdir: str | PathLike = ".", format: FileFormat | None = None) -> None:
-    """Save `vocab.{name}[{unit}].json` and `merges.{name}[{unit}].txt` into `outdir`."""
+    """Validate a snapshot and save it under `name`."""
     vocab_path = Path(outdir) / f"vocab.{name}[{self.unit}].json"
     merges_path = Path(outdir) / f"merges.{name}[{self.unit}].txt"
     self.save_files(vocab_path, merges_path, format=format)
@@ -127,7 +131,6 @@ class BpeTrainer:
     *,
     format: FileFormat | None = None,
   ) -> None:
-    """Save vocab and merges to explicit paths."""
+    """Validate a snapshot and save its vocabulary and merge list."""
     resolved_format = _resolve_format(self.unit, format)
-    self._trainer.save_vocab(vocab_path, resolved_format)
-    self._trainer.save_merges_txt(merges_path, resolved_format)
+    self.validate_model().save_files(vocab_path, merges_path, format=resolved_format)
