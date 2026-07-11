@@ -305,17 +305,34 @@ pub fn _pretokenizer_counter_with_unicode_bigrams(
   s: &str, pat: &Regex, unicode_bigrams: Option<&AHashSet<(char, char)>>, unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
 ) -> MyResult<BTreeMap<String, Freq>> {
   let mut result = BTreeMap::new();
-  for i in pat.find_iter(s) {
-    let token = i?.as_str();
-    if let Some(unicode_bigrams) = unicode_bigrams.filter(|_| needs_unicode_bigram_split(token)) {
-      for segment in split_by_unicode_bigrams(token, unicode_bigrams, unicode_bigram_mixed_boundary) {
-        *result.entry(segment).or_default() += 1;
-      }
+  for_each_pretoken(s, pat, unicode_bigrams, unicode_bigram_mixed_boundary, |word| {
+    *result.entry(word.to_string()).or_default() += 1;
+    Ok(())
+  })?;
+  Ok(result)
+}
+
+pub(crate) fn for_each_pretoken<'a>(
+  s: &'a str,
+  pat: &Regex,
+  unicode_bigrams: Option<&AHashSet<(char, char)>>,
+  unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
+  mut emit: impl FnMut(&'a str) -> MyResult<()>,
+) -> MyResult<()> {
+  for found in pat.find_iter(s) {
+    let token = found?.as_str();
+    if let Some(unicode_bigrams) = unicode_bigrams {
+      for_each_unicode_bigram_segment(
+        token,
+        unicode_bigrams,
+        unicode_bigram_mixed_boundary,
+        &mut emit,
+      )?;
     } else {
-      *result.entry(token.to_string()).or_default() += 1;
+      emit(token)?;
     }
   }
-  Ok(result)
+  Ok(())
 }
 
 pub fn parse_unicode_bigrams(bigrams: &[String]) -> MyResult<AHashSet<(char, char)>> {
@@ -375,31 +392,30 @@ pub(crate) fn count_unicode_bigrams(
   Ok(())
 }
 
-fn split_by_unicode_bigrams(
-  token: &str,
+fn for_each_unicode_bigram_segment<'a>(
+  token: &'a str,
   unicode_bigrams: &AHashSet<(char, char)>,
   unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
-) -> Vec<String> {
-  let chars = token.char_indices().collect::<Vec<_>>();
-  if chars.len() <= 1 {
-    return vec![token.to_string()];
-  }
-  let mut segments = Vec::new();
+  emit: &mut impl FnMut(&'a str) -> MyResult<()>,
+) -> MyResult<()> {
+  let mut chars = token.char_indices();
+  let Some((_, mut left)) = chars.next() else {
+    return emit(token);
+  };
   let mut start = 0;
-  for pair in chars.windows(2) {
-    let (_, left) = pair[0];
-    let (right_byte, right) = pair[1];
+  for (right_byte, right) in chars {
     if should_split_unicode_bigram_mixed_boundary(left, right, unicode_bigrams, unicode_bigram_mixed_boundary) {
       if start < right_byte {
-        segments.push(token[start..right_byte].to_string());
+        emit(&token[start..right_byte])?;
       }
       start = right_byte;
     }
+    left = right;
   }
   if start < token.len() {
-    segments.push(token[start..].to_string());
+    emit(&token[start..])?;
   }
-  segments
+  Ok(())
 }
 
 fn should_split_unicode_bigram_mixed_boundary(
@@ -416,10 +432,6 @@ fn should_split_unicode_bigram_mixed_boundary(
     (true, false) | (false, true) => unicode_bigram_mixed_boundary == UnicodeBigramMixedBoundary::Split,
     (false, false) => false,
   }
-}
-
-fn needs_unicode_bigram_split(s: &str) -> bool {
-  s.chars().any(is_unicode_bigram_script)
 }
 
 pub(crate) fn is_unicode_bigram_script(ch: char) -> bool {
@@ -728,6 +740,25 @@ pub fn split_special_tokens<'a>(text: &'a str, special_tokens: &Regex) -> MyResu
     parts.push(SplitChunk::Chunk(&text[last_pos..]));
   }
   Ok(parts)
+}
+
+pub(crate) fn for_each_regular_chunk<'a>(
+  text: &'a str,
+  special_tokens: &Regex,
+  mut emit: impl FnMut(&'a str) -> MyResult<()>,
+) -> MyResult<()> {
+  let mut last_pos = 0;
+  for found in special_tokens.find_iter(text) {
+    let special = found?;
+    if special.start() > last_pos {
+      emit(&text[last_pos..special.start()])?;
+    }
+    last_pos = special.end();
+  }
+  if last_pos < text.len() {
+    emit(&text[last_pos..])?;
+  }
+  Ok(())
 }
 
 #[hotpath::measure]

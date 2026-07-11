@@ -28,6 +28,7 @@ required-features = ["cli"]
 
 [dependencies]
 ahash = { version = "0.8.12", features = ["serde"] }
+hashbrown = { version = "0.16.1", features = ["serde"] }
 fancy-regex = "0.16.2"
 lazy_static = "1.5.0"
 ordermap = { version = "1.0.0", features = ["serde"] }
