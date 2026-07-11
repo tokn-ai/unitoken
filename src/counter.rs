@@ -232,6 +232,22 @@ impl WordCounter {
     self.counts.iter().map(|(word, frequency)| (word.clone(), *frequency)).collect()
   }
 
+  pub fn len(&self) -> usize {
+    self.counts.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.counts.is_empty()
+  }
+
+  pub fn clear(&mut self) {
+    self.counts.clear();
+  }
+
+  pub fn take_counts(&mut self) -> AHashMap<String, Freq> {
+    std::mem::take(&mut self.counts)
+  }
+
   pub fn counts(&self) -> &AHashMap<String, Freq> {
     &self.counts
   }

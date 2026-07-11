@@ -46,7 +46,7 @@ For corpora that do not fit in memory, expose a replayable source whose
 processes bounded batches from each scan:
 
 ```python
-from uni_tokenizer import PreTokenizer
+from uni_tokenizer import BpeTrainer, PreTokenizer
 
 pretokenizer = PreTokenizer([])
 
@@ -56,13 +56,18 @@ bigrams = bigram_counter.selected(top_k=100_000, min_freq=16)
 
 word_counter = pretokenizer.with_unicode_bigrams(bigrams).word_counter()
 word_counter.add_source(source.scan())
-words = word_counter.words()
+
+trainer = BpeTrainer([], unit="byte")
+trainer.add_word_counter(word_counter)
 ```
 
 `add_source` defaults to at most 4,096 records or 64 MiB per batch. Override
 `max_records` and `max_bytes` for the record sizes and worker memory available.
 Counters can also be merged, so separately counted corpus partitions can be
-reduced before selecting bigrams or training.
+reduced before selecting bigrams or training. `add_word_counter` consumes the
+native word inventory without constructing a Python dictionary; the counter is
+empty and reusable afterward. `word_counter.words()` remains available for
+small inventories, but copies the complete result into Python memory.
 
 Tiktoken-compatible API
 -----------------------

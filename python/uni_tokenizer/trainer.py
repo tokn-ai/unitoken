@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from os import PathLike
 from pathlib import Path
 from typing import Literal
-from ._lib import BpeTrainer_Character_CharIdx, BpeTrainer_u8_Idx
+from ._lib import BpeTrainer_Character_CharIdx, BpeTrainer_u8_Idx, WordCounter
 
 Unit = Literal["byte", "unicode"]
 FileFormat = Literal["unitoken", "gpt2"]
@@ -83,6 +83,14 @@ class BpeTrainer:
     if isinstance(words, Mapping):
       words = list(words.items())
     self._trainer.add_words(words)
+
+  def add_word_counter(self, counter: WordCounter) -> None:
+    """Replace the training inventory by consuming an exact native word counter.
+
+    The counter is empty and reusable after this call. Unlike `words()`, this
+    transfer does not construct a Python dictionary.
+    """
+    self._trainer.add_word_counter(counter)
 
   def init_training(self) -> None:
     """Initialize internal training state."""

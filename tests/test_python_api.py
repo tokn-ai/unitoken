@@ -97,3 +97,27 @@ def test_source_counter_rejects_empty_batch_limits() -> None:
 
   with pytest.raises(ValueError, match="max_bytes"):
     counter.add_source(iter(["text"]), max_bytes=0)
+
+
+@pytest.mark.parametrize("unit", ["byte", "unicode"])
+def test_trainer_consumes_word_counter_without_changing_training(unit: str) -> None:
+  pretokenizer = PreTokenizer([], pat_str=r"\S+")
+  counter = pretokenizer.word_counter()
+  counter.add_batch(["abab", "ab", "abab"])
+  expected_words = counter.words()
+
+  from_counter = BpeTrainer([], unit=unit)  # type: ignore[arg-type]
+  from_counter.add_word_counter(counter)
+  from_counter.train(vocab_size=from_counter.vocab_size + 2)
+
+  from_mapping = BpeTrainer([], unit=unit)  # type: ignore[arg-type]
+  from_mapping.add_words(expected_words)
+  from_mapping.train(vocab_size=from_mapping.vocab_size + 2)
+
+  assert counter.len == 0
+  assert from_counter.vocab == from_mapping.vocab
+
+  counter.add_text("new")
+  assert counter.len == 1
+  counter.clear()
+  assert counter.len == 0

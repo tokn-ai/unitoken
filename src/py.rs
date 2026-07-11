@@ -95,6 +95,15 @@ impl BpeTrainer_u8_Idx {
     )
   }
 
+  /// Replace the trainer inventory by consuming a word counter.
+  pub fn add_word_counter(&mut self, py: Python, mut counter: PyRefMut<'_, WordCounter>) {
+    let counts = counter.take_counts();
+    drop(counter);
+    py.detach(||
+      self.inner.add_words(&mut counts.iter().map(|(word, frequency)| (word.as_str(), *frequency)))
+    )
+  }
+
   /// Current vocabulary size.
   pub fn vocab_size(&self) -> usize {
     self.inner.vocab_size()
@@ -187,6 +196,15 @@ impl BpeTrainer_Character_CharIdx {
   pub fn add_words(&mut self, py: Python, words: Vec<(String, i64)>) {
     py.detach(||
       self.inner.add_words(&mut words.iter().map(|(w, f)| (w.as_str(), *f)))
+    )
+  }
+
+  /// Replace the trainer inventory by consuming a word counter.
+  pub fn add_word_counter(&mut self, py: Python, mut counter: PyRefMut<'_, WordCounter>) {
+    let counts = counter.take_counts();
+    drop(counter);
+    py.detach(||
+      self.inner.add_words(&mut counts.iter().map(|(word, frequency)| (word.as_str(), *frequency)))
     )
   }
 
@@ -537,6 +555,17 @@ impl WordCounter {
   #[pyo3(name = "words")]
   pub fn py_words(&self) -> BTreeMap<String, i64> {
     WordCounter::words(self)
+  }
+
+  #[getter]
+  #[pyo3(name = "len")]
+  pub fn py_len(&self) -> usize {
+    WordCounter::len(self)
+  }
+
+  #[pyo3(name = "clear")]
+  pub fn py_clear(&mut self) {
+    WordCounter::clear(self)
   }
 }
 
