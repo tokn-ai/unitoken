@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from os import PathLike
-from typing import Literal
+from typing import Literal, Protocol
 
-from ._lib import PreTokenizer as _PreTokenizer
+from ._lib import BigramCounter, PreTokenizer as _PreTokenizer, WordCounter
 
 
 BoundaryMode = Literal["auto", "eot", "line", "utf8"]
 UnicodeBigramMixedBoundary = Literal["keep", "split"]
+
+class Source(Protocol):
+  def scan(self) -> Iterator[str]:
+    """Return a new complete scan of independent text records."""
+    ...
 
 
 class PreTokenizer:
@@ -20,7 +25,34 @@ class PreTokenizer:
     unicode_bigrams: Sequence[str] | None = None,
     unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary = "keep",
   ) -> None:
+    self._special_tokens = list(special_tokens)
+    self._eot_token = eot_token
+    self._pat_str = pat_str
+    self._unicode_bigrams = list(unicode_bigrams) if unicode_bigrams is not None else None
+    self._unicode_bigram_mixed_boundary = unicode_bigram_mixed_boundary
     self._inner = _PreTokenizer(special_tokens, eot_token, pat_str, unicode_bigrams, unicode_bigram_mixed_boundary)
+
+  def with_unicode_bigrams(self, bigrams: Sequence[str]) -> "PreTokenizer":
+    """Return a pretokenizer using a frozen Unicode bigram set."""
+    return PreTokenizer(
+      self._special_tokens,
+      self._eot_token,
+      self._pat_str,
+      bigrams,
+      self._unicode_bigram_mixed_boundary,
+    )
+
+  def bigram_counter(self) -> BigramCounter:
+    """Create an empty mergeable Unicode bigram counter."""
+    return self._inner.bigram_counter()
+
+  def word_counter(self) -> WordCounter:
+    """Create an empty mergeable word counter."""
+    return self._inner.word_counter()
+
+  def load_word_counter(self, path: str | PathLike) -> WordCounter:
+    """Load an exact native word inventory saved by `WordCounter.save`."""
+    return self._inner.load_word_counter(path)
 
   def get_words(self, text: str) -> dict[str, int]:
     """Pretokenize text and return word frequencies."""

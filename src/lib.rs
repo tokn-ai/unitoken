@@ -2,6 +2,7 @@
 extern crate tracing;
 
 pub mod bpe;
+pub mod counter;
 pub mod spec;
 pub mod pretokenizer;
 pub mod traits;
@@ -36,6 +37,10 @@ pub enum MyError {
   SpecError(String),
   #[error("Bpe builder: {0}")]
   BpeBuilder(String),
+  #[error("Frequency overflow")]
+  FrequencyOverflow,
+  #[error("Source batch error: {0}")]
+  SourceBatch(&'static str),
 }
 
 pub type MyResult<T> = Result<T, MyError>;
