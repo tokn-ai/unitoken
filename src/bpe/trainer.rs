@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, sync::atomic::AtomicU64};
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 
 use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
@@ -445,6 +445,7 @@ where
     self.pre_merges.clear();
     self.merge_heap.clear();
     let mut vocab_contents = None;
+    let mut materialized_initial_units = AHashSet::new();
     let vocab_get = |i: I| {
       self.vocab.get(&i).cloned().or_else(|| i.idx_to_word()).ok_or_else(|| MyError::OovIdx(i.to_u64()))
     };
@@ -457,9 +458,18 @@ where
       for j in word.idxs.iter() {
         // This fast path covers byte training and avoids building a reverse
         // content set for it.
-        if self.vocab.contains_key(j) {
+        if self.vocab.contains_key(j) || materialized_initial_units.contains(j) {
           continue;
         }
+        let tp = (i_none, *j);
+        if let Some(merge) = self.pre_merges.get_mut(&tp) {
+          merge.data.freq += word.freq;
+          continue;
+        }
+
+        // Character-backed units do not use their eventual numeric vocabulary
+        // id inside `self.words`. Resolve content only on the first encounter
+        // instead of allocating and searching once per unit occurrence.
         let content = vocab_get(*j).unwrap();
         // Unicode units remain CharIdx::Char in the word inventory after they
         // receive a numeric vocab id, so compare content when training resumes.
@@ -467,16 +477,15 @@ where
           .get_or_insert_with(|| self.vocab.values().cloned().collect::<BTreeSet<_>>())
           .contains(&content)
         {
+          materialized_initial_units.insert(*j);
           continue;
         }
         // for unicode, j should be CharIdx::Char
-        let tp = (i_none, *j);
-        let merge = self.pre_merges.entry(tp).or_insert_with(|| {
-          // set merge.target = Some(j) to indicate this is a single char token.
-          // see also [`Self::step`]
-          Merge::new(tp, (empty_word.clone(), content)).with_target(*j)
-        });
-        merge.data.freq += word.freq;
+        // Set merge.target = Some(j) to indicate this is a single char token.
+        // See also [`Self::step`].
+        let mut merge = Merge::new(tp, (empty_word.clone(), content)).with_target(*j);
+        merge.data.freq = word.freq;
+        self.pre_merges.insert(tp, merge);
       }
       for (j1, j2) in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
         let tp = (j1, j2);
@@ -931,6 +940,27 @@ mod tests {
       assert!(matches!(model_merge.tp, (CharIdx::Idx(_), CharIdx::Idx(_))));
       assert!(model_merge.data.occurs_in.is_empty());
     }
+  }
+
+  #[test]
+  fn test_unicode_initial_unit_frequency_aggregates_repeated_positions() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你你", 3), ("你", 5)],
+      &[],
+    );
+    let initial_unit = (CharIdx::Idx(u32::MAX), CharIdx::Char('你'));
+    let repeated_pair = (CharIdx::Char('你'), CharIdx::Char('你'));
+
+    bpe.init_training();
+
+    assert_eq!(bpe.pre_merges.get(&initial_unit).unwrap().data.freq, 11);
+    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().data.freq, 3);
+
+    bpe.step().unwrap();
+    bpe.init_training();
+
+    assert!(!bpe.pre_merges.contains_key(&initial_unit));
+    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().data.freq, 3);
   }
 
   #[test]
