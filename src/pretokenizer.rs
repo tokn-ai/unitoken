@@ -283,7 +283,7 @@ impl PreTokenizer {
     let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut counts = AHashMap::new();
     for part in parts.iter().filter(|i| !i.is_special()) {
-      count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script);
+      count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script)?;
     }
     Ok(counts)
   }
@@ -337,7 +337,7 @@ pub fn unicode_bigram_to_string(bigram: (char, char)) -> String {
   s
 }
 
-fn select_unicode_bigrams(
+pub(crate) fn select_unicode_bigrams(
   counts: AHashMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
 ) -> AHashSet<(char, char)> {
   if top_k == 0 {
@@ -358,19 +358,21 @@ fn select_unicode_bigrams(
     .collect()
 }
 
-fn count_unicode_bigrams(
+pub(crate) fn count_unicode_bigrams(
   token: &str, counts: &mut AHashMap<(char, char), Freq>, keep_char: impl Fn(char) -> bool,
-) {
+) -> MyResult<()> {
   let mut chars = token.chars();
   let Some(mut prev) = chars.next() else {
-    return;
+    return Ok(());
   };
   for next in chars {
     if keep_char(prev) && keep_char(next) {
-      *counts.entry((prev, next)).or_default() += 1;
+      let count = counts.entry((prev, next)).or_default();
+      *count = count.checked_add(1).ok_or(MyError::FrequencyOverflow)?;
     }
     prev = next;
   }
+  Ok(())
 }
 
 fn split_by_unicode_bigrams(
@@ -420,7 +422,7 @@ fn needs_unicode_bigram_split(s: &str) -> bool {
   s.chars().any(is_unicode_bigram_script)
 }
 
-fn is_unicode_bigram_script(ch: char) -> bool {
+pub(crate) fn is_unicode_bigram_script(ch: char) -> bool {
   matches!(
     ch as u32,
     // CJK Unified Ideographs Extension A.

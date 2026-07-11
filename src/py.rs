@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::PyAny};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
@@ -309,6 +309,8 @@ impl Vocabulary {
 
 #[pymodule_export]
 pub use crate::pretokenizer::PreTokenizer;
+#[pymodule_export]
+pub use crate::counter::{BigramCounter, WordCounter};
 
 #[pymethods]
 impl PreTokenizer {
@@ -368,6 +370,16 @@ impl PreTokenizer {
       .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
   }
 
+  /// Create an empty mergeable Unicode bigram counter.
+  pub fn bigram_counter(&self) -> BigramCounter {
+    BigramCounter::new(self.clone())
+  }
+
+  /// Create an empty mergeable word counter.
+  pub fn word_counter(&self) -> WordCounter {
+    WordCounter::new(self.clone())
+  }
+
   #[pyo3(name = "get_words_from_file", signature = (path, *, chunk_size=1048576, boundary="auto"))]
   /// Python wrapper for [`PreTokenizer::get_words_from_file`].
   pub fn py_get_words_from_file(
@@ -390,6 +402,141 @@ impl PreTokenizer {
     let mut bigrams = bigrams.into_iter().collect::<Vec<_>>();
     bigrams.sort();
     Ok(bigrams.into_iter().map(unicode_bigram_to_string).collect())
+  }
+}
+
+fn source_options(max_records: usize, max_bytes: usize) -> PyResult<SourceBatchOptions> {
+  SourceBatchOptions { max_records, max_bytes }
+    .validate()
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
+fn should_flush_batch(batch_len: usize, batch_bytes: usize, next_bytes: usize, options: SourceBatchOptions) -> bool {
+  batch_len > 0 && (batch_len >= options.max_records || batch_bytes.saturating_add(next_bytes) > options.max_bytes)
+}
+
+#[pymethods]
+impl BigramCounter {
+  #[new]
+  pub fn new_py(pre_tokenizer: PreTokenizer) -> Self {
+    Self::new(pre_tokenizer)
+  }
+
+  #[pyo3(name = "add_text")]
+  pub fn py_add_text(&mut self, py: Python, text: &str) -> PyResult<()> {
+    py.detach(|| self.add_text(text))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "add_batch")]
+  pub fn py_add_batch(&mut self, py: Python, texts: Vec<String>) -> PyResult<()> {
+    py.detach(|| self.add_batch(&texts))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864))]
+  pub fn py_add_source(
+    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize,
+  ) -> PyResult<()> {
+    let options = source_options(max_records, max_bytes)?;
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+    for item in source.try_iter()? {
+      let text = item?.extract::<String>()?;
+      if should_flush_batch(batch.len(), batch_bytes, text.len(), options) {
+        py.detach(|| self.add_batch(&batch))
+          .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+        batch.clear();
+        batch_bytes = 0;
+      }
+      batch_bytes = batch_bytes.checked_add(text.len())
+        .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("batch byte size overflow"))?;
+      batch.push(text);
+    }
+    if !batch.is_empty() {
+      py.detach(|| self.add_batch(&batch))
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    }
+    Ok(())
+  }
+
+  #[pyo3(name = "merge")]
+  pub fn py_merge(&mut self, py: Python, other: BigramCounter) -> PyResult<()> {
+    py.detach(|| self.merge(other))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "selected")]
+  pub fn py_selected(&self, top_k: usize, min_freq: i64) -> Vec<String> {
+    BigramCounter::selected(self, top_k, min_freq)
+      .into_iter()
+      .map(unicode_bigram_to_string)
+      .collect()
+  }
+
+  pub fn items(&self) -> Vec<(String, i64)> {
+    let mut items = self.counts().iter()
+      .map(|(bigram, frequency)| (unicode_bigram_to_string(*bigram), *frequency))
+      .collect::<Vec<_>>();
+    items.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    items
+  }
+}
+
+#[pymethods]
+impl WordCounter {
+  #[new]
+  pub fn new_py(pre_tokenizer: PreTokenizer) -> Self {
+    Self::new(pre_tokenizer)
+  }
+
+  #[pyo3(name = "add_text")]
+  pub fn py_add_text(&mut self, py: Python, text: &str) -> PyResult<()> {
+    py.detach(|| self.add_text(text))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "add_batch")]
+  pub fn py_add_batch(&mut self, py: Python, texts: Vec<String>) -> PyResult<()> {
+    py.detach(|| self.add_batch(&texts))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "add_source", signature = (source, *, max_records=4096, max_bytes=67108864))]
+  pub fn py_add_source(
+    &mut self, py: Python, source: &Bound<PyAny>, max_records: usize, max_bytes: usize,
+  ) -> PyResult<()> {
+    let options = source_options(max_records, max_bytes)?;
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+    for item in source.try_iter()? {
+      let text = item?.extract::<String>()?;
+      if should_flush_batch(batch.len(), batch_bytes, text.len(), options) {
+        py.detach(|| self.add_batch(&batch))
+          .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+        batch.clear();
+        batch_bytes = 0;
+      }
+      batch_bytes = batch_bytes.checked_add(text.len())
+        .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("batch byte size overflow"))?;
+      batch.push(text);
+    }
+    if !batch.is_empty() {
+      py.detach(|| self.add_batch(&batch))
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    }
+    Ok(())
+  }
+
+  #[pyo3(name = "merge")]
+  pub fn py_merge(&mut self, py: Python, other: WordCounter) -> PyResult<()> {
+    py.detach(|| self.merge(other))
+      .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+  }
+
+  #[pyo3(name = "words")]
+  pub fn py_words(&self) -> BTreeMap<String, i64> {
+    WordCounter::words(self)
   }
 }
 
