@@ -1,6 +1,7 @@
-use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, sync::atomic::AtomicU64};
+use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap, hash_map::Entry}, hash::Hash, ops::Range, sync::atomic::AtomicU64};
 
 use ahash::{AHashMap, AHashSet};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
@@ -176,6 +177,92 @@ impl<C: Ord, I: Ord> PartialEq for MergeCandidate<C, I> {
 }
 
 impl<C: Ord, I: Ord> Eq for MergeCandidate<C, I> {}
+
+// Small inventories do not amortize the range scan and local-map reduction.
+const PARALLEL_INIT_MIN_WORDS: usize = 100_000;
+// Balance work by encoded units rather than words because pretoken lengths vary widely.
+const PARALLEL_INIT_CHUNK_UNITS: usize = 256 * 1024;
+// Bound the temporary local maps retained before each serial reduction.
+const PARALLEL_INIT_MAX_BATCHES: usize = 16;
+
+#[derive(Default)]
+struct PairBuildData {
+  freq: Freq,
+  occurs_in: Vec<u64>,
+}
+
+struct PreMergeBuildBatch<I> {
+  initial_freqs: AHashMap<I, Freq>,
+  pairs: AHashMap<(I, I), PairBuildData>,
+}
+
+struct PreMergeBuildRange {
+  words: Range<usize>,
+  units: usize,
+}
+
+impl<I> Default for PreMergeBuildBatch<I> {
+  fn default() -> Self {
+    Self {
+      initial_freqs: AHashMap::new(),
+      pairs: AHashMap::new(),
+    }
+  }
+}
+
+fn collect_pre_merge_build_batch<C, I>(
+  words: &[PreToken<C, I>], word_offset: usize, vocab: &BTreeMap<I, Word<C>>,
+) -> PreMergeBuildBatch<I>
+where
+  I: Copy + Eq + Hash + Ord,
+{
+  let mut batch = PreMergeBuildBatch::default();
+  for (local_word_idx, word) in words.iter().enumerate() {
+    let word_idx = (word_offset + local_word_idx) as u64;
+    for unit in word.idxs.iter().copied() {
+      if !vocab.contains_key(&unit) {
+        *batch.initial_freqs.entry(unit).or_default() += word.freq;
+      }
+    }
+    for tp in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
+      let entry = batch.pairs.entry(tp).or_default();
+      entry.freq += word.freq;
+      // A pair records each word once, even when it occurs repeatedly in that word.
+      if entry.occurs_in.last().copied() != Some(word_idx) {
+        entry.occurs_in.push(word_idx);
+      }
+    }
+  }
+  batch
+}
+
+fn pre_merge_build_ranges<C, I>(
+  words: &[PreToken<C, I>], max_units: usize,
+) -> Vec<PreMergeBuildRange> {
+  let max_units = max_units.max(1);
+  let mut ranges = Vec::new();
+  let mut start = 0;
+  let mut units = 0usize;
+  for (word_idx, word) in words.iter().enumerate() {
+    let word_units = word.idxs.len().max(1);
+    if word_idx > start && units.saturating_add(word_units) > max_units {
+      ranges.push(PreMergeBuildRange {
+        words: start..word_idx,
+        units,
+      });
+      start = word_idx;
+      units = 0;
+    }
+    units = units.saturating_add(word_units);
+  }
+  if start < words.len() {
+    ranges.push(PreMergeBuildRange {
+      words: start..words.len(),
+      units,
+    });
+  }
+  ranges
+}
 
 impl<C, I: IdxLike> BpeTrainer<C, I>
 where
@@ -441,9 +528,23 @@ where
   ///
   /// This computes merge frequencies and document-occurrence sets used by [`Train::step`].
   pub fn _build_pre_merges(&mut self) {
+    let parallel = self.words.len() >= PARALLEL_INIT_MIN_WORDS && rayon::current_num_threads() > 1;
+    self._build_pre_merges_with_options(parallel, PARALLEL_INIT_CHUNK_UNITS);
+  }
+
+  fn _build_pre_merges_with_options(&mut self, parallel: bool, chunk_units: usize) {
     debug!("Initializing BPE training with {} words", self.words.len());
     self.pre_merges.clear();
     self.merge_heap.clear();
+    if parallel {
+      self._build_pre_merges_parallel(chunk_units);
+    } else {
+      self._build_pre_merges_sequential();
+    }
+    self.rebuild_merge_heap();
+  }
+
+  fn _build_pre_merges_sequential(&mut self) {
     let mut vocab_contents = None;
     let mut materialized_initial_units = AHashSet::new();
     let vocab_get = |i: I| {
@@ -451,55 +552,121 @@ where
     };
     let i_none = I::from_u64(u64::MAX);
     let empty_word = Vec::<C>::new().to_word();
-    for (i, word) in self.words.iter().enumerate() {
-      // for single char tokens
-      // this for loop should takes no effects then <C=u8>.
-      // note: all idx in vocab should be CharIdx::Idx
-      for j in word.idxs.iter() {
-        // This fast path covers byte training and avoids building a reverse
-        // content set for it.
-        if self.vocab.contains_key(j) || materialized_initial_units.contains(j) {
+    for (word_idx, word) in self.words.iter().enumerate() {
+      for unit in word.idxs.iter().copied() {
+        if self.vocab.contains_key(&unit) || materialized_initial_units.contains(&unit) {
           continue;
         }
-        let tp = (i_none, *j);
+        let tp = (i_none, unit);
         if let Some(merge) = self.pre_merges.get_mut(&tp) {
           merge.data.freq += word.freq;
           continue;
         }
 
-        // Character-backed units do not use their eventual numeric vocabulary
-        // id inside `self.words`. Resolve content only on the first encounter
-        // instead of allocating and searching once per unit occurrence.
-        let content = vocab_get(*j).unwrap();
+        let content = vocab_get(unit).unwrap();
         // Unicode units remain CharIdx::Char in the word inventory after they
         // receive a numeric vocab id, so compare content when training resumes.
         if vocab_contents
           .get_or_insert_with(|| self.vocab.values().cloned().collect::<BTreeSet<_>>())
           .contains(&content)
         {
-          materialized_initial_units.insert(*j);
+          materialized_initial_units.insert(unit);
           continue;
         }
-        // for unicode, j should be CharIdx::Char
-        // Set merge.target = Some(j) to indicate this is a single char token.
-        // See also [`Self::step`].
-        let mut merge = Merge::new(tp, (empty_word.clone(), content)).with_target(*j);
+        let mut merge = Merge::new(tp, (empty_word.clone(), content)).with_target(unit);
         merge.data.freq = word.freq;
         self.pre_merges.insert(tp, merge);
       }
-      for (j1, j2) in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
-        let tp = (j1, j2);
+      for tp in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
         let merge = self.pre_merges.entry(tp).or_insert_with(|| {
-          let content = (
-            vocab_get(j1).unwrap(),
-            vocab_get(j2).unwrap(),
-          );
-          Merge::new(tp, content)
+          Merge::new(tp, (vocab_get(tp.0).unwrap(), vocab_get(tp.1).unwrap()))
         });
-        merge.add(i as u64, word.freq);
+        merge.add(word_idx as u64, word.freq);
       }
     }
-    self.rebuild_merge_heap();
+  }
+
+  fn _build_pre_merges_parallel(&mut self, chunk_units: usize) {
+    let chunk_units = chunk_units.max(1);
+    let ranges = pre_merge_build_ranges(&self.words, chunk_units);
+    let ranges_per_wave = rayon::current_num_threads().clamp(1, PARALLEL_INIT_MAX_BATCHES);
+    let i_none = I::from_u64(u64::MAX);
+    let empty_word = Vec::<C>::new().to_word();
+    let vocab = &self.vocab;
+    let vocab_get = |i: I| {
+      vocab.get(&i).cloned().or_else(|| i.idx_to_word()).ok_or_else(|| MyError::OovIdx(i.to_u64()))
+    };
+    let mut vocab_contents = None;
+    let mut materialized_initial_units = AHashSet::new();
+
+    let mut range_idx = 0;
+    while range_idx < ranges.len() {
+      // Process bounded waves so temporary maps do not scale with the whole corpus.
+      // A single oversized word cannot be split without changing its occurrence id.
+      let wave_len = if ranges[range_idx].units > chunk_units {
+        1
+      } else {
+        ranges[range_idx..]
+          .iter()
+          .take(ranges_per_wave)
+          .take_while(|range| range.units <= chunk_units)
+          .count()
+          .max(1)
+      };
+      let range_wave = &ranges[range_idx..range_idx + wave_len];
+      let batches = range_wave
+        .par_iter()
+        .map(|range| {
+          collect_pre_merge_build_batch(
+            &self.words[range.words.clone()],
+            range.words.start,
+            vocab,
+          )
+        })
+        .collect::<Vec<_>>();
+
+      for batch in batches {
+        for (unit, freq) in batch.initial_freqs {
+          if materialized_initial_units.contains(&unit) {
+            continue;
+          }
+          let tp = (i_none, unit);
+          match self.pre_merges.entry(tp) {
+            Entry::Occupied(mut entry) => entry.get_mut().data.freq += freq,
+            Entry::Vacant(entry) => {
+              let content = vocab_get(unit).unwrap();
+              if vocab_contents
+                .get_or_insert_with(|| vocab.values().cloned().collect::<BTreeSet<_>>())
+                .contains(&content)
+              {
+                materialized_initial_units.insert(unit);
+                continue;
+              }
+              let mut merge = Merge::new(tp, (empty_word.clone(), content)).with_target(unit);
+              merge.data.freq = freq;
+              entry.insert(merge);
+            }
+          }
+        }
+
+        for (tp, data) in batch.pairs {
+          match self.pre_merges.entry(tp) {
+            Entry::Occupied(mut entry) => {
+              let merge = entry.get_mut();
+              merge.data.freq += data.freq;
+              merge.data.occurs_in.extend(data.occurs_in);
+            }
+            Entry::Vacant(entry) => {
+              let mut merge = Merge::new(tp, (vocab_get(tp.0).unwrap(), vocab_get(tp.1).unwrap()));
+              merge.data.freq = data.freq;
+              merge.data.occurs_in.extend(data.occurs_in);
+              entry.insert(merge);
+            }
+          }
+        }
+      }
+      range_idx += wave_len;
+    }
   }
 
   fn _set_vocab_idx(&mut self, start_idx: I) {
@@ -752,6 +919,72 @@ mod tests {
     }
   }
 
+  fn pre_merge_snapshot<C, I>(
+    bpe: &BpeTrainer<C, I>,
+  ) -> BTreeMap<(I, I), (String, String, Option<I>, Freq, Vec<u64>)>
+  where
+    I: Copy + Ord,
+    Word<C>: WordDebugExt,
+  {
+    bpe
+      .pre_merges
+      .iter()
+      .map(|(tp, merge)| {
+        (
+          *tp,
+          (
+            merge.content.0.debug_display(),
+            merge.content.1.debug_display(),
+            merge.target,
+            merge.data.freq,
+            merge.data.occurs_in_vec(),
+          ),
+        )
+      })
+      .collect()
+  }
+
+  fn assert_unicode_trainers_equal(
+    actual: &BpeTrainer<Character, CharIdx>, expected: &BpeTrainer<Character, CharIdx>,
+  ) {
+    let vocab = |trainer: &BpeTrainer<Character, CharIdx>| {
+      trainer
+        .vocab
+        .iter()
+        .map(|(idx, word)| (*idx, word.debug_display()))
+        .collect::<Vec<_>>()
+    };
+    let merges = |trainer: &BpeTrainer<Character, CharIdx>| {
+      trainer
+        .merges
+        .iter()
+        .map(|merge| {
+          (
+            merge.tp,
+            merge.target,
+            merge.content.0.debug_display(),
+            merge.content.1.debug_display(),
+            merge.data.freq,
+            merge.data.occurs_in_vec(),
+          )
+        })
+        .collect::<Vec<_>>()
+    };
+    let words = |trainer: &BpeTrainer<Character, CharIdx>| {
+      trainer
+        .words
+        .iter()
+        .map(|word| (word.src.debug_display(), word.idxs.clone(), word.freq))
+        .collect::<Vec<_>>()
+    };
+
+    assert_eq!(vocab(actual), vocab(expected));
+    assert_eq!(merges(actual), merges(expected));
+    assert_eq!(words(actual), words(expected));
+    actual.validate_model().unwrap();
+    expected.validate_model().unwrap();
+  }
+
   #[test]
   fn test_bpe_merge() {
     _test_bpe_merge(&[("abcd", 5), ("abcdbcd", 30), ("abcbcdab", 200)], &[(("b", "c"), vec![
@@ -858,6 +1091,122 @@ mod tests {
     assert!(!crate::bpe::utils::should_parallel_merge(3, 3, None));
     assert!(crate::bpe::utils::should_parallel_merge(3, 3, Some(1)));
     assert_eq!(train(None), train(Some(1)));
+  }
+
+  #[test]
+  fn test_parallel_initialization_matches_sequential() {
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+
+    let mut byte_sequential = BpeTrainer::<u8, Idx>::from_words(
+      [("aaaa", 3), ("aa", 5), ("bbbbbb", 2)],
+      &[],
+    );
+    let mut byte_parallel = BpeTrainer::<u8, Idx>::from_words(
+      [("aaaa", 3), ("aa", 5), ("bbbbbb", 2)],
+      &[],
+    );
+    byte_sequential._build_pre_merges_with_options(false, 4);
+    pool.install(|| byte_parallel._build_pre_merges_with_options(true, 4));
+
+    assert_eq!(pre_merge_snapshot(&byte_parallel), pre_merge_snapshot(&byte_sequential));
+    let aa = (b'a' as Idx, b'a' as Idx);
+    assert_eq!(byte_parallel.pre_merges.get(&aa).unwrap().data.freq, 14);
+    assert_eq!(byte_parallel.pre_merges.get(&aa).unwrap().data.occurs_in_vec(), [0, 1]);
+
+    let words = [("你你", 3), ("你", 5), ("你好你", 7)];
+    let mut unicode_sequential = BpeTrainer::<Character, CharIdx>::from_words(words, &[]);
+    let mut unicode_parallel = BpeTrainer::<Character, CharIdx>::from_words(words, &[]);
+    unicode_sequential._build_pre_merges_with_options(false, 2);
+    pool.install(|| unicode_parallel._build_pre_merges_with_options(true, 2));
+
+    assert_eq!(pre_merge_snapshot(&unicode_parallel), pre_merge_snapshot(&unicode_sequential));
+    let initial_ni = (CharIdx::Idx(u32::MAX), CharIdx::Char('你'));
+    assert_eq!(unicode_parallel.pre_merges.get(&initial_ni).unwrap().data.freq, 25);
+
+    unicode_sequential.step().unwrap();
+    unicode_parallel.step().unwrap();
+    unicode_sequential._build_pre_merges_with_options(false, 2);
+    pool.install(|| unicode_parallel._build_pre_merges_with_options(true, 2));
+
+    assert_eq!(pre_merge_snapshot(&unicode_parallel), pre_merge_snapshot(&unicode_sequential));
+    assert!(!unicode_parallel.pre_merges.contains_key(&initial_ni));
+
+    let signed_words = [("", 9), ("aa", 3), ("aa", 0), ("aa", -3), ("bb", 1)];
+    let mut signed_sequential = BpeTrainer::<u8, Idx>::from_words(signed_words, &[]);
+    let mut signed_parallel = BpeTrainer::<u8, Idx>::from_words(signed_words, &[]);
+    signed_sequential._build_pre_merges_with_options(false, 1);
+    pool.install(|| signed_parallel._build_pre_merges_with_options(true, 1));
+    assert_eq!(pre_merge_snapshot(&signed_parallel), pre_merge_snapshot(&signed_sequential));
+    assert_eq!(signed_parallel.pre_merges.get(&aa).unwrap().data.freq, 0);
+    assert_eq!(signed_parallel.pre_merges.get(&aa).unwrap().data.occurs_in_vec(), [1, 2, 3]);
+    signed_parallel.step().unwrap();
+    assert_eq!(signed_parallel.merges.last().unwrap().content.0.debug_display(), "b");
+    assert_eq!(signed_parallel.merges.last().unwrap().content.1.debug_display(), "b");
+    assert!(signed_parallel.step().is_err());
+
+    let signed_unicode_words = [("你", 3), ("你", 0), ("你", -3), ("ab", 1)];
+    let mut signed_unicode_sequential = BpeTrainer::<Character, CharIdx>::from_words(
+      signed_unicode_words,
+      &[],
+    );
+    let mut signed_unicode_parallel = BpeTrainer::<Character, CharIdx>::from_words(
+      signed_unicode_words,
+      &[],
+    );
+    signed_unicode_sequential._build_pre_merges_with_options(false, 1);
+    pool.install(|| signed_unicode_parallel._build_pre_merges_with_options(true, 1));
+    assert_eq!(
+      pre_merge_snapshot(&signed_unicode_parallel),
+      pre_merge_snapshot(&signed_unicode_sequential),
+    );
+    let signed_initial_ni = (CharIdx::Idx(u32::MAX), CharIdx::Char('你'));
+    assert_eq!(signed_unicode_parallel.pre_merges.get(&signed_initial_ni).unwrap().data.freq, 0);
+    signed_unicode_parallel.step().unwrap();
+    assert_eq!(signed_unicode_parallel.merges.last().unwrap().content.0.debug_display(), "a");
+    assert_eq!(signed_unicode_parallel.merges.last().unwrap().content.1.debug_display(), "b");
+    assert!(signed_unicode_parallel.step().is_err());
+  }
+
+  #[test]
+  fn test_parallel_initialization_preserves_training_across_thread_counts() {
+    let words = [
+      ("你好你好", 3),
+      ("您好", 3),
+      ("世界", 2),
+      ("你世", 2),
+      ("界好", 2),
+      ("abab", 1),
+    ];
+
+    for tie_break in [TieBreak::SmallestPairId, TieBreak::LargestContent] {
+      let config = BpeTrainerConfig {
+        tie_break,
+        ..BpeTrainerConfig::default()
+      };
+      let mut sequential = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+        words,
+        &[],
+        config,
+      );
+      sequential._build_pre_merges_with_options(false, 2);
+      while sequential.step().is_ok() {}
+
+      for threads in [1, 2, 4] {
+        let mut parallel = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+          words,
+          &[],
+          config,
+        );
+        rayon::ThreadPoolBuilder::new()
+          .num_threads(threads)
+          .build()
+          .unwrap()
+          .install(|| parallel._build_pre_merges_with_options(true, 2));
+        while parallel.step().is_ok() {}
+
+        assert_unicode_trainers_equal(&parallel, &sequential);
+      }
+    }
   }
 
   #[test]
