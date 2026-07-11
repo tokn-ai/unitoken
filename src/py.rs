@@ -6,10 +6,20 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::{PyAny, PyIterator}};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeModel, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
+
+enum BpeModelInner {
+  Byte(BpeModel<u8, Idx>),
+  Unicode(BpeModel<Character, CharIdx>),
+}
+
+#[pyclass]
+pub struct BpeModelBase {
+  inner: BpeModelInner,
+}
 
 #[allow(dead_code)]
 /// this is just a reference for impl blocks, not directly used
@@ -22,8 +32,72 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
   fn get_vocab(&self) -> Vocabulary;
-  fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
-  fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()>;
+  fn validate_model(&self, py: Python) -> PyResult<BpeModelBase>;
+}
+
+fn save_model_vocab<C, I>(model: &BpeModel<C, I>, path: &PathBuf, spec: &dyn Spec<C, I>) -> MyResult<()> {
+  let mut file = std::fs::File::create(path)?;
+  let mut writer = std::io::BufWriter::new(&mut file);
+  model.save_vocab_json(spec, &mut writer)?;
+  std::io::Write::flush(&mut writer)?;
+  Ok(())
+}
+
+fn save_model_merges<C, I>(model: &BpeModel<C, I>, path: &PathBuf, spec: &dyn Spec<C, I>) -> MyResult<()> {
+  let mut file = std::fs::File::create(path)?;
+  let mut writer = std::io::BufWriter::new(&mut file);
+  model.save_merges_txt(spec, &mut writer)?;
+  std::io::Write::flush(&mut writer)?;
+  Ok(())
+}
+
+fn map_model_error(error: MyError) -> PyErr {
+  let message = error.to_string();
+  match error {
+    MyError::Io(_) => pyo3::exceptions::PyIOError::new_err(message),
+    _ => pyo3::exceptions::PyValueError::new_err(message),
+  }
+}
+
+#[pymethods]
+impl BpeModelBase {
+  #[getter]
+  /// Atomic BPE unit used by this model.
+  pub fn unit(&self) -> &'static str {
+    match self.inner {
+      BpeModelInner::Byte(_) => "byte",
+      BpeModelInner::Unicode(_) => "unicode",
+    }
+  }
+
+  /// Return a view of the validated vocabulary.
+  pub fn get_vocab(&self) -> Vocabulary {
+    let inner: Box<dyn VocabularyImpl + Send + Sync> = match &self.inner {
+      BpeModelInner::Byte(model) => Box::new(VocabularyInner::new(model.vocab())),
+      BpeModelInner::Unicode(model) => Box::new(VocabularyInner::new(model.vocab())),
+    };
+    Vocabulary { inner }
+  }
+
+  /// Save the validated vocabulary JSON.
+  pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
+    py.detach(|| match (&self.inner, format) {
+      (BpeModelInner::Byte(model), "gpt2") => save_model_vocab(model, &path, &Gpt2Spec),
+      (BpeModelInner::Byte(model), "unitoken") => save_model_vocab(model, &path, &UnitokenSpec),
+      (BpeModelInner::Unicode(model), "unitoken") => save_model_vocab(model, &path, &UnitokenSpec),
+      _ => Err(MyError::SpecError(format!("format {format} is not compatible with unit {}", self.unit()))),
+    }).map_err(map_model_error)
+  }
+
+  /// Save the validated merge list.
+  pub fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
+    py.detach(|| match (&self.inner, format) {
+      (BpeModelInner::Byte(model), "gpt2") => save_model_merges(model, &path, &Gpt2Spec),
+      (BpeModelInner::Byte(model), "unitoken") => save_model_merges(model, &path, &UnitokenSpec),
+      (BpeModelInner::Unicode(model), "unitoken") => save_model_merges(model, &path, &UnitokenSpec),
+      _ => Err(MyError::SpecError(format!("format {format} is not compatible with unit {}", self.unit()))),
+    }).map_err(map_model_error)
+  }
 }
 
 fn trainer_config(
@@ -137,30 +211,11 @@ impl BpeTrainer_u8_Idx {
     }
   }
 
-  /// Save the vocabulary JSON using the requested format.
-  pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
-    py.detach(|| {
-      let mut file = std::fs::File::create(&path)?;
-      let mut writer = std::io::BufWriter::new(&mut file);
-      match format {
-        "gpt2" => self.inner.save_vocab_json(&Gpt2Spec, &mut writer),
-        "unitoken" => self.inner.save_vocab_json(&UnitokenSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
-      }
-    }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
-  }
-
-  /// Save merges using the requested format.
-  pub fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
-    py.detach(|| {
-      let mut file = std::fs::File::create(&path)?;
-      let mut writer = std::io::BufWriter::new(&mut file);
-      match format {
-        "gpt2" => self.inner.save_merges_txt(&Gpt2Spec, &mut writer),
-        "unitoken" => self.inner.save_merges_txt(&UnitokenSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
-      }
-    }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+  /// Validate the current state and return an immutable model snapshot.
+  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
+    py.detach(|| self.inner.validate_model())
+      .map(|model| BpeModelBase { inner: BpeModelInner::Byte(model) })
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 }
 
@@ -241,34 +296,11 @@ impl BpeTrainer_Character_CharIdx {
     }
   }
 
-  /// Save the vocabulary JSON to `path`.
-  ///
-  /// Note: `"gpt2"` is not supported for the character tokenizer.
-  pub fn save_vocab(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
-    py.detach(|| {
-      let mut file = std::fs::File::create(&path)?;
-      let mut writer = std::io::BufWriter::new(&mut file);
-      match format {
-        "gpt2" => Err(MyError::SpecError("gpt2 format is not supported for the Unicode unit".to_string())),
-        "unitoken" => self.inner.save_vocab_json(&UnitokenSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
-      }
-    }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
-  }
-
-  /// Save merges to `path`.
-  ///
-  /// Note: `"gpt2"` is not supported for the character tokenizer.
-  pub fn save_merges_txt(&self, py: Python, path: PathBuf, format: &str) -> PyResult<()> {
-    py.detach(|| {
-      let mut file = std::fs::File::create(&path)?;
-      let mut writer = std::io::BufWriter::new(&mut file);
-      match format {
-        "gpt2" => Err(MyError::SpecError("gpt2 format is not supported for the Unicode unit".to_string())),
-        "unitoken" => self.inner.save_merges_txt(&UnitokenSpec, &mut writer),
-        _ => Err(MyError::SpecError(format!("Unknown format: {}", format))),
-      }
-    }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+  /// Validate the current state and return an immutable model snapshot.
+  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
+    py.detach(|| self.inner.validate_model())
+      .map(|model| BpeModelBase { inner: BpeModelInner::Unicode(model) })
+      .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
 }
 

@@ -270,8 +270,9 @@ pub fn _bpe_save_train<C, I>(
   let vocab_file = std::fs::File::create(out_dir.join(vocab_filename)).unwrap();
   let merges_file = std::fs::File::create(out_dir.join(merges_filename)).unwrap();
 
-  bpe.save_vocab_json(spec, vocab_file).unwrap();
-  bpe.save_merges_txt(spec, merges_file).unwrap();
+  let model = bpe.validate_model().unwrap();
+  model.save_vocab_json(spec, vocab_file).unwrap();
+  model.save_merges_txt(spec, merges_file).unwrap();
 }
 
 pub struct BpeTrainParams {

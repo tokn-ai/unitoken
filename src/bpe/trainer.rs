@@ -2,7 +2,7 @@ use std::{cmp::Ordering, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap},
 
 use ahash::AHashMap;
 
-use crate::{MyError, MyResult, spec::Spec, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
+use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
 
@@ -32,8 +32,10 @@ impl InitialAlphabet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TieBreak {
   /// Resolve equal frequencies by the smallest pair ids, matching Hugging Face BPE.
+  /// Initial units are prioritized before this pair ordering is applied.
   SmallestPairId,
   /// Resolve equal frequencies by lexicographically largest token content.
+  /// Initial units are prioritized before this content ordering is applied.
   LargestContent,
 }
 
@@ -114,7 +116,14 @@ struct MergeCandidate<C, I> {
   freq: Freq,
   tp: (I, I),
   content: Option<(Word<C>, Word<C>)>,
+  kind: MergeCandidateKind,
   tie_break: TieBreak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MergeCandidateKind {
+  Pair,
+  InitialUnit,
 }
 
 impl<C, I> MergeCandidate<C, I> {
@@ -129,6 +138,11 @@ impl<C, I> MergeCandidate<C, I> {
         TieBreak::SmallestPairId => None,
         TieBreak::LargestContent => Some(merge.content.clone()),
       },
+      kind: if merge.target.is_some() {
+        MergeCandidateKind::InitialUnit
+      } else {
+        MergeCandidateKind::Pair
+      },
       tie_break,
     }
   }
@@ -136,16 +150,16 @@ impl<C, I> MergeCandidate<C, I> {
 
 impl<C: Ord, I: Ord> Ord for MergeCandidate<C, I> {
   fn cmp(&self, other: &Self) -> Ordering {
-    match self.tie_break {
-      TieBreak::SmallestPairId => self
-        .freq
-        .cmp(&other.freq)
-        .then_with(|| other.tp.cmp(&self.tp)),
-      TieBreak::LargestContent => self
-        .freq
-        .cmp(&other.freq)
-        .then_with(|| self.content.as_ref().unwrap().cmp(other.content.as_ref().unwrap())),
-    }
+    self
+      .freq
+      .cmp(&other.freq)
+      // Initial units must be available before pair merges. Prefer them on an
+      // equal-frequency boundary, then apply the configured tie-break.
+      .then_with(|| self.kind.cmp(&other.kind))
+      .then_with(|| match self.tie_break {
+        TieBreak::SmallestPairId => other.tp.cmp(&self.tp),
+        TieBreak::LargestContent => self.content.as_ref().unwrap().cmp(other.content.as_ref().unwrap()),
+      })
   }
 }
 
@@ -275,14 +289,127 @@ where
     I::from_u64(start_idx + length as u64)
   }
 
-  /// Serialize the current vocabulary to JSON using `spec`.
-  pub fn save_vocab_json<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
-    spec.encode_vocab(&mut w, &self.vocab)
-  }
+  /// Validate the current state and return an immutable model snapshot.
+  ///
+  /// Merge targets are removed from the initial vocabulary, then introduced by
+  /// replaying merges in rank order. This catches missing operands and merges
+  /// emitted before their dependencies.
+  pub fn validate_model(&self) -> MyResult<BpeModel<C, I>>
+  where
+    C: CharSplit + Clone + Ord,
+    I: HasChar<C>,
+  {
+    let mut vocab_contents = BTreeSet::new();
+    for token in self.vocab.values() {
+      let normalized = C::from_vec_u8(&C::to_vec_u8(token));
+      if !vocab_contents.insert(normalized) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "duplicate vocabulary token {}",
+          token.debug_display(),
+        )));
+      }
+    }
+    drop(vocab_contents);
 
-  /// Serialize the current merge list to a text format using `spec`.
-  pub fn save_merges_txt<W: std::io::Write>(&self, spec: &dyn Spec<C, I>, mut w: W) -> MyResult<()> {
-    spec.encode_merges(&mut w, &self.merges)
+    let mut target_ids = BTreeSet::new();
+    let mut outputs = Vec::with_capacity(self.merges.len());
+    for (rank, merge) in self.merges.iter().enumerate() {
+      for (side, idx, expected) in [
+        ("left", merge.tp.0, &merge.content.0),
+        ("right", merge.tp.1, &merge.content.1),
+      ] {
+        let Some(actual) = self.vocab.get(&idx).cloned().or_else(|| idx.idx_to_word()) else {
+          return Err(MyError::InvalidBpeModel(format!(
+            "merge {rank} {side} operand id is missing from the vocabulary",
+          )));
+        };
+        if &actual != expected {
+          return Err(MyError::InvalidBpeModel(format!(
+            "merge {rank} {side} operand id resolves to {}, expected {}",
+            actual.debug_display(),
+            expected.debug_display(),
+          )));
+        }
+      }
+
+      let Some(target) = merge.target else {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} has no target",
+        )));
+      };
+      if !target_ids.insert(target) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} reuses an earlier target",
+        )));
+      }
+
+      let output = merge.merged_content();
+      let Some(target_content) = self.vocab.get(&target) else {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} target is missing from the vocabulary",
+        )));
+      };
+      if target_content != &output {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} target is {}, expected {}",
+          target_content.debug_display(),
+          output.debug_display(),
+        )));
+      }
+      outputs.push(output);
+    }
+
+    let mut available = self
+      .vocab
+      .iter()
+      .filter(|(idx, _)| !target_ids.contains(idx))
+      .map(|(_, token)| token.clone())
+      .collect::<BTreeSet<_>>();
+
+    for (rank, (merge, output)) in self.merges.iter().zip(outputs).enumerate() {
+      if !available.contains(&merge.content.0) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} left operand {} is not an initial token or an earlier merge",
+          merge.content.0.debug_display(),
+        )));
+      }
+      if !available.contains(&merge.content.1) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} right operand {} is not an initial token or an earlier merge",
+          merge.content.1.debug_display(),
+        )));
+      }
+      if !available.insert(output.clone()) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} does not introduce a new token {}",
+          output.debug_display(),
+        )));
+      }
+    }
+
+    let vocab_by_content = self
+      .vocab
+      .iter()
+      .map(|(idx, token)| (token.clone(), *idx))
+      .collect::<BTreeMap<_, _>>();
+    let merges = self
+      .merges
+      .iter()
+      .map(|merge| {
+        let tp = (
+          *vocab_by_content.get(&merge.content.0).unwrap(),
+          *vocab_by_content.get(&merge.content.1).unwrap(),
+        );
+        let mut model_merge = Merge::new(tp, merge.content.clone()).with_target(merge.target.unwrap());
+        model_merge.data.freq = merge.data.freq;
+        model_merge
+      })
+      .collect();
+    Ok(BpeModel::new(
+      self.special_tokens.clone(),
+      self.vocab.clone(),
+      merges,
+    ))
   }
 }
 
@@ -317,31 +444,37 @@ where
     debug!("Initializing BPE training with {} words", self.words.len());
     self.pre_merges.clear();
     self.merge_heap.clear();
+    let mut vocab_contents = None;
     let vocab_get = |i: I| {
       self.vocab.get(&i).cloned().or_else(|| i.idx_to_word()).ok_or_else(|| MyError::OovIdx(i.to_u64()))
     };
     let i_none = I::from_u64(u64::MAX);
-    let w_none = char::from_u32(0x10FFFF).unwrap().to_string().to_word();
+    let empty_word = Vec::<C>::new().to_word();
     for (i, word) in self.words.iter().enumerate() {
       // for single char tokens
       // this for loop should takes no effects then <C=u8>.
       // note: all idx in vocab should be CharIdx::Idx
       for j in word.idxs.iter() {
-        // ascii chars, j should be CharIdx::Idx
+        // This fast path covers byte training and avoids building a reverse
+        // content set for it.
         if self.vocab.contains_key(j) {
+          continue;
+        }
+        let content = vocab_get(*j).unwrap();
+        // Unicode units remain CharIdx::Char in the word inventory after they
+        // receive a numeric vocab id, so compare content when training resumes.
+        if vocab_contents
+          .get_or_insert_with(|| self.vocab.values().cloned().collect::<BTreeSet<_>>())
+          .contains(&content)
+        {
           continue;
         }
         // for unicode, j should be CharIdx::Char
         let tp = (i_none, *j);
         let merge = self.pre_merges.entry(tp).or_insert_with(|| {
-          let content = (
-            // w_none goes 0x10FFFF, which should have precedence over any valid pair when sort. (lexicographically largest)
-            w_none.clone(),
-            vocab_get(*j).unwrap(),
-          );
           // set merge.target = Some(j) to indicate this is a single char token.
           // see also [`Self::step`]
-          Merge::new(tp, content).with_target(*j)
+          Merge::new(tp, (empty_word.clone(), content)).with_target(*j)
         });
         merge.data.freq += word.freq;
       }
@@ -412,6 +545,7 @@ where
       if candidate.content.as_ref().is_some_and(|content| merge.content != *content) {
         continue;
       }
+
       return self.pre_merges.remove(&candidate.tp);
     }
     None
@@ -757,6 +891,133 @@ mod tests {
   }
 
   #[test]
+  fn test_unicode_initial_units_precede_dependent_merges() {
+    for (tie_break, expected_tail) in [
+      (TieBreak::SmallestPairId, ["你", "好", "你好"]),
+      (TieBreak::LargestContent, ["好", "你", "你好"]),
+    ] {
+      let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+        [("你好", 1)],
+        &[],
+        BpeTrainerConfig {
+          tie_break,
+          ..BpeTrainerConfig::default()
+        },
+      );
+
+      for vocab_size in 257..=259 {
+        // Repeated calls rebuild the candidate heap and must not materialize a
+        // Unicode unit more than once.
+        bpe.train_until(vocab_size).unwrap();
+        let tail = bpe
+          .vocab
+          .iter()
+          .filter_map(|(idx, token)| match idx {
+            CharIdx::Idx(idx) if *idx >= 256 => Some(token.debug_display()),
+            _ => None,
+          })
+          .collect::<Vec<_>>();
+        assert_eq!(tail, expected_tail[..vocab_size - 256]);
+        assert_eq!(bpe.merges.len(), vocab_size.saturating_sub(258));
+        bpe.validate_model().unwrap();
+      }
+
+      let merge = bpe.merges.first().unwrap();
+      assert_eq!(merge.content.0.debug_display(), "你");
+      assert_eq!(merge.content.1.debug_display(), "好");
+      assert_eq!(merge.merged_content().debug_display(), "你好");
+      let model = bpe.validate_model().unwrap();
+      let model_merge = model.merges().first().unwrap();
+      assert!(matches!(model_merge.tp, (CharIdx::Idx(_), CharIdx::Idx(_))));
+      assert!(model_merge.data.occurs_in.is_empty());
+    }
+  }
+
+  #[test]
+  fn test_unicode_initial_unit_priority_does_not_depend_on_sentinel_content() {
+    let input = format!("{}你", char::MAX);
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+      [(input, 1)],
+      &[],
+      BpeTrainerConfig {
+        tie_break: TieBreak::LargestContent,
+        ..BpeTrainerConfig::default()
+      },
+    );
+
+    bpe.train_until(258).unwrap();
+
+    assert!(bpe.merges.is_empty());
+    bpe.validate_model().unwrap();
+  }
+
+  #[test]
+  fn test_unicode_initial_unit_wins_unrelated_frequency_tie() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("ab", 1), ("你", 1)],
+      &[],
+    );
+
+    bpe.train_until(257).unwrap();
+
+    assert_eq!(bpe.vocab.get(&CharIdx::Idx(256)).unwrap().debug_display(), "你");
+    assert!(bpe.merges.is_empty());
+    bpe.validate_model().unwrap();
+  }
+
+  #[test]
+  fn test_validation_rejects_merge_before_its_dependency() {
+    let mut bpe = BpeTrainer::<u8, Idx>::new(vec![], vec![]);
+    let a: Word<u8> = "a".to_word();
+    let b: Word<u8> = "b".to_word();
+    let c: Word<u8> = "c".to_word();
+    let ab: Word<u8> = "ab".to_word();
+    let abc: Word<u8> = "abc".to_word();
+    bpe.vocab.insert(256, ab.clone());
+    bpe.vocab.insert(257, abc);
+    bpe.merges = vec![
+      Merge::new((256, b'c' as Idx), (ab.clone(), c)).with_target(257),
+      Merge::new((b'a' as Idx, b'b' as Idx), (a, b)).with_target(256),
+    ];
+
+    let error = bpe.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains("merge 0 left operand ab"));
+  }
+
+  #[test]
+  fn test_validation_rejects_operand_id_content_mismatch() {
+    let mut bpe = BpeTrainer::<u8, Idx>::new(vec![], vec![]);
+    let a: Word<u8> = "a".to_word();
+    let b: Word<u8> = "b".to_word();
+    let ab: Word<u8> = "ab".to_word();
+    bpe.vocab.insert(256, ab);
+    bpe.merges = vec![
+      Merge::new((b'a' as Idx, b'c' as Idx), (a, b)).with_target(256),
+    ];
+
+    let error = bpe.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains("merge 0 right operand id resolves to c, expected b"));
+  }
+
+  #[test]
+  fn test_validation_rejects_tokens_that_normalize_to_same_unit_content() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::new(vec![], vec![]);
+    let unicode: Word<Character> = "é".to_word();
+    let bytes = vec![Character::Byte(0xc3), Character::Byte(0xa9)].to_word();
+    bpe.vocab.insert(CharIdx::Idx(256), unicode);
+    bpe.vocab.insert(CharIdx::Idx(257), bytes);
+
+    let error = bpe.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains("duplicate vocabulary token"));
+  }
+
+  #[test]
   fn test_bpe_from_words() {
     const NAME: &str = "tinystories_sample_5M";
     // const NAME: &str = "TinyStoriesV2-GPT4-train";
@@ -774,8 +1035,9 @@ mod tests {
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
     std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
-    bpe.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/vocab.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/merges.txt")).unwrap()).unwrap();
+    let model = bpe.validate_model().unwrap();
+    model.save_vocab_json(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/vocab.json")).unwrap()).unwrap();
+    model.save_merges_txt(&Gpt2Spec, std::fs::File::create(format!("out/models/{NAME}/merges.txt")).unwrap()).unwrap();
 
     let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.txt")).unwrap();
@@ -810,8 +1072,9 @@ mod tests {
       // println!("{} {} => {}", _printable(&m.content.0), _printable(&m.content.1), m.data.freq);
     }
     std::fs::create_dir_all(format!("out/models/{NAME}")).ok();
-    bpe.save_vocab_json(&spec, std::fs::File::create(format!("out/models/{NAME}/vocab.uni.json")).unwrap()).unwrap();
-    bpe.save_merges_txt(&spec, std::fs::File::create(format!("out/models/{NAME}/merges.uni.txt")).unwrap()).unwrap();
+    let model = bpe.validate_model().unwrap();
+    model.save_vocab_json(&spec, std::fs::File::create(format!("out/models/{NAME}/vocab.uni.json")).unwrap()).unwrap();
+    model.save_merges_txt(&spec, std::fs::File::create(format!("out/models/{NAME}/merges.uni.txt")).unwrap()).unwrap();
 
     let merges_txt = std::fs::read_to_string(format!("out/models/{NAME}/merges.uni.txt")).unwrap();
     let merges_expect_txt = std::fs::read_to_string(format!("fixtures/merges.{NAME}.uni.txt")).unwrap();

@@ -1,4 +1,5 @@
 from .trainer import BpeTrainer, FileFormat, Unit
+from .model import BpeModel
 from .encoder import BpeEncoder
 from .pretokenizer import BigramCounter, BoundaryMode, PreTokenizer, Source, UnicodeBigramMixedBoundary, WordCounter
 from .tiktoken_compat import (
@@ -17,6 +18,7 @@ except Exception:  # pragma: no cover
 
 __all__ = [
   "BpeTrainer",
+  "BpeModel",
   "BigramCounter",
   "BpeEncoder",
   "BoundaryMode",

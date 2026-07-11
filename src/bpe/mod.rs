@@ -1,10 +1,12 @@
 use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 pub mod trainer;
+pub mod model;
 pub mod encoder;
 pub mod utils;
 
 pub use trainer::{BpeTrainer, BpeTrainerConfig, InitialAlphabet, TieBreak};
+pub use model::BpeModel;
 pub use encoder::BpeEncoder;
 use utils::*;
 

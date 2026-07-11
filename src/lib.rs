@@ -37,6 +37,8 @@ pub enum MyError {
   SpecError(String),
   #[error("Bpe builder: {0}")]
   BpeBuilder(String),
+  #[error("Invalid BPE model: {0}")]
+  InvalidBpeModel(String),
   #[error("Frequency overflow")]
   FrequencyOverflow,
   #[error("Source batch error: {0}")]
