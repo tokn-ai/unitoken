@@ -49,6 +49,19 @@ python benchmarks/create_fineweb2_sample.py \
   --json out/data/fineweb2/fineweb2_1GiB.sample.json
 ```
 
+Count and persist an exact two-pass word inventory directly from Parquet:
+
+```bash
+python benchmarks/count_parquet_source.py \
+  --input-dir ~/NAS/ModelZoo/Corpus/FineWeb2/fineweb-2/data/cmn_Hani/train \
+  --size-bytes 5368709120 \
+  --json out/benchmarks/count_parquet_source/cmn_Hani_5GiB.json
+```
+
+The generated `_words.json` is written directly by Rust without constructing a
+Python dictionary. Reload it with `pretokenizer.load_word_counter(path)` and
+pass it to `trainer.add_word_counter(counter)` for native training ingestion.
+
 Example training comparison:
 
 ```bash

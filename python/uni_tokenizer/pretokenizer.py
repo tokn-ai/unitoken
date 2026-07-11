@@ -50,6 +50,10 @@ class PreTokenizer:
     """Create an empty mergeable word counter."""
     return self._inner.word_counter()
 
+  def load_word_counter(self, path: str | PathLike) -> WordCounter:
+    """Load an exact native word inventory saved by `WordCounter.save`."""
+    return self._inner.load_word_counter(path)
+
   def get_words(self, text: str) -> dict[str, int]:
     """Pretokenize text and return word frequencies."""
     return self._inner.get_words(text)

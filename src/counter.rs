@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, hash::Hash};
+use std::{collections::BTreeMap, hash::Hash, io::{Read, Write}};
 
 use ahash::AHashMap;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -246,6 +246,16 @@ impl WordCounter {
 
   pub fn take_counts(&mut self) -> AHashMap<String, Freq> {
     std::mem::take(&mut self.counts)
+  }
+
+  pub fn save<W: Write>(&self, writer: W) -> MyResult<()> {
+    serde_json::to_writer(writer, &self.counts)?;
+    Ok(())
+  }
+
+  pub fn load<R: Read>(pre_tokenizer: PreTokenizer, reader: R) -> MyResult<Self> {
+    let counts = serde_json::from_reader(reader)?;
+    Ok(Self { pre_tokenizer, counts })
   }
 
   pub fn counts(&self) -> &AHashMap<String, Freq> {

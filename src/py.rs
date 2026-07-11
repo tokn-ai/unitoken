@@ -398,6 +398,14 @@ impl PreTokenizer {
     WordCounter::new(self.clone())
   }
 
+  pub fn load_word_counter(&self, py: Python, path: PathBuf) -> PyResult<WordCounter> {
+    let pre_tokenizer = self.clone();
+    py.detach(|| {
+      let file = std::fs::File::open(path)?;
+      WordCounter::load(pre_tokenizer, std::io::BufReader::new(file))
+    }).map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))
+  }
+
   #[pyo3(name = "get_words_from_file", signature = (path, *, chunk_size=1048576, boundary="auto"))]
   /// Python wrapper for [`PreTokenizer::get_words_from_file`].
   pub fn py_get_words_from_file(
@@ -567,6 +575,15 @@ impl WordCounter {
   pub fn py_clear(&mut self) {
     WordCounter::clear(self)
   }
+
+  #[pyo3(name = "save")]
+  pub fn py_save(&self, py: Python, path: PathBuf) -> PyResult<()> {
+    py.detach(|| {
+      let file = std::fs::File::create(path)?;
+      self.save(std::io::BufWriter::new(file))
+    }).map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))
+  }
+
 }
 
 #[pyclass]

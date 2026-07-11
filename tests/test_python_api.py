@@ -121,3 +121,15 @@ def test_trainer_consumes_word_counter_without_changing_training(unit: str) -> N
   assert counter.len == 1
   counter.clear()
   assert counter.len == 0
+
+
+def test_word_counter_native_json_round_trip(tmp_path: Path) -> None:
+  pretokenizer = PreTokenizer([], pat_str=r"\S+")
+  counter = pretokenizer.word_counter()
+  counter.add_batch(["你好", "hello", "你好"])
+  path = tmp_path / "_words.json"
+
+  counter.save(path)
+  loaded = pretokenizer.load_word_counter(path)
+
+  assert loaded.words() == {"hello": 1, "你好": 2}
