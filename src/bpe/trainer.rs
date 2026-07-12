@@ -6,6 +6,8 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
+use super::hot_window::HotPairWindow;
+pub use super::hot_window::HotPairWindowStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialAlphabet {
@@ -73,15 +75,6 @@ impl BpeTrainerConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HotPairWindowStats {
-  pub hydration_scans: u64,
-  pub hydrated_word_entries: u64,
-  pub batch_prunes: u64,
-  pub prune_evictions: u64,
-  pub peak_resident_pairs: usize,
-}
-
 fn byte_level_alphabet_bytes() -> Vec<u8> {
   let mut pairs = (0u8..=255)
     .map(|byte| (byte, byte_to_unicode(byte)))
@@ -124,9 +117,7 @@ pub struct BpeTrainer<C, I> {
   pub merges: Vec<Merge<C, I>>,
   pub pre_merges: HashMap<(I, I), Merge<C, I>>,
   merge_heap: BinaryHeap<MergeCandidate<C, I>>,
-  hot_occurrences: AHashMap<(I, I), AHashSet<u64>>,
-  hot_admission_threshold: Option<Freq>,
-  hot_window_stats: HotPairWindowStats,
+  hot_window: HotPairWindow<I>,
   pub words: Vec<PreToken<C, I>>,
 }
 
@@ -473,6 +464,7 @@ where
     );
     let mut bpe = Self::empty();
     bpe.config = config;
+    bpe.hot_window.reset(config.hot_pair_window_size);
     bpe._vocab_insert_special_tokens(special_tokens);
     bpe._vocab_insert_all_single_byte();
     bpe.words = words;
@@ -679,19 +671,15 @@ impl<C, I> BpeTrainer<C, I> {
   }
 
   pub fn hot_pair_window_stats(&self) -> Option<&HotPairWindowStats> {
-    self.config.hot_pair_window_size.map(|_| &self.hot_window_stats)
+    self.hot_window.stats()
   }
 
   pub fn hot_resident_pairs(&self) -> usize {
-    self.hot_occurrences.len()
+    self.hot_window.len()
   }
 
   pub fn hot_occurrence_capacity(&self) -> usize {
-    self
-      .hot_occurrences
-      .values()
-      .map(|occurrences| occurrences.capacity())
-      .sum()
+    self.hot_window.occurrence_capacity()
   }
 
   /// Construct an empty trainer with no vocab, merges, or words.
@@ -705,9 +693,7 @@ impl<C, I> BpeTrainer<C, I> {
       merges: Vec::new(),
       pre_merges: HashMap::new(),
       merge_heap: BinaryHeap::new(),
-      hot_occurrences: AHashMap::new(),
-      hot_admission_threshold: None,
-      hot_window_stats: HotPairWindowStats::default(),
+      hot_window: HotPairWindow::new(None),
       special_tokens: Vec::new(),
       words: Vec::new(),
     }
@@ -732,13 +718,11 @@ where
     debug!("Initializing BPE training with {} words", self.words.len());
     self.pre_merges.clear();
     self.merge_heap.clear();
-    self.hot_occurrences.clear();
-    self.hot_admission_threshold = None;
-    self.hot_window_stats = HotPairWindowStats::default();
-    let collect_occurrences = self.config.hot_pair_window_size.is_none();
+    self.hot_window.reset(self.config.hot_pair_window_size);
+    let collect_occurrences = !self.hot_window.is_enabled();
     self._build_pre_merges_batched(parallel, chunk_units, collect_occurrences);
     self.rebuild_merge_heap();
-    if self.config.hot_pair_window_size.is_some() {
+    if self.hot_window.is_enabled() {
       self.refill_hot_occurrences(None);
     }
   }
@@ -826,10 +810,7 @@ where
   }
 
   fn ranked_top_pairs(&self) -> Vec<MergeCandidate<C, I>> {
-    let limit = self
-      .config
-      .hot_pair_window_size
-      .expect("ranked_top_pairs requires a hot window");
+    let limit = self.hot_window.window_size();
     let mut top = BinaryHeap::<Reverse<MergeCandidate<C, I>>>::with_capacity(
       limit.saturating_add(1),
     );
@@ -858,79 +839,21 @@ where
 
   fn refill_hot_occurrences(&mut self, required: Option<(I, I)>) {
     let ranked = self.ranked_top_pairs();
-    let desired = ranked
+    let ranked = ranked
       .iter()
-      .map(|candidate| candidate.tp)
-      .collect::<AHashSet<_>>();
-    if let Some(required) = required {
-      assert!(
-        desired.contains(&required),
-        "a cold pair winner must be present in the exact top-K refill",
-      );
-    }
-    let mut hydrated = desired
-      .iter()
-      .copied()
-      .filter(|tp| !self.hot_occurrences.contains_key(tp))
-      .map(|tp| (tp, AHashSet::new()))
-      .collect::<AHashMap<_, _>>();
-    for (word_idx, word) in self.words.iter().enumerate() {
-      for tp in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
-        if let Some(occurrences) = hydrated.get_mut(&tp) {
-          occurrences.insert(word_idx as u64);
-        }
-      }
-    }
-    self.hot_occurrences.extend(hydrated);
-    self.hot_admission_threshold = ranked.last().map(|candidate| candidate.freq);
-    self.hot_window_stats.hydration_scans += 1;
-    self.hot_window_stats.hydrated_word_entries = self
-      .hot_window_stats
-      .hydrated_word_entries
-      .saturating_add(self.words.len() as u64);
-    self.observe_hot_window_peak();
-  }
-
-  fn update_hot_occurrences(
-    &mut self, target_idx: I, changes: &AHashMap<(I, I), MergeData>,
-  ) {
-    for (tp, data) in changes {
-      let Some(occurrences) = self.hot_occurrences.get_mut(tp) else {
-        continue;
-      };
-      if data.freq > 0 {
-        occurrences.extend(data.occurs_in.iter().copied());
-      }
-    }
-
-    let threshold = self
-      .hot_admission_threshold
-      .expect("a pair merge follows an initialized hot window");
-    for (tp, data) in changes {
-      if data.freq <= 0
-        || (tp.0 != target_idx && tp.1 != target_idx)
-        || data.freq < threshold
-      {
-        continue;
-      }
-      debug_assert!(!self.hot_occurrences.contains_key(tp));
-      self.hot_occurrences.insert(*tp, data.occurs_in.clone());
-    }
-    self.observe_hot_window_peak();
+      .map(|candidate| (candidate.tp, candidate.freq))
+      .collect::<Vec<_>>();
+    self.hot_window.hydrate(&ranked, &self.words, required);
   }
 
   fn prune_hot_occurrences(&mut self) {
-    let window_size = self
-      .config
-      .hot_pair_window_size
-      .expect("prune_hot_occurrences requires a hot window");
-    if self.hot_occurrences.len() <= window_size.saturating_mul(2) {
+    if !self.hot_window.needs_prune() {
       return;
     }
 
     let mut ranked = self
-      .hot_occurrences
-      .keys()
+      .hot_window
+      .resident_pairs()
       .filter_map(|tp| {
         let merge = self.pre_merges.get(tp)?;
         (merge.target.is_none() && merge.data.freq > 0)
@@ -940,35 +863,21 @@ where
     ranked.sort_unstable_by(|left, right| {
       right.cmp(left).then_with(|| left.tp.cmp(&right.tp))
     });
-    ranked.truncate(window_size);
-    self.hot_admission_threshold = ranked.last().map(|candidate| candidate.freq);
-    let retained = ranked
+    ranked.truncate(self.hot_window.window_size());
+    let ranked = ranked
       .into_iter()
-      .map(|candidate| candidate.tp)
-      .collect::<AHashSet<_>>();
-    let before = self.hot_occurrences.len();
-    self.hot_occurrences.retain(|tp, _| retained.contains(tp));
-    self.hot_window_stats.batch_prunes += 1;
-    self.hot_window_stats.prune_evictions = self
-      .hot_window_stats
-      .prune_evictions
-      .saturating_add(before.saturating_sub(self.hot_occurrences.len()) as u64);
-  }
-
-  fn observe_hot_window_peak(&mut self) {
-    self.hot_window_stats.peak_resident_pairs = self
-      .hot_window_stats
-      .peak_resident_pairs
-      .max(self.hot_occurrences.len());
+      .map(|candidate| (candidate.tp, candidate.freq))
+      .collect::<Vec<_>>();
+    self.hot_window.prune(&ranked);
   }
 
   fn update_pre_merges(
     &mut self, merge: &Merge<C, I>, target_idx: I,
     changes: AHashMap<(I, I), MergeData>,
   ) {
-    let bounded = self.config.hot_pair_window_size.is_some();
+    let bounded = self.hot_window.is_enabled();
     if bounded {
-      self.update_hot_occurrences(target_idx, &changes);
+      self.hot_window.apply_changes(target_idx, &changes);
     }
     let changed_tps = _update_merge_map(
       &mut self.pre_merges,
@@ -981,6 +890,13 @@ where
       self.push_merge_candidate(tp);
     }
     if bounded {
+      let dead_pairs = self
+        .hot_window
+        .resident_pairs()
+        .filter(|tp| self.pre_merges.get(tp).is_none_or(|merge| merge.data.freq <= 0))
+        .copied()
+        .collect::<Vec<_>>();
+      self.hot_window.remove_pairs(&dead_pairs);
       self.prune_hot_occurrences();
     }
   }
@@ -1004,18 +920,18 @@ where
         continue;
       }
       let is_pair = merge.target.is_none();
-      if self.config.hot_pair_window_size.is_some()
+      if self.hot_window.is_enabled()
         && is_pair
-        && !self.hot_occurrences.contains_key(&candidate.tp)
+        && !self.hot_window.contains(&candidate.tp)
       {
         self.refill_hot_occurrences(Some(candidate.tp));
       }
 
       let mut merge = self.pre_merges.remove(&candidate.tp).unwrap();
-      if self.config.hot_pair_window_size.is_some() && is_pair {
+      if self.hot_window.is_enabled() && is_pair {
         merge.data.occurs_in = self
-          .hot_occurrences
-          .remove(&candidate.tp)
+          .hot_window
+          .take(&candidate.tp)
           .expect("a selected pair must have resident occurrences");
       }
       return Some(merge);
@@ -1057,7 +973,7 @@ where
     self.update_pre_merges(&merge, target_idx, changes);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
-    if self.config.hot_pair_window_size.is_some() {
+    if self.hot_window.is_enabled() {
       merge.data.occurs_in = AHashSet::new();
     }
     self.merges.push(merge);
@@ -1590,12 +1506,13 @@ mod tests {
       },
     );
     trainer.init_training();
-    trainer.hot_occurrences = trainer
+    let residents = trainer
       .pre_merges
       .keys()
       .copied()
       .map(|tp| (tp, AHashSet::new()))
       .collect();
+    trainer.hot_window.replace_residents(residents);
 
     trainer.prune_hot_occurrences();
 
@@ -1619,10 +1536,35 @@ mod tests {
     trainer.step().unwrap();
 
     let target = 256;
-    let occurrences = &trainer.hot_occurrences[&(target, b'q' as Idx)];
+    let occurrences = trainer
+      .hot_window
+      .occurrences(&(target, b'q' as Idx))
+      .unwrap();
     assert_eq!(occurrences.len(), 3);
     assert!([0, 1, 2].into_iter().all(|word_idx| occurrences.contains(&word_idx)));
     assert_eq!(trainer.hot_pair_window_stats().unwrap().hydration_scans, 1);
+  }
+
+  #[test]
+  fn test_hot_pair_window_removes_nonpositive_residents_eagerly() {
+    let mut trainer = BpeTrainer::<u8, Idx>::from_words_with_config(
+      [("aba", 10)],
+      &[],
+      BpeTrainerConfig {
+        hot_pair_window_size: Some(2),
+        ..BpeTrainerConfig::default()
+      },
+    );
+    trainer.init_training();
+    assert!(trainer.hot_window.contains(&(b'b' as Idx, b'a' as Idx)));
+
+    trainer.step().unwrap();
+
+    assert_eq!(
+      trainer.pre_merges[&(b'b' as Idx, b'a' as Idx)].data.freq,
+      0,
+    );
+    assert!(!trainer.hot_window.contains(&(b'b' as Idx, b'a' as Idx)));
   }
 
   #[test]
@@ -1642,7 +1584,11 @@ mod tests {
       );
       trainer.init_training();
 
-      let resident = trainer.hot_occurrences.keys().copied().collect::<AHashSet<_>>();
+      let resident = trainer
+        .hot_window
+        .resident_pairs()
+        .copied()
+        .collect::<AHashSet<_>>();
       let expected = expected
         .map(|(left, right)| (left as Idx, right as Idx))
         .into_iter()
@@ -1665,7 +1611,7 @@ mod tests {
 
     assert_eq!(trainer.hot_resident_pairs(), 1);
     assert_eq!(
-      trainer.hot_occurrences.keys().copied().next(),
+      trainer.hot_window.resident_pairs().copied().next(),
       Some((CharIdx::Char('你'), CharIdx::Idx(b'a' as Idx))),
     );
   }
