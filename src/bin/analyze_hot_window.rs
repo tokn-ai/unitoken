@@ -10,7 +10,10 @@ use clap::{Parser, ValueEnum};
 use ordermap::OrderMap;
 use serde::Serialize;
 use unitoken::bpe::{
-  trainer::analysis::{analyze_byte_words, analyze_unicode_words, HotWindowAnalysisReport},
+  trainer::analysis::{
+    analyze_byte_words, analyze_unicode_words, HotWindowAnalysisReport,
+    HotWindowPolicy,
+  },
   BpeTrainerConfig, Freq, InitialAlphabet, TieBreak,
 };
 
@@ -55,6 +58,27 @@ impl TieBreakArg {
   }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PolicyArg {
+  ReplaceTopK,
+  ThresholdNoEvict,
+}
+
+impl From<PolicyArg> for HotWindowPolicy {
+  fn from(value: PolicyArg) -> Self {
+    match value {
+      PolicyArg::ReplaceTopK => Self::ReplaceTopK,
+      PolicyArg::ThresholdNoEvict => Self::ThresholdNoEvict,
+    }
+  }
+}
+
+impl PolicyArg {
+  fn as_str(self) -> &'static str {
+    HotWindowPolicy::from(self).as_str()
+  }
+}
+
 #[derive(Debug, Parser)]
 #[command(about = "Simulate exact BPE occurrence hot windows over a saved word inventory")]
 struct Args {
@@ -68,12 +92,15 @@ struct Args {
   #[arg(long, default_value_t = 10_000)]
   vocab_size: usize,
 
-  /// Comma-separated resident occurrence-window sizes.
+  /// Comma-separated top-K refill sizes; threshold-no-evict may grow beyond K.
   #[arg(long, value_delimiter = ',', default_value = "256,1024,4096,16384")]
   window_sizes: Vec<usize>,
 
   #[arg(long, value_enum, default_value_t = TieBreakArg::SmallestPairId)]
   tie_break: TieBreakArg,
+
+  #[arg(long, value_enum, default_value_t = PolicyArg::ThresholdNoEvict)]
+  policy: PolicyArg,
 
   /// Repeat to reserve more than one special token.
   #[arg(long = "special-token", default_value = "<|endoftext|>")]
@@ -85,8 +112,8 @@ struct Args {
   #[arg(long)]
   config_name: Option<String>,
 
-  #[arg(long, default_value = "replace_top_k")]
-  experiment_name: String,
+  #[arg(long)]
+  experiment_name: Option<String>,
 
   /// Root for conventionally named reports; ignored when --json is set.
   #[arg(long, default_value = "out/benchmarks")]
@@ -225,6 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       config,
       args.vocab_size,
       &args.window_sizes,
+      args.policy.into(),
     ),
     Unit::Unicode => analyze_unicode_words(
       words,
@@ -232,6 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       config,
       args.vocab_size,
       &args.window_sizes,
+      args.policy.into(),
     ),
   };
 
@@ -241,12 +270,15 @@ fn main() -> Result<(), Box<dyn Error>> {
   let config_name = args
     .config_name
     .unwrap_or_else(|| format!("{}-{}", args.unit.as_str(), args.tie_break.as_str()));
+  let experiment_name = args
+    .experiment_name
+    .unwrap_or_else(|| args.policy.as_str().to_string());
   let output_path = args.json.unwrap_or_else(|| {
     default_output_path(
       &args.json_dir,
       &dataset_name,
       &config_name,
-      &args.experiment_name,
+      &experiment_name,
       args.vocab_size,
     )
   });
@@ -257,7 +289,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       unitoken_version: env!("CARGO_PKG_VERSION"),
       dataset_name: &dataset_name,
       config_name: &config_name,
-      experiment_name: &args.experiment_name,
+      experiment_name: &experiment_name,
       generated_at: chrono::Utc::now().to_rfc3339(),
       git_sha: git_sha(),
       git_dirty: git_dirty(),

@@ -17,7 +17,20 @@ use crate::{
   traits::{CanStrToWord, CanToWord},
 };
 
-const POLICY_NAME: &str = "replace_top_k_on_cold_winner";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotWindowPolicy {
+  ReplaceTopK,
+  ThresholdNoEvict,
+}
+
+impl HotWindowPolicy {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::ReplaceTopK => "replace_top_k_on_cold_winner",
+      Self::ThresholdNoEvict => "threshold_admission_without_eviction",
+    }
+  }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DistributionSummary {
@@ -90,8 +103,12 @@ pub struct HotWindowResult {
   pub scanned_encoded_units: u64,
   pub scanned_adjacent_positions: u64,
   pub promotions: u64,
+  pub refill_admissions: u64,
   pub re_promotions: u64,
   pub evictions: u64,
+  pub fresh_target_positive_candidates: u64,
+  pub dynamic_admissions: u64,
+  pub threshold_rejections: u64,
   pub cutoff_tie_refills: u64,
   pub max_cutoff_tie_width: u64,
   pub merges_per_refill: DistributionSummary,
@@ -99,6 +116,12 @@ pub struct HotWindowResult {
   pub peak_hot_occurrence_len: u64,
   pub peak_hot_occurrence_capacity: u64,
   pub peak_hot_occurrence_payload_bytes: u64,
+  pub peak_resident_occurrence_set_structural_bytes: u64,
+  pub peak_resident_to_window_ratio: f64,
+  pub final_resident_pairs: u64,
+  pub final_hot_occurrence_len: u64,
+  pub final_hot_occurrence_capacity: u64,
+  pub final_admission_threshold: Option<Freq>,
   pub peak_oracle_stored_pair_count: u64,
   pub peak_oracle_positive_pair_count: u64,
   pub peak_oracle_occurrence_len: u64,
@@ -274,8 +297,9 @@ fn refresh_payload_bytes<I>(snapshot: &mut OraclePostingSnapshot) {
 }
 
 struct HotWindowState<I> {
+  policy: HotWindowPolicy,
   window_size: usize,
-  hot: AHashMap<(I, I), AHashSet<u64>>,
+  hot: AHashMap<(I, I), HotEntry>,
   ever_promoted: AHashSet<(I, I)>,
   pair_winners: u64,
   hot_winners: u64,
@@ -286,8 +310,12 @@ struct HotWindowState<I> {
   scanned_encoded_units: u64,
   scanned_adjacent_positions: u64,
   promotions: u64,
+  refill_admissions: u64,
   re_promotions: u64,
   evictions: u64,
+  fresh_target_positive_candidates: u64,
+  dynamic_admissions: u64,
+  threshold_rejections: u64,
   cutoff_tie_refills: u64,
   max_cutoff_tie_width: u64,
   current_refill_uses: Option<u64>,
@@ -297,14 +325,20 @@ struct HotWindowState<I> {
   peak_resident_pairs: u64,
   peak_hot_occurrence_len: u64,
   peak_hot_occurrence_capacity: u64,
+  admission_threshold: Option<Freq>,
+}
+
+struct HotEntry {
+  occurs_in: AHashSet<u64>,
 }
 
 impl<I> HotWindowState<I>
 where
   I: Copy + Eq + Hash,
 {
-  fn new(window_size: usize) -> Self {
+  fn new(window_size: usize, policy: HotWindowPolicy) -> Self {
     Self {
+      policy,
       window_size,
       hot: AHashMap::new(),
       ever_promoted: AHashSet::new(),
@@ -317,8 +351,12 @@ where
       scanned_encoded_units: 0,
       scanned_adjacent_positions: 0,
       promotions: 0,
+      refill_admissions: 0,
       re_promotions: 0,
       evictions: 0,
+      fresh_target_positive_candidates: 0,
+      dynamic_admissions: 0,
+      threshold_rejections: 0,
       cutoff_tie_refills: 0,
       max_cutoff_tie_width: 0,
       current_refill_uses: None,
@@ -328,6 +366,7 @@ where
       peak_resident_pairs: 0,
       peak_hot_occurrence_len: 0,
       peak_hot_occurrence_capacity: 0,
+      admission_threshold: None,
     }
   }
 
@@ -341,6 +380,18 @@ where
     }
   }
 
+  fn record_promotion(&mut self, tp: (I, I), dynamic: bool) {
+    self.promotions += 1;
+    if dynamic {
+      self.dynamic_admissions += 1;
+    } else {
+      self.refill_admissions += 1;
+    }
+    if !self.ever_promoted.insert(tp) {
+      self.re_promotions += 1;
+    }
+  }
+
   fn refill<C>(
     &mut self,
     words: &[crate::bpe::PreToken<C, I>],
@@ -351,25 +402,44 @@ where
     self.hydration_scans += 1;
 
     let desired_set = desired.iter().map(|candidate| candidate.tp).collect::<AHashSet<_>>();
-    self.evictions += self
-      .hot
-      .keys()
-      .filter(|tp| !desired_set.contains(tp))
-      .count() as u64;
-    for tp in desired_set.iter().copied() {
-      if self.hot.contains_key(&tp) {
-        continue;
+    let hydrate = match self.policy {
+      HotWindowPolicy::ReplaceTopK => {
+        self.evictions += self
+          .hot
+          .keys()
+          .filter(|tp| !desired_set.contains(tp))
+          .count() as u64;
+        for candidate in desired {
+          if !self.hot.contains_key(&candidate.tp) {
+            self.record_promotion(candidate.tp, false);
+          }
+        }
+        desired.to_vec()
       }
-      self.promotions += 1;
-      if !self.ever_promoted.insert(tp) {
-        self.re_promotions += 1;
+      HotWindowPolicy::ThresholdNoEvict => {
+        let missing = desired
+          .iter()
+          .copied()
+          .filter(|candidate| !self.hot.contains_key(&candidate.tp))
+          .collect::<Vec<_>>();
+        for candidate in &missing {
+          self.record_promotion(candidate.tp, false);
+        }
+        missing
       }
-    }
+    };
 
     let started = Instant::now();
-    let mut hot = desired_set
+    let mut hydrated = hydrate
       .into_iter()
-      .map(|tp| (tp, AHashSet::new()))
+      .map(|candidate| {
+        (
+          candidate.tp,
+          HotEntry {
+            occurs_in: AHashSet::new(),
+          },
+        )
+      })
       .collect::<AHashMap<_, _>>();
     let mut encoded_units = 0u64;
     let mut adjacent_positions = 0u64;
@@ -377,8 +447,8 @@ where
       encoded_units = encoded_units.saturating_add(word.idxs.len() as u64);
       adjacent_positions = adjacent_positions.saturating_add(word.idxs.len().saturating_sub(1) as u64);
       for tp in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
-        if let Some(occurs_in) = hot.get_mut(&tp) {
-          occurs_in.insert(word_idx as u64);
+        if let Some(entry) = hydrated.get_mut(&tp) {
+          entry.occurs_in.insert(word_idx as u64);
         }
       }
     }
@@ -386,9 +456,21 @@ where
     self.scanned_word_entries = self.scanned_word_entries.saturating_add(words.len() as u64);
     self.scanned_encoded_units = self.scanned_encoded_units.saturating_add(encoded_units);
     self.scanned_adjacent_positions = self.scanned_adjacent_positions.saturating_add(adjacent_positions);
-    self.hot = hot;
-    self.current_occurrence_len = self.hot.values().map(|occurs_in| occurs_in.len() as u64).sum();
-    self.current_occurrence_capacity = self.hot.values().map(|occurs_in| occurs_in.capacity() as u64).sum();
+    match self.policy {
+      HotWindowPolicy::ReplaceTopK => self.hot = hydrated,
+      HotWindowPolicy::ThresholdNoEvict => self.hot.extend(hydrated),
+    }
+    self.current_occurrence_len = self
+      .hot
+      .values()
+      .map(|entry| entry.occurs_in.len() as u64)
+      .sum();
+    self.current_occurrence_capacity = self
+      .hot
+      .values()
+      .map(|entry| entry.occurs_in.capacity() as u64)
+      .sum();
+    self.admission_threshold = desired.last().map(|candidate| candidate.freq);
     self.current_refill_uses = Some(0);
 
     if let Some(cutoff) = desired.last().map(|candidate| candidate.freq) {
@@ -428,35 +510,67 @@ where
         .any(|tp| tp == winner);
       if pair_exists {
         assert!(
-          removed.contains(&(word_idx as u64)),
+          removed.occurs_in.contains(&(word_idx as u64)),
           "resident postings must cover every current occurrence",
         );
       }
     }
-    self.current_occurrence_len = self.current_occurrence_len.saturating_sub(removed.len() as u64);
-    self.current_occurrence_capacity = self.current_occurrence_capacity.saturating_sub(removed.capacity() as u64);
+    self.current_occurrence_len = self
+      .current_occurrence_len
+      .saturating_sub(removed.occurs_in.len() as u64);
+    self.current_occurrence_capacity = self
+      .current_occurrence_capacity
+      .saturating_sub(removed.occurs_in.capacity() as u64);
     *self.current_refill_uses.as_mut().expect("pair winners follow a refill") += 1;
   }
 
-  fn apply_changes(&mut self, changes: &AHashMap<(I, I), MergeData>) {
+  fn apply_changes(&mut self, target_idx: I, changes: &AHashMap<(I, I), MergeData>) {
     for (tp, data) in changes {
-      if data.freq <= 0 {
-        continue;
-      }
-      let Some(occurs_in) = self.hot.get_mut(tp) else {
+      let Some(entry) = self.hot.get_mut(tp) else {
         continue;
       };
-      let old_len = occurs_in.len() as u64;
-      let old_capacity = occurs_in.capacity() as u64;
-      occurs_in.extend(data.occurs_in.iter().copied());
-      self.current_occurrence_len = self
-        .current_occurrence_len
-        .saturating_sub(old_len)
-        .saturating_add(occurs_in.len() as u64);
-      self.current_occurrence_capacity = self
-        .current_occurrence_capacity
-        .saturating_sub(old_capacity)
-        .saturating_add(occurs_in.capacity() as u64);
+      if data.freq > 0 {
+        let old_len = entry.occurs_in.len() as u64;
+        let old_capacity = entry.occurs_in.capacity() as u64;
+        entry.occurs_in.extend(data.occurs_in.iter().copied());
+        self.current_occurrence_len = self
+          .current_occurrence_len
+          .saturating_sub(old_len)
+          .saturating_add(entry.occurs_in.len() as u64);
+        self.current_occurrence_capacity = self
+          .current_occurrence_capacity
+          .saturating_sub(old_capacity)
+          .saturating_add(entry.occurs_in.capacity() as u64);
+      }
+    }
+    if self.policy == HotWindowPolicy::ThresholdNoEvict {
+      let threshold = self.admission_threshold.expect("a pair merge follows a populated refill");
+      for (tp, data) in changes {
+        if data.freq <= 0 || (tp.0 != target_idx && tp.1 != target_idx) {
+          continue;
+        }
+        self.fresh_target_positive_candidates += 1;
+        debug_assert!(
+          !self.hot.contains_key(tp),
+          "a pair containing the fresh target cannot already be resident",
+        );
+        if data.freq < threshold {
+          self.threshold_rejections += 1;
+          continue;
+        }
+
+        let entry = HotEntry {
+          occurs_in: data.occurs_in.clone(),
+        };
+        self.current_occurrence_len = self
+          .current_occurrence_len
+          .saturating_add(entry.occurs_in.len() as u64);
+        self.current_occurrence_capacity = self
+          .current_occurrence_capacity
+          .saturating_add(entry.occurs_in.capacity() as u64);
+        self.hot.insert(*tp, entry);
+        self.record_promotion(*tp, true);
+      }
     }
     self.observe_hot_peak();
   }
@@ -493,8 +607,12 @@ where
       scanned_encoded_units: self.scanned_encoded_units,
       scanned_adjacent_positions: self.scanned_adjacent_positions,
       promotions: self.promotions,
+      refill_admissions: self.refill_admissions,
       re_promotions: self.re_promotions,
       evictions: self.evictions,
+      fresh_target_positive_candidates: self.fresh_target_positive_candidates,
+      dynamic_admissions: self.dynamic_admissions,
+      threshold_rejections: self.threshold_rejections,
       cutoff_tie_refills: self.cutoff_tie_refills,
       max_cutoff_tie_width: self.max_cutoff_tie_width,
       merges_per_refill: DistributionSummary::from_samples(self.refill_uses),
@@ -504,6 +622,14 @@ where
       peak_hot_occurrence_payload_bytes: self
         .peak_hot_occurrence_capacity
         .saturating_mul(size_of::<u64>() as u64),
+      peak_resident_occurrence_set_structural_bytes: self
+        .peak_resident_pairs
+        .saturating_mul(size_of::<AHashSet<u64>>() as u64),
+      peak_resident_to_window_ratio: self.peak_resident_pairs as f64 / self.window_size as f64,
+      final_resident_pairs: self.hot.len() as u64,
+      final_hot_occurrence_len: self.current_occurrence_len,
+      final_hot_occurrence_capacity: self.current_occurrence_capacity,
+      final_admission_threshold: self.admission_threshold,
       peak_oracle_stored_pair_count: peak_oracle.stored_pair_count,
       peak_oracle_positive_pair_count: peak_oracle.positive_pair_count,
       peak_oracle_occurrence_len: peak_oracle.occurrence_len,
@@ -613,6 +739,7 @@ fn run_analysis<C, I>(
   mut trainer: BpeTrainer<C, I>,
   target_vocab_size: usize,
   window_sizes: &[usize],
+  policy: HotWindowPolicy,
 ) -> (HotWindowAnalysisReport, BpeTrainer<C, I>)
 where
   Word<C>: WordDebugExt,
@@ -626,7 +753,7 @@ where
   window_sizes.dedup();
   let mut states = window_sizes
     .into_iter()
-    .map(HotWindowState::new)
+    .map(|window_size| HotWindowState::new(window_size, policy))
     .collect::<Vec<_>>();
 
   let initial_vocab_size = trainer.vocab.len();
@@ -647,7 +774,7 @@ where
     };
     if merge.target.is_some() {
       initial_unit_steps += 1;
-      trainer._step_with_observer(merge, |_, _| {});
+      trainer._step_with_observer(merge, |_, _, _| {});
       continue;
     }
 
@@ -677,10 +804,10 @@ where
     let selected = merge.tp;
     oracle_accounting.remove_selected(&merge);
     let mut pending_oracle_updates = None;
-    trainer._step_with_observer(merge, |trainer, changes| {
+    trainer._step_with_observer(merge, |trainer, target_idx, changes| {
       if let Some(changes) = changes {
         for state in &mut states {
-          state.apply_changes(changes);
+          state.apply_changes(target_idx, changes);
         }
         pending_oracle_updates = Some(PendingOracleUpdates::prepare(
           trainer,
@@ -702,8 +829,33 @@ where
     "incremental oracle accounting diverged from the trainer",
   );
   let peak_oracle = oracle_accounting.peak;
+  let policy_note = match policy {
+    HotWindowPolicy::ReplaceTopK => {
+      "A cold winner replaces the window with the exact current top-K positive pairs, including that winner, then hydrates all K occurrence sets in one inventory scan."
+    }
+    HotWindowPolicy::ThresholdNoEvict => {
+      "A cold winner unions the exact current top-K positive pairs into the resident set; newly created positive pairs are admitted without a scan when their frequency reaches the least frequency in that refill snapshot, and residents are never evicted."
+    }
+  };
+  let mut notes = vec![
+    "The current exact trainer remains the winner-selection oracle; simulated windows never change merge order or output.".to_string(),
+    "Initial Unicode units are not counted as pair-window entries.".to_string(),
+    policy_note.to_string(),
+  ];
+  if policy == HotWindowPolicy::ThresholdNoEvict {
+    notes.push(
+      "The refill cutoff remains fixed until the next cold-winner refill so cooled residents cannot collapse the admission gate; K is a refill snapshot size, not a hard resident limit.".to_string(),
+    );
+  }
+  notes.extend([
+    "Positive occurrence deltas extend resident postings; negative deltas retain stale word ids, matching the current trainer's lazy occurrence semantics.".to_string(),
+    "Occurrence payload estimates exclude hash-table buckets, allocators, and token content; pair-frequency payload is only two ids plus one frequency per stored pair and excludes ranking overhead.".to_string(),
+    "peak_resident_occurrence_set_structural_bytes counts only the in-map AHashSet handles; map buckets and separately allocated posting storage remain excluded.".to_string(),
+    "simulation_merge_seconds includes exact oracle training and all requested K simulations; per-window hydration_seconds excludes shared heap inspection and bookkeeping.".to_string(),
+    "Multiple K values are measured in ascending order in one process, so later hydration scans may benefit from warmed caches; run one K at a time for isolated timing.".to_string(),
+  ]);
   let report = HotWindowAnalysisReport {
-    policy: POLICY_NAME.to_string(),
+    policy: policy.as_str().to_string(),
     target_vocab_size,
     initial_vocab_size,
     final_vocab_size,
@@ -721,15 +873,7 @@ where
       .into_iter()
       .map(|state| state.finish(&peak_oracle))
       .collect(),
-    notes: vec![
-      "The current exact trainer remains the winner-selection oracle; simulated windows never change merge order or output.".to_string(),
-      "Initial Unicode units are not counted as pair-window entries.".to_string(),
-      "A cold winner replaces the window with the exact current top-K positive pairs, including that winner, then hydrates all K occurrence sets in one inventory scan.".to_string(),
-      "Positive occurrence deltas extend resident postings; negative deltas retain stale word ids, matching the current trainer's lazy occurrence semantics.".to_string(),
-      "Occurrence payload estimates exclude hash-table buckets, allocators, and token content; pair-frequency payload is only two ids plus one frequency per stored pair and excludes ranking overhead.".to_string(),
-      "simulation_merge_seconds includes exact oracle training and all requested K simulations; per-window hydration_seconds excludes shared heap inspection and bookkeeping.".to_string(),
-      "Multiple K values are measured in ascending order in one process, so later hydration scans may benefit from warmed caches; run one K at a time for isolated timing.".to_string(),
-    ],
+    notes,
   };
   (report, trainer)
 }
@@ -741,11 +885,13 @@ pub fn analyze_byte_words(
   config: BpeTrainerConfig,
   target_vocab_size: usize,
   window_sizes: &[usize],
+  policy: HotWindowPolicy,
 ) -> HotWindowAnalysisReport {
   run_analysis(
     BpeTrainer::<u8, Idx>::from_words_with_config(words, special_tokens, config),
     target_vocab_size,
     window_sizes,
+    policy,
   ).0
 }
 
@@ -756,6 +902,7 @@ pub fn analyze_unicode_words(
   config: BpeTrainerConfig,
   target_vocab_size: usize,
   window_sizes: &[usize],
+  policy: HotWindowPolicy,
 ) -> HotWindowAnalysisReport {
   run_analysis(
     BpeTrainer::<Character, CharIdx>::from_words_with_config(
@@ -765,6 +912,7 @@ pub fn analyze_unicode_words(
     ),
     target_vocab_size,
     window_sizes,
+    policy,
   ).0
 }
 
@@ -792,13 +940,49 @@ mod tests {
       .collect()
   }
 
+  fn run_baseline<C, I>(
+    trainer: BpeTrainer<C, I>,
+    target_vocab_size: usize,
+    window_sizes: &[usize],
+  ) -> (HotWindowAnalysisReport, BpeTrainer<C, I>)
+  where
+    Word<C>: WordDebugExt,
+    C: CanStrToWord + CanToWord<u8> + Clone + Ord + Send + Sync,
+    I: IdxLike + HasChar<C> + Hash,
+  {
+    run_analysis(
+      trainer,
+      target_vocab_size,
+      window_sizes,
+      HotWindowPolicy::ReplaceTopK,
+    )
+  }
+
+  fn run_threshold<C, I>(
+    trainer: BpeTrainer<C, I>,
+    target_vocab_size: usize,
+    window_sizes: &[usize],
+  ) -> (HotWindowAnalysisReport, BpeTrainer<C, I>)
+  where
+    Word<C>: WordDebugExt,
+    C: CanStrToWord + CanToWord<u8> + Clone + Ord + Send + Sync,
+    I: IdxLike + HasChar<C> + Hash,
+  {
+    run_analysis(
+      trainer,
+      target_vocab_size,
+      window_sizes,
+      HotWindowPolicy::ThresholdNoEvict,
+    )
+  }
+
   #[test]
   fn fixed_window_refills_when_independent_pairs_are_exhausted() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(
       words(&[("ab", 10), ("cd", 9), ("ef", 8)]),
       &[],
     );
-    let (report, _) = run_analysis(trainer, 259, &[1, 2]);
+    let (report, _) = run_baseline(trainer, 259, &[1, 2]);
     assert_eq!(report.pair_merge_steps, 3);
     assert_eq!(report.windows[0].hydration_scans, 3);
     assert_eq!(report.windows[1].hydration_scans, 2);
@@ -808,9 +992,123 @@ mod tests {
   #[test]
   fn newly_created_pair_starts_cold() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("abc", 10)]), &[]);
-    let (report, _) = run_analysis(trainer, 258, &[1]);
+    let (report, _) = run_baseline(trainer, 258, &[1]);
     assert_eq!(report.pair_merge_steps, 2);
     assert_eq!(report.windows[0].cold_winners, 2);
+  }
+
+  #[test]
+  fn threshold_admission_keeps_a_new_winner_hot_without_another_scan() {
+    let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("abc", 10)]), &[]);
+    let (report, _) = run_threshold(trainer, 258, &[1]);
+    let window = &report.windows[0];
+    assert_eq!(window.hydration_scans, 1);
+    assert_eq!(window.cold_winners, 1);
+    assert_eq!(window.hot_winners, 1);
+    assert_eq!(window.fresh_target_positive_candidates, 1);
+    assert_eq!(window.dynamic_admissions, 1);
+    assert_eq!(window.threshold_rejections, 0);
+  }
+
+  #[test]
+  fn threshold_admission_keeps_complete_multiword_postings() {
+    let trainer = BpeTrainer::<u8, Idx>::from_words(
+      words(&[("abq", 10), ("abqr", 9), ("abqs", 8)]),
+      &[],
+    );
+    let (report, _) = run_threshold(trainer, 258, &[1]);
+    assert_eq!(report.windows[0].hydration_scans, 1);
+    assert_eq!(report.windows[0].hot_winners, 1);
+  }
+
+  #[test]
+  fn threshold_admission_rejects_new_pairs_below_the_hot_minimum() {
+    let trainer = BpeTrainer::<u8, Idx>::from_words(
+      words(&[("ab", 10), ("zabq", 5)]),
+      &[],
+    );
+    let (report, _) = run_threshold(trainer, 257, &[1]);
+    let window = &report.windows[0];
+    assert_eq!(window.fresh_target_positive_candidates, 2);
+    assert_eq!(window.dynamic_admissions, 0);
+    assert_eq!(window.threshold_rejections, 2);
+    assert_eq!(window.final_admission_threshold, Some(15));
+  }
+
+  #[test]
+  fn threshold_admission_can_grow_beyond_k_without_eviction() {
+    let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("zabq", 5)]), &[]);
+    let (report, _) = run_threshold(trainer, 257, &[1]);
+    let window = &report.windows[0];
+    assert_eq!(window.dynamic_admissions, 2);
+    assert_eq!(window.evictions, 0);
+    assert_eq!(window.peak_resident_pairs, 2);
+    assert_eq!(window.final_resident_pairs, 2);
+    assert_eq!(window.peak_resident_to_window_ratio, 2.0);
+  }
+
+  #[test]
+  fn threshold_refill_unions_residents_instead_of_evicting_them() {
+    let mut state = HotWindowState::<Idx>::new(1, HotWindowPolicy::ThresholdNoEvict);
+    state.hot.insert(
+      (1, 2),
+      HotEntry {
+        occurs_in: [0].into_iter().collect(),
+      },
+    );
+    state.current_occurrence_len = 1;
+    state.current_occurrence_capacity = state.hot[&(1, 2)].occurs_in.capacity() as u64;
+    state.admission_threshold = Some(5);
+    let words = vec![crate::bpe::PreToken {
+      src: Vec::<u8>::new().into(),
+      idxs: vec![3, 4],
+      freq: 10,
+    }];
+    let desired = [RankedPair {
+      tp: (3, 4),
+      freq: 10,
+    }];
+    let context = RefillContext {
+      ranked: desired.to_vec(),
+      frequency_counts: [(10, 1)].into_iter().collect(),
+    };
+
+    state.refill(&words, &desired, &context);
+    assert!(state.hot.contains_key(&(1, 2)));
+    assert!(state.hot.contains_key(&(3, 4)));
+    assert_eq!(state.evictions, 0);
+  }
+
+  #[test]
+  fn threshold_admission_only_considers_fresh_target_pairs() {
+    let mut state = HotWindowState::<Idx>::new(1, HotWindowPolicy::ThresholdNoEvict);
+    state.hot.insert(
+      (1, 2),
+      HotEntry {
+        occurs_in: [0].into_iter().collect(),
+      },
+    );
+    state.current_occurrence_len = 1;
+    state.current_occurrence_capacity = state.hot[&(1, 2)].occurs_in.capacity() as u64;
+    state.admission_threshold = Some(10);
+    let target = 100;
+    let changes = [
+      ((1, 2), MergeData::new(-9)),
+      ((target, 5), MergeData::new(10).add_occurs_in([1, 2])),
+      ((6, target), MergeData::new(9).add_occurs_in([3])),
+      ((3, 4), MergeData::new(20).add_occurs_in([4])),
+    ]
+    .into_iter()
+    .collect();
+
+    state.apply_changes(target, &changes);
+    assert!(state.hot.contains_key(&(target, 5)));
+    assert!(!state.hot.contains_key(&(6, target)));
+    assert!(!state.hot.contains_key(&(3, 4)));
+    assert_eq!(state.fresh_target_positive_candidates, 2);
+    assert_eq!(state.dynamic_admissions, 1);
+    assert_eq!(state.threshold_rejections, 1);
+    assert_eq!(state.admission_threshold, Some(10));
   }
 
   #[test]
@@ -819,7 +1117,7 @@ mod tests {
       words(&[("ab", 10), ("cd", 10), ("ef", 10)]),
       &[],
     );
-    let (report, _) = run_analysis(trainer, 257, &[2]);
+    let (report, _) = run_baseline(trainer, 257, &[2]);
     assert_eq!(report.windows[0].cutoff_tie_refills, 1);
     assert_eq!(report.windows[0].max_cutoff_tie_width, 3);
   }
@@ -827,7 +1125,7 @@ mod tests {
   #[test]
   fn unicode_initial_units_do_not_enter_the_pair_window() {
     let trainer = BpeTrainer::<Character, CharIdx>::from_words(words(&[("你a", 10)]), &[]);
-    let (report, _) = run_analysis(trainer, 258, &[1]);
+    let (report, _) = run_baseline(trainer, 258, &[1]);
     assert_eq!(report.initial_unit_steps, 1);
     assert_eq!(report.pair_merge_steps, 1);
     assert_eq!(report.windows[0].hydration_scans, 1);
@@ -849,7 +1147,7 @@ mod tests {
       exact.train_until(261).unwrap();
 
       let analyzed = BpeTrainer::<u8, Idx>::from_words_with_config(inventory, &[], config);
-      let (_, analyzed) = run_analysis(analyzed, 261, &[1, 3]);
+      let (_, analyzed) = run_baseline(analyzed, 261, &[1, 3]);
       assert_eq!(analyzed.vocab, exact.vocab);
       assert_eq!(merge_snapshot(&analyzed), merge_snapshot(&exact));
     }
@@ -873,7 +1171,7 @@ mod tests {
   #[test]
   fn oracle_storage_includes_nonpositive_pairs_and_stale_postings() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("abc", 10)]), &[]);
-    let (report, _) = run_analysis(trainer, 257, &[1]);
+    let (report, _) = run_baseline(trainer, 257, &[1]);
     assert!(report.final_oracle.nonpositive_pair_count > 0);
     assert!(report.final_oracle.occurrence_capacity > 0);
     assert_eq!(
@@ -933,7 +1231,7 @@ mod tests {
   #[test]
   fn a_huge_window_is_bounded_by_the_available_candidates() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("abc", 10)]), &[]);
-    let (report, _) = run_analysis(trainer, 257, &[usize::MAX]);
+    let (report, _) = run_baseline(trainer, 257, &[usize::MAX]);
     assert_eq!(report.windows[0].hydration_scans, 1);
     assert!(report.windows[0].peak_resident_pairs <= 2);
   }
@@ -941,7 +1239,7 @@ mod tests {
   #[test]
   fn empty_inventory_reports_incomplete_training() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[]), &[]);
-    let (report, _) = run_analysis(trainer, 257, &[1]);
+    let (report, _) = run_baseline(trainer, 257, &[1]);
     assert!(!report.completed);
     assert_eq!(report.final_vocab_size, 256);
     assert_eq!(report.pair_merge_steps, 0);
@@ -955,7 +1253,7 @@ mod tests {
     exact.train_until(262).unwrap();
 
     let analyzed = BpeTrainer::<Character, CharIdx>::from_words(inventory, &[]);
-    let (_, analyzed) = run_analysis(analyzed, 262, &[1, 4]);
+    let (_, analyzed) = run_baseline(analyzed, 262, &[1, 4]);
     assert_eq!(analyzed.vocab, exact.vocab);
     assert_eq!(merge_snapshot(&analyzed), merge_snapshot(&exact));
   }
@@ -964,6 +1262,6 @@ mod tests {
   #[should_panic(expected = "at least one window size is required")]
   fn empty_window_sweep_is_rejected() {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("ab", 1)]), &[]);
-    let _ = run_analysis(trainer, 257, &[]);
+    let _ = run_baseline(trainer, 257, &[]);
   }
 }

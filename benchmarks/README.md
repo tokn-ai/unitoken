@@ -94,16 +94,22 @@ cargo run --release --features analysis --bin analyze_hot_window -- \
   --unit unicode \
   --vocab-size 10000 \
   --window-sizes 1024,4096,16384,65536 \
+  --policy threshold-no-evict \
   --dataset-name cmn_Hani_1GiB \
   --config-name unicode \
-  --experiment-name replace_top_k
+  --experiment-name threshold_no_evict
 ```
 
 The simulator uses the exact trainer as an oracle. On a cold winner, it
-replaces the simulated window with the current top-K pairs and hydrates their
-word-occurrence sets in one inventory scan. Reports separate shared heap
-inspection time from per-window hydration time and include payload-only memory
-estimates for the full exact occurrence state and each simulated window.
+hydrates the current top-K pairs in one inventory scan. The
+`threshold-no-evict` policy also admits a newly created pair immediately when
+its frequency reaches the least frequency in the most recent top-K refill,
+using the complete occurrence set emitted by that merge. The cutoff remains
+fixed until another refill. Residents are not evicted, so K is a refill size
+rather than a memory bound. Use `--policy replace-top-k` for
+the original fixed-window baseline. Reports separate shared heap inspection
+time from per-window hydration time and include payload-only memory estimates
+for the full exact occurrence state and each simulated window.
 
 Example raw-text unitoken trainer profile:
 

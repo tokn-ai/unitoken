@@ -794,20 +794,20 @@ where
   /// This is the core training step once a merge candidate has been selected.
   #[hotpath::measure]
   pub fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
-    self._step_with_observer(merge, |_, _| {})
+    self._step_with_observer(merge, |_, _, _| {})
   }
 
   fn _step_with_observer<F>(&mut self, merge: Merge<C, I>, observe_changes: F) -> I
   where
     C: Clone,
-    F: FnOnce(&Self, Option<&AHashMap<(I, I), MergeData>>),
+    F: FnOnce(&Self, I, Option<&AHashMap<(I, I), MergeData>>),
   {
     let target_idx = self._add_vocab_idx();
     // if target = Some(j), this is a single char token, no need to merge.
     // but we have to add it to vocab.
     if merge.target.is_some() {
       self.vocab.insert(target_idx, merge.content.1.clone());
-      observe_changes(self, None);
+      observe_changes(self, target_idx, None);
       return target_idx;
     }
     let changes = self.merge(&merge, target_idx);
@@ -819,7 +819,7 @@ where
     self.vocab.insert(target_idx, merged_word);
     assert_eq!(-changes.get(&merge.tp).map(|i| i.freq).unwrap_or(0), merge.data.freq);
     metrics::histogram!("bpe_trainer.changes").record(changes.len() as f64);
-    observe_changes(self, Some(&changes));
+    observe_changes(self, target_idx, Some(&changes));
     self.update_pre_merges(&merge, changes);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
