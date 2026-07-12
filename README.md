@@ -39,16 +39,21 @@ enc = BpeEncoder.load("demo")
 ids = enc.encode("hello")
 ```
 
-For a model trained from a retained Unicode-bigram selection, pass its cutoff
-when validating:
+For a model trained from a retained Unicode-bigram selection, configure its
+inclusive cutoff on the trainer:
 
 ```python
-model = trainer.validate_model(bigram_cutoff_freq=selection.cutoff_freq)
+trainer = BpeTrainer(
+  [],
+  unit="unicode",
+  bigram_cutoff_freq=selection.cutoff_freq,
+)
+model = trainer.validate_model()
 ```
 
-Validation requires the final pair merge frequency to be strictly greater than
-the cutoff. Equality is rejected because preprocessing decisions at the same
-frequency overlap the learned merge boundary.
+`train()` stops before a merge below the cutoff. Manual `step()` calls remain
+unrestricted, while validation rejects a final pair merge below the cutoff.
+Equality is valid because bigram selection retains every tie at the cutoff.
 
 Streaming two-pass counting
 ---------------------------

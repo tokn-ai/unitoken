@@ -100,15 +100,15 @@ fn golden_model_mismatch_fails_the_suite() {
 }
 
 #[test]
-fn cutoff_equality_fails_even_for_an_otherwise_valid_measurement() {
+fn cutoff_equality_passes_for_an_otherwise_valid_measurement() {
   let case = case_config(Some(INPUT_SHA256), None, Some(8));
   let report = suite(vec![
     completed(&case, OccurrenceVariant::exact(), 0, MODEL_SHA256, 8),
     completed(&case, OccurrenceVariant::bounded(4096), 0, MODEL_SHA256, 8),
   ]);
 
-  assert_eq!(report.gates.final_merge_above_bigram_cutoff, Some(false));
-  assert!(!report.gates.passed);
+  assert_eq!(report.gates.final_merge_at_or_above_bigram_cutoff, Some(true));
+  assert!(report.gates.passed);
 }
 
 fn suite(samples: Vec<CaseOutcome>) -> SuiteReport {
@@ -230,7 +230,7 @@ fn measurement(model_sha256: &str, last_merge_freq: i64, bigram_cutoff_freq: Opt
     step_buckets: Vec::new(),
     model_valid: true,
     target_vocab_reached: true,
-    final_merge_above_bigram_cutoff: bigram_cutoff_freq.map(|cutoff| last_merge_freq > cutoff),
+    final_merge_at_or_above_bigram_cutoff: bigram_cutoff_freq.map(|cutoff| last_merge_freq >= cutoff),
     hot_pair_window: None,
   }
 }

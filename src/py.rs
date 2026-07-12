@@ -55,7 +55,7 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
   fn get_vocab(&self) -> Vocabulary;
-  fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase>;
+  fn validate_model(&self, py: Python) -> PyResult<BpeModelBase>;
 }
 
 fn save_model_vocab<C, I>(model: &BpeModel<C, I>, path: &PathBuf, spec: &dyn Spec<C, I>) -> MyResult<()> {
@@ -137,6 +137,7 @@ fn trainer_config(
   tie_break: Option<&str>,
   parallel_merge_min_occurs_in: Option<usize>,
   hot_pair_window_size: Option<usize>,
+  bigram_cutoff_freq: Option<i64>,
 ) -> PyResult<BpeTrainerConfig> {
   let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
     "raw" => InitialAlphabet::RawBytes,
@@ -153,11 +154,17 @@ fn trainer_config(
       "hot_pair_window_size must be positive",
     ));
   }
+  if bigram_cutoff_freq.is_some_and(|cutoff| cutoff <= 0) {
+    return Err(pyo3::exceptions::PyValueError::new_err(
+      "bigram_cutoff_freq must be positive",
+    ));
+  }
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
     parallel_merge_min_occurs_in,
     hot_pair_window_size,
+    bigram_cutoff_freq,
   })
 }
 
@@ -185,19 +192,21 @@ impl BpeTrainer_u8_Idx {
   /// Create a new BPE trainer (byte-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None, bigram_cutoff_freq=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
     hot_pair_window_size: Option<usize>,
+    bigram_cutoff_freq: Option<i64>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
     let config = trainer_config(
       initial_alphabet,
       tie_break,
       parallel_merge_min_occurs_in,
       hot_pair_window_size,
+      bigram_cutoff_freq,
     )?;
     Ok((
       Self {
@@ -254,7 +263,7 @@ impl BpeTrainer_u8_Idx {
     py.detach(|| self.inner.init_training())
   }
 
-  /// Train until the vocabulary reaches `vocab_size`.
+  /// Train until the vocabulary reaches `vocab_size` or the pair cutoff.
   ///
   /// Returns the updated vocabulary size.
   pub fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64> {
@@ -278,12 +287,8 @@ impl BpeTrainer_u8_Idx {
   }
 
   /// Validate the current state and return an immutable model snapshot.
-  #[pyo3(signature = (*, bigram_cutoff_freq=None))]
-  pub fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase> {
-    py.detach(|| match bigram_cutoff_freq {
-      Some(cutoff) => self.inner.validate_model_with_bigram_cutoff(cutoff),
-      None => self.inner.validate_model(),
-    })
+  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
+    py.detach(|| self.inner.validate_model())
       .map(|model| BpeModelBase { inner: BpeModelInner::Byte(model) })
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
@@ -301,19 +306,21 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None, bigram_cutoff_freq=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
     hot_pair_window_size: Option<usize>,
+    bigram_cutoff_freq: Option<i64>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
     let config = trainer_config(
       initial_alphabet,
       tie_break,
       parallel_merge_min_occurs_in,
       hot_pair_window_size,
+      bigram_cutoff_freq,
     )?;
     Ok((
       Self {
@@ -370,7 +377,7 @@ impl BpeTrainer_Character_CharIdx {
     py.detach(|| self.inner.init_training())
   }
 
-  /// Train until the vocabulary reaches `vocab_size`.
+  /// Train until the vocabulary reaches `vocab_size` or the pair cutoff.
   ///
   /// Returns the updated vocabulary size.
   pub fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64> {
@@ -394,12 +401,8 @@ impl BpeTrainer_Character_CharIdx {
   }
 
   /// Validate the current state and return an immutable model snapshot.
-  #[pyo3(signature = (*, bigram_cutoff_freq=None))]
-  pub fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase> {
-    py.detach(|| match bigram_cutoff_freq {
-      Some(cutoff) => self.inner.validate_model_with_bigram_cutoff(cutoff),
-      None => self.inner.validate_model(),
-    })
+  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
+    py.detach(|| self.inner.validate_model())
       .map(|model| BpeModelBase { inner: BpeModelInner::Unicode(model) })
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }

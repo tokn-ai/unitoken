@@ -88,7 +88,7 @@ pub struct CaseMeasurement {
   pub step_buckets: Vec<StepBucket>,
   pub model_valid: bool,
   pub target_vocab_reached: bool,
-  pub final_merge_above_bigram_cutoff: Option<bool>,
+  pub final_merge_at_or_above_bigram_cutoff: Option<bool>,
   pub hot_pair_window: Option<HotPairWindowReport>,
 }
 
@@ -180,7 +180,7 @@ pub struct GateReport {
   pub bounded_matches_exact: Option<bool>,
   pub inputs_match_expected: Option<bool>,
   pub exact_matches_golden: Option<bool>,
-  pub final_merge_above_bigram_cutoff: Option<bool>,
+  pub final_merge_at_or_above_bigram_cutoff: Option<bool>,
   pub passed: bool,
 }
 
@@ -356,7 +356,7 @@ fn evaluate_gates(samples: &[CaseOutcome], comparisons: &[ComparisonReport]) -> 
         .is_some_and(|expected| measurement.fingerprints.model_sha256.eq_ignore_ascii_case(expected))
     },
   );
-  let final_merge_above_bigram_cutoff = optional_gate(
+  let final_merge_at_or_above_bigram_cutoff = optional_gate(
     samples,
     |sample| sample.request.case.bigram_cutoff_freq.is_some(),
     |sample, measurement| {
@@ -368,7 +368,7 @@ fn evaluate_gates(samples: &[CaseOutcome], comparisons: &[ComparisonReport]) -> 
           measurement
             .counts
             .last_merge_freq
-            .is_some_and(|frequency| frequency > cutoff)
+            .is_none_or(|frequency| frequency >= cutoff)
         })
         .unwrap_or(false)
     },
@@ -380,7 +380,7 @@ fn evaluate_gates(samples: &[CaseOutcome], comparisons: &[ComparisonReport]) -> 
     && bounded_matches_exact != Some(false)
     && inputs_match_expected != Some(false)
     && exact_matches_golden != Some(false)
-    && final_merge_above_bigram_cutoff != Some(false);
+    && final_merge_at_or_above_bigram_cutoff != Some(false);
 
   GateReport {
     all_runs_completed,
@@ -390,7 +390,7 @@ fn evaluate_gates(samples: &[CaseOutcome], comparisons: &[ComparisonReport]) -> 
     bounded_matches_exact,
     inputs_match_expected,
     exact_matches_golden,
-    final_merge_above_bigram_cutoff,
+    final_merge_at_or_above_bigram_cutoff,
     passed,
   }
 }

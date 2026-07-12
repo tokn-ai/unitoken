@@ -150,6 +150,7 @@ where
     },
     parallel_merge_min_occurs_in: request.case.parallel_merge_min_occurs_in,
     hot_pair_window_size: request.variant.hot_pair_window_size,
+    bigram_cutoff_freq: request.case.bigram_cutoff_freq,
   };
 
   let build_rss_sampler = rss::RssSampler::start();
@@ -235,20 +236,17 @@ where
   };
 
   let started = Instant::now();
-  let model = match request.case.bigram_cutoff_freq {
-    Some(cutoff) => trainer.validate_model_with_bigram_cutoff(cutoff),
-    None => trainer.validate_model(),
-  }
+  let model = trainer.validate_model()
   .map_err(|error| CaseError::from_error("validate_model", error))?;
   let validate_model_ns = duration_ns(started.elapsed());
 
   let started = Instant::now();
   let fingerprints = fingerprint_model(&model, &trainer.words).map_err(|error| CaseError::new("fingerprint", error))?;
   let fingerprint_ns = duration_ns(started.elapsed());
-  let final_merge_above_bigram_cutoff = request
+  let final_merge_at_or_above_bigram_cutoff = request
     .case
     .bigram_cutoff_freq
-    .map(|cutoff| last_merge_freq.is_some_and(|frequency| frequency > cutoff));
+    .map(|cutoff| last_merge_freq.is_none_or(|frequency| frequency >= cutoff));
   let core_training_ns = build_trainer_ns
     .saturating_add(init_training_ns)
     .saturating_add(training_steps_ns);
@@ -285,7 +283,7 @@ where
     step_buckets,
     model_valid: true,
     target_vocab_reached: final_vocab_size == request.case.target_vocab_size,
-    final_merge_above_bigram_cutoff,
+    final_merge_at_or_above_bigram_cutoff,
     hot_pair_window,
   })
 }
