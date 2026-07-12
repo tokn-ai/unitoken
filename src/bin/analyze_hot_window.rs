@@ -62,6 +62,7 @@ impl TieBreakArg {
 enum PolicyArg {
   ReplaceTopK,
   ThresholdNoEvict,
+  ThresholdHysteresis,
 }
 
 impl From<PolicyArg> for HotWindowPolicy {
@@ -69,6 +70,7 @@ impl From<PolicyArg> for HotWindowPolicy {
     match value {
       PolicyArg::ReplaceTopK => Self::ReplaceTopK,
       PolicyArg::ThresholdNoEvict => Self::ThresholdNoEvict,
+      PolicyArg::ThresholdHysteresis => Self::ThresholdHysteresis,
     }
   }
 }
@@ -92,14 +94,14 @@ struct Args {
   #[arg(long, default_value_t = 10_000)]
   vocab_size: usize,
 
-  /// Comma-separated top-K refill sizes; threshold-no-evict may grow beyond K.
+  /// Comma-separated top-K refill sizes; threshold policies may grow beyond K.
   #[arg(long, value_delimiter = ',', default_value = "256,1024,4096,16384")]
   window_sizes: Vec<usize>,
 
   #[arg(long, value_enum, default_value_t = TieBreakArg::SmallestPairId)]
   tie_break: TieBreakArg,
 
-  #[arg(long, value_enum, default_value_t = PolicyArg::ThresholdNoEvict)]
+  #[arg(long, value_enum, default_value_t = PolicyArg::ThresholdHysteresis)]
   policy: PolicyArg,
 
   /// Repeat to reserve more than one special token.
