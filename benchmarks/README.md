@@ -26,6 +26,7 @@ Training benchmarks use explicit contracts in their JSON metadata:
 
 ```text
 fixed_words_unitoken_training_core_profile
+fixed_words_exact_hot_window_simulation_v1
 fixed_words_unitoken_vs_hf_expanded_iterator
 raw_text_unitoken_trainer_profile
 raw_text_unitoken_vs_hf
@@ -84,6 +85,25 @@ python benchmarks/profile_training_core.py \
   --config-name ubigram10k \
   --experiment-name baseline_release
 ```
+
+Simulate bounded occurrence windows without changing exact merge selection:
+
+```bash
+cargo run --release --features analysis --bin analyze_hot_window -- \
+  --words out/data/fineweb2/cmn_Hani/fineweb2_cmn_Hani_1GiB.unicode_bigram_top10k_min16/_words.json \
+  --unit unicode \
+  --vocab-size 10000 \
+  --window-sizes 1024,4096,16384,65536 \
+  --dataset-name cmn_Hani_1GiB \
+  --config-name unicode \
+  --experiment-name replace_top_k
+```
+
+The simulator uses the exact trainer as an oracle. On a cold winner, it
+replaces the simulated window with the current top-K pairs and hydrates their
+word-occurrence sets in one inventory scan. Reports separate shared heap
+inspection time from per-window hydration time and include payload-only memory
+estimates for the full exact occurrence state and each simulated window.
 
 Example raw-text unitoken trainer profile:
 

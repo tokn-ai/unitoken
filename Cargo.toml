@@ -26,6 +26,11 @@ name = "unitoken"
 path = "src/main.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "analyze_hot_window"
+path = "src/bin/analyze_hot_window.rs"
+required-features = ["analysis"]
+
 [dependencies]
 ahash = { version = "0.8.12", features = ["serde"] }
 hashbrown = { version = "0.16.1", features = ["serde"] }
@@ -74,6 +79,7 @@ fmt-npz = ["npyz/npz"]
 plot = ["dep:textplots", "dep:rgb"]
 py = ["dep:pyo3", "dep:ndarray", "dep:numpy"]
 cli = ["dep:tracing-subscriber", "dep:indicatif", "dep:chrono", "dep:clap"]
+analysis = ["dep:clap", "dep:chrono"]
 
 [dev-dependencies]
 pyo3-introspection = "0.27"

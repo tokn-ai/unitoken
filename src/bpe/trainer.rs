@@ -7,6 +7,10 @@ use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train
 
 use super::*;
 
+#[cfg(any(test, feature = "analysis"))]
+#[doc(hidden)]
+pub mod analysis;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialAlphabet {
   /// Insert bytes in raw byte order, preserving GPT-2/tiktoken-compatible ids.
@@ -425,10 +429,17 @@ where
     C: CharToIdx<I>,
     I: HasChar<C>,
   {
-    let vocab_start_idx = special_tokens.len() as u64;
     let sp_set = special_tokens.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let tokens = Self::_words_to_tokens(words, vocab_start_idx, &sp_set, None);
-    Self::new_with_config(tokens, special_tokens.to_vec(), config)
+    let mut bpe = Self::new_with_config(Vec::new(), special_tokens.to_vec(), config);
+    let vocab_start_idx = bpe._byte_vocab_start_idx.unwrap();
+    let tokens = Self::_words_to_tokens(
+      words,
+      vocab_start_idx,
+      &sp_set,
+      Some(&bpe.byte_vocab),
+    );
+    bpe.words = tokens;
+    bpe
   }
 
   /// Create a trainer from already pre-tokenized words.
@@ -783,11 +794,20 @@ where
   /// This is the core training step once a merge candidate has been selected.
   #[hotpath::measure]
   pub fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
+    self._step_with_observer(merge, |_, _| {})
+  }
+
+  fn _step_with_observer<F>(&mut self, merge: Merge<C, I>, observe_changes: F) -> I
+  where
+    C: Clone,
+    F: FnOnce(&Self, Option<&AHashMap<(I, I), MergeData>>),
+  {
     let target_idx = self._add_vocab_idx();
     // if target = Some(j), this is a single char token, no need to merge.
     // but we have to add it to vocab.
     if merge.target.is_some() {
       self.vocab.insert(target_idx, merge.content.1.clone());
+      observe_changes(self, None);
       return target_idx;
     }
     let changes = self.merge(&merge, target_idx);
@@ -799,6 +819,7 @@ where
     self.vocab.insert(target_idx, merged_word);
     assert_eq!(-changes.get(&merge.tp).map(|i| i.freq).unwrap_or(0), merge.data.freq);
     metrics::histogram!("bpe_trainer.changes").record(changes.len() as f64);
+    observe_changes(self, Some(&changes));
     self.update_pre_merges(&merge, changes);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
