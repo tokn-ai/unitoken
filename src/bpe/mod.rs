@@ -1,7 +1,7 @@
 use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 pub mod trainer;
-mod hot_window;
+mod pair;
 pub mod model;
 pub mod encoder;
 pub mod utils;

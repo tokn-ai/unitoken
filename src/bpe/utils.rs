@@ -313,7 +313,6 @@ where
 pub(crate) fn _update_merge_map<C, I>(
   merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>,
   changes: AHashMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>,
-  update_occurrences: bool,
 ) -> Vec<(I, I)>
 where
   I: IdxLike + HasChar<C> + Hash,
@@ -347,7 +346,7 @@ where
     entry.data.freq += data.freq;
     // Keep affected-word sets lazy: positive deltas add possible positions,
     // negative deltas only repair frequency and leave stale positions behind.
-    if update_occurrences && data.freq > 0 {
+    if data.freq > 0 {
       entry.data.occurs_in.extend(data.occurs_in);
     }
     updated_tps.push(tp);

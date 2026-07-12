@@ -1,4 +1,4 @@
-use std::{cmp::{Ordering, Reverse}, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap, hash_map::Entry}, hash::Hash, ops::Range, sync::atomic::AtomicU64};
+use std::{cmp::{Ordering, Reverse}, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, hash::Hash, ops::Range, sync::atomic::AtomicU64};
 
 use ahash::{AHashMap, AHashSet};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -6,8 +6,8 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train}};
 
 use super::*;
-use super::hot_window::HotPairWindow;
-pub use super::hot_window::HotPairWindowStats;
+use super::pair::{PairState, PairStore};
+pub use super::pair::HotPairWindowStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialAlphabet {
@@ -115,9 +115,8 @@ pub struct BpeTrainer<C, I> {
   pub special_tokens: Vec<String>,
   pub vocab: BTreeMap<I, Word<C>>,
   pub merges: Vec<Merge<C, I>>,
-  pub pre_merges: HashMap<(I, I), Merge<C, I>>,
+  pub(crate) pre_merges: PairStore<C, I>,
   merge_heap: BinaryHeap<MergeCandidate<C, I>>,
-  hot_window: HotPairWindow<I>,
   pub words: Vec<PreToken<C, I>>,
 }
 
@@ -137,18 +136,18 @@ enum MergeCandidateKind {
 }
 
 impl<C, I> MergeCandidate<C, I> {
-  fn from_merge(merge: &Merge<C, I>, tie_break: TieBreak) -> Self
+  fn from_pair(tp: (I, I), pair: &PairState<C, I>, tie_break: TieBreak) -> Self
   where
     I: Copy,
   {
     Self {
-      freq: merge.data.freq,
-      tp: merge.tp,
+      freq: pair.freq,
+      tp,
       content: match tie_break {
         TieBreak::SmallestPairId => None,
-        TieBreak::LargestContent => Some(merge.content.clone()),
+        TieBreak::LargestContent => Some(pair.content.clone()),
       },
-      kind: if merge.target.is_some() {
+      kind: if pair.target.is_some() {
         MergeCandidateKind::InitialUnit
       } else {
         MergeCandidateKind::Pair
@@ -315,7 +314,7 @@ impl<C, I> Iterator for PreMergeRanges<'_, C, I> {
 // state. Keeping Unicode resolution here avoids duplicating it in each worker.
 struct PreMergeReducer<'a, C, I> {
   vocab: &'a BTreeMap<I, Word<C>>,
-  pre_merges: &'a mut HashMap<(I, I), Merge<C, I>>,
+  pre_merges: &'a mut PairStore<C, I>,
   vocab_contents: Option<BTreeSet<Word<C>>>,
   materialized_initial_units: AHashSet<I>,
   initial_sentinel: I,
@@ -341,7 +340,7 @@ where
   I: IdxLike + HasChar<C>,
 {
   fn new(
-    vocab: &'a BTreeMap<I, Word<C>>, pre_merges: &'a mut HashMap<(I, I), Merge<C, I>>,
+    vocab: &'a BTreeMap<I, Word<C>>, pre_merges: &'a mut PairStore<C, I>,
   ) -> Self {
     Self {
       vocab,
@@ -359,8 +358,7 @@ where
       return;
     }
     let tp = (self.initial_sentinel, unit);
-    if let Some(merge) = self.pre_merges.get_mut(&tp) {
-      merge.data.freq += freq;
+    if self.pre_merges.add_initial_freq(&tp, freq) {
       return;
     }
 
@@ -376,30 +374,20 @@ where
       return;
     }
 
-    let mut merge = Merge::new(tp, (self.empty_word.clone(), content)).with_target(unit);
-    merge.data.freq = freq;
-    self.pre_merges.insert(tp, merge);
+    let mut state = PairState::new((self.empty_word.clone(), content)).with_target(unit);
+    state.freq = freq;
+    self.pre_merges.insert_initial(tp, state);
   }
 
   #[inline]
   fn apply_pair(&mut self, tp: (I, I), data: PairPartial) {
     let vocab = self.vocab;
-    match self.pre_merges.entry(tp) {
-      Entry::Occupied(mut entry) => {
-        let merge = entry.get_mut();
-        merge.data.freq += data.freq;
-        merge.data.occurs_in.extend(data.occurs_in);
-      }
-      Entry::Vacant(entry) => {
-        let mut merge = Merge::new(
-          tp,
-          (resolve_vocab_word(vocab, tp.0), resolve_vocab_word(vocab, tp.1)),
-        );
-        merge.data.freq = data.freq;
-        merge.data.occurs_in.extend(data.occurs_in);
-        entry.insert(merge);
-      }
-    }
+    self.pre_merges.add_pair(
+      tp,
+      || (resolve_vocab_word(vocab, tp.0), resolve_vocab_word(vocab, tp.1)),
+      data.freq,
+      data.occurs_in,
+    );
   }
 
   #[inline]
@@ -464,7 +452,7 @@ where
     );
     let mut bpe = Self::empty();
     bpe.config = config;
-    bpe.hot_window.reset(config.hot_pair_window_size);
+    bpe.pre_merges.reset(config.hot_pair_window_size);
     bpe._vocab_insert_special_tokens(special_tokens);
     bpe._vocab_insert_all_single_byte();
     bpe.words = words;
@@ -671,15 +659,15 @@ impl<C, I> BpeTrainer<C, I> {
   }
 
   pub fn hot_pair_window_stats(&self) -> Option<&HotPairWindowStats> {
-    self.hot_window.stats()
+    self.pre_merges.stats()
   }
 
   pub fn hot_resident_pairs(&self) -> usize {
-    self.hot_window.len()
+    self.pre_merges.resident_len()
   }
 
   pub fn hot_occurrence_capacity(&self) -> usize {
-    self.hot_window.occurrence_capacity()
+    self.pre_merges.resident_occurrence_capacity()
   }
 
   /// Construct an empty trainer with no vocab, merges, or words.
@@ -691,9 +679,8 @@ impl<C, I> BpeTrainer<C, I> {
       config: BpeTrainerConfig::default(),
       vocab: BTreeMap::new(),
       merges: Vec::new(),
-      pre_merges: HashMap::new(),
+      pre_merges: PairStore::new(None),
       merge_heap: BinaryHeap::new(),
-      hot_window: HotPairWindow::new(None),
       special_tokens: Vec::new(),
       words: Vec::new(),
     }
@@ -716,13 +703,12 @@ where
 
   fn _build_pre_merges_with_options(&mut self, parallel: bool, chunk_units: usize) {
     debug!("Initializing BPE training with {} words", self.words.len());
-    self.pre_merges.clear();
     self.merge_heap.clear();
-    self.hot_window.reset(self.config.hot_pair_window_size);
-    let collect_occurrences = !self.hot_window.is_enabled();
+    self.pre_merges.reset(self.config.hot_pair_window_size);
+    let collect_occurrences = !self.pre_merges.is_bounded();
     self._build_pre_merges_batched(parallel, chunk_units, collect_occurrences);
     self.rebuild_merge_heap();
-    if self.hot_window.is_enabled() {
+    if self.pre_merges.is_bounded() {
       self.refill_hot_occurrences(None);
     }
   }
@@ -791,36 +777,37 @@ where
   }
 
   fn push_merge_candidate(&mut self, tp: (I, I)) {
-    let Some(merge) = self.pre_merges.get(&tp) else {
+    let Some(pair) = self.pre_merges.get(&tp) else {
       return;
     };
-    if merge.data.freq <= 0 {
+    if pair.freq <= 0 {
       return;
     }
-    self.merge_heap.push(MergeCandidate::from_merge(merge, self.config.tie_break));
+    self.merge_heap.push(MergeCandidate::from_pair(tp, pair, self.config.tie_break));
   }
 
   fn rebuild_merge_heap(&mut self) {
     self.merge_heap = self
       .pre_merges
-      .values()
-      .filter(|merge| merge.data.freq > 0)
-      .map(|merge| MergeCandidate::from_merge(merge, self.config.tie_break))
+      .iter()
+      .filter(|(_, pair)| pair.freq > 0)
+      .map(|(tp, pair)| MergeCandidate::from_pair(*tp, pair, self.config.tie_break))
       .collect();
   }
 
   fn ranked_top_pairs(&self) -> Vec<MergeCandidate<C, I>> {
-    let limit = self.hot_window.window_size();
+    let limit = self.pre_merges.window_size();
     let mut top = BinaryHeap::<Reverse<MergeCandidate<C, I>>>::with_capacity(
       limit.saturating_add(1),
     );
-    for merge in self
+    for (tp, pair) in self
       .pre_merges
-      .values()
-      .filter(|merge| merge.target.is_none() && merge.data.freq > 0)
+      .iter()
+      .filter(|(_, pair)| pair.target.is_none() && pair.freq > 0)
     {
-      top.push(Reverse(MergeCandidate::from_merge(
-        merge,
+      top.push(Reverse(MergeCandidate::from_pair(
+        *tp,
+        pair,
         self.config.tie_break,
       )));
       if top.len() > limit {
@@ -843,60 +830,52 @@ where
       .iter()
       .map(|candidate| (candidate.tp, candidate.freq))
       .collect::<Vec<_>>();
-    self.hot_window.hydrate(&ranked, &self.words, required);
+    self.pre_merges.hydrate(&ranked, &self.words, required);
   }
 
   fn prune_hot_occurrences(&mut self) {
-    if !self.hot_window.needs_prune() {
+    if !self.pre_merges.needs_prune() {
       return;
     }
 
     let mut ranked = self
-      .hot_window
+      .pre_merges
       .resident_pairs()
       .filter_map(|tp| {
-        let merge = self.pre_merges.get(tp)?;
-        (merge.target.is_none() && merge.data.freq > 0)
-          .then(|| MergeCandidate::from_merge(merge, self.config.tie_break))
+        let pair = self.pre_merges.get(tp)?;
+        (pair.target.is_none() && pair.freq > 0)
+          .then(|| MergeCandidate::from_pair(*tp, pair, self.config.tie_break))
       })
       .collect::<Vec<_>>();
     ranked.sort_unstable_by(|left, right| {
       right.cmp(left).then_with(|| left.tp.cmp(&right.tp))
     });
-    ranked.truncate(self.hot_window.window_size());
+    ranked.truncate(self.pre_merges.window_size());
     let ranked = ranked
       .into_iter()
       .map(|candidate| (candidate.tp, candidate.freq))
       .collect::<Vec<_>>();
-    self.hot_window.prune(&ranked);
+    self.pre_merges.prune(&ranked);
   }
 
   fn update_pre_merges(
     &mut self, merge: &Merge<C, I>, target_idx: I,
     changes: AHashMap<(I, I), MergeData>,
   ) {
-    let bounded = self.hot_window.is_enabled();
-    if bounded {
-      self.hot_window.apply_changes(target_idx, &changes);
-    }
-    let changed_tps = _update_merge_map(
-      &mut self.pre_merges,
-      merge,
+    let vocab = &self.vocab;
+    let changed_tps = self.pre_merges.apply_changes(
+      merge.tp,
+      target_idx,
       changes,
-      Some(&self.vocab),
-      !bounded,
+      |tp| (
+        _vocab_get(vocab, tp.0).unwrap(),
+        _vocab_get(vocab, tp.1).unwrap(),
+      ),
     );
     for tp in changed_tps {
       self.push_merge_candidate(tp);
     }
-    if bounded {
-      let dead_pairs = self
-        .hot_window
-        .resident_pairs()
-        .filter(|tp| self.pre_merges.get(tp).is_none_or(|merge| merge.data.freq <= 0))
-        .copied()
-        .collect::<Vec<_>>();
-      self.hot_window.remove_pairs(&dead_pairs);
+    if self.pre_merges.is_bounded() {
       self.prune_hot_occurrences();
     }
   }
@@ -910,31 +889,24 @@ where
       if candidate.freq <= 0 {
         continue;
       }
-      let Some(merge) = self.pre_merges.get(&candidate.tp) else {
+      let Some(pair) = self.pre_merges.get(&candidate.tp) else {
         continue;
       };
-      if merge.data.freq != candidate.freq {
+      if pair.freq != candidate.freq {
         continue;
       }
-      if candidate.content.as_ref().is_some_and(|content| merge.content != *content) {
+      if candidate.content.as_ref().is_some_and(|content| pair.content != *content) {
         continue;
       }
-      let is_pair = merge.target.is_none();
-      if self.hot_window.is_enabled()
+      let is_pair = pair.target.is_none();
+      if self.pre_merges.is_bounded()
         && is_pair
-        && !self.hot_window.contains(&candidate.tp)
+        && !self.pre_merges.is_resident(&candidate.tp)
       {
         self.refill_hot_occurrences(Some(candidate.tp));
       }
 
-      let mut merge = self.pre_merges.remove(&candidate.tp).unwrap();
-      if self.hot_window.is_enabled() && is_pair {
-        merge.data.occurs_in = self
-          .hot_window
-          .take(&candidate.tp)
-          .expect("a selected pair must have resident occurrences");
-      }
-      return Some(merge);
+      return self.pre_merges.take_merge(&candidate.tp);
     }
     None
   }
@@ -973,9 +945,7 @@ where
     self.update_pre_merges(&merge, target_idx, changes);
     metrics::histogram!("bpe_trainer.occurs_in").record(merge.data.occurs_in.len() as f64);
     metrics::histogram!("bpe_trainer.freq").record(merge.data.freq as f64);
-    if self.hot_window.is_enabled() {
-      merge.data.occurs_in = AHashSet::new();
-    }
+    merge.data.occurs_in = AHashSet::new();
     self.merges.push(merge);
     target_idx
   }
@@ -1123,7 +1093,7 @@ mod tests {
       let merge_tp = (
         lookup(&bpe, m.0).unwrap(), lookup(&bpe, m.1).unwrap()
       );
-      let merge = bpe.pre_merges.get(&merge_tp).unwrap().clone();
+      let merge = bpe.pre_merges.clone_merge(&merge_tp).unwrap();
       let target = bpe._add_vocab_idx();
       let changes = bpe.merge(&merge, target);
       assert_eq!(merge.data.freq, -changes.get(&merge_tp).cloned().unwrap().freq);
@@ -1148,21 +1118,21 @@ mod tests {
     bpe: &BpeTrainer<C, I>,
   ) -> BTreeMap<(I, I), (String, String, Option<I>, Freq, Vec<u64>)>
   where
-    I: Copy + Ord,
+    I: Copy + Ord + Hash,
     Word<C>: WordDebugExt,
   {
     bpe
       .pre_merges
       .iter()
-      .map(|(tp, merge)| {
+      .map(|(tp, pair)| {
         (
           *tp,
           (
-            merge.content.0.debug_display(),
-            merge.content.1.debug_display(),
-            merge.target,
-            merge.data.freq,
-            merge.data.occurs_in_vec(),
+            pair.content.0.debug_display(),
+            pair.content.1.debug_display(),
+            pair.target,
+            pair.freq,
+            bpe.pre_merges.occurrence_vec(tp),
           ),
         )
       })
@@ -1175,12 +1145,11 @@ mod tests {
     I: IdxLike + HasChar<C>,
     Word<C>: WordDebugExt,
   {
-    bpe.pre_merges.clear();
+    bpe.pre_merges.reset(None);
     bpe.merge_heap.clear();
     {
       let words = &bpe.words;
       let vocab = &bpe.vocab;
-      let pre_merges = &mut bpe.pre_merges;
       let mut vocab_contents = None;
       let mut materialized_initial_units = AHashSet::new();
       let resolve = |unit: I| {
@@ -1200,8 +1169,7 @@ mod tests {
             continue;
           }
           let tp = (initial_sentinel, unit);
-          if let Some(merge) = pre_merges.get_mut(&tp) {
-            merge.data.freq += word.freq;
+          if bpe.pre_merges.add_initial_freq(&tp, word.freq) {
             continue;
           }
 
@@ -1213,16 +1181,18 @@ mod tests {
             materialized_initial_units.insert(unit);
             continue;
           }
-          let mut merge = Merge::new(tp, (empty_word.clone(), content)).with_target(unit);
-          merge.data.freq = word.freq;
-          pre_merges.insert(tp, merge);
+          let mut state = PairState::new((empty_word.clone(), content)).with_target(unit);
+          state.freq = word.freq;
+          bpe.pre_merges.insert_initial(tp, state);
         }
 
         for tp in word.idxs.iter().copied().zip(word.idxs.iter().skip(1).copied()) {
-          let merge = pre_merges
-            .entry(tp)
-            .or_insert_with(|| Merge::new(tp, (resolve(tp.0), resolve(tp.1))));
-          merge.add(word_idx as u64, word.freq);
+          bpe.pre_merges.add_pair(
+            tp,
+            || (resolve(tp.0), resolve(tp.1)),
+            word.freq,
+            [word_idx as u64],
+          );
         }
       }
     }
@@ -1463,6 +1433,90 @@ mod tests {
   }
 
   #[test]
+  fn test_exact_and_bounded_modes_share_occurs_in_store() {
+    let mut exact = BpeTrainer::<u8, Idx>::from_words([("abc", 1)], &[]);
+    exact.init_training();
+    assert_eq!(exact.pre_merges.occurrence_set_count(), 2);
+    assert_eq!(exact.hot_resident_pairs(), 0);
+
+    let mut bounded = BpeTrainer::<u8, Idx>::from_words_with_config(
+      [("abc", 1)],
+      &[],
+      BpeTrainerConfig {
+        hot_pair_window_size: Some(1),
+        ..BpeTrainerConfig::default()
+      },
+    );
+    bounded.init_training();
+    assert_eq!(bounded.pre_merges.occurrence_set_count(), 1);
+    assert_eq!(bounded.hot_resident_pairs(), 1);
+  }
+
+  #[test]
+  fn test_exact_mode_releases_selected_occurs_in_from_store_and_history() {
+    let mut trainer = BpeTrainer::<u8, Idx>::from_words([("abc", 1)], &[]);
+    trainer.init_training();
+    assert_eq!(trainer.pre_merges.occurrence_set_count(), 2);
+
+    trainer.step().unwrap();
+
+    // The selected slot is released and immediately reused by the new pair.
+    assert_eq!(trainer.pre_merges.occurrence_set_count(), 2);
+    assert!(trainer.merges.last().unwrap().data.occurs_in.is_empty());
+  }
+
+  #[test]
+  fn test_hot_pair_window_matches_exact_with_signed_frequencies() {
+    fn train(
+      tie_break: TieBreak,
+      hot_pair_window_size: Option<usize>,
+    ) -> (Vec<(Idx, String)>, Vec<(String, String, Freq)>, Vec<Vec<Idx>>) {
+      let mut trainer = BpeTrainer::<u8, Idx>::from_words_with_config(
+        [
+          ("abca", 7),
+          ("abda", -2),
+          ("bcab", 5),
+          ("zzab", 3),
+        ],
+        &[],
+        BpeTrainerConfig {
+          tie_break,
+          hot_pair_window_size,
+          ..BpeTrainerConfig::default()
+        },
+      );
+      trainer.init_training();
+      while trainer.step().is_ok() {}
+      (
+        trainer
+          .vocab
+          .iter()
+          .map(|(idx, word)| (*idx, word.debug_display()))
+          .collect(),
+        trainer
+          .merges
+          .iter()
+          .map(|merge| (
+            merge.content.0.debug_display(),
+            merge.content.1.debug_display(),
+            merge.data.freq,
+          ))
+          .collect(),
+        trainer.words.iter().map(|word| word.idxs.clone()).collect(),
+      )
+    }
+
+    for tie_break in [TieBreak::SmallestPairId, TieBreak::LargestContent] {
+      for window_size in [1, 2, 4] {
+        assert_eq!(
+          train(tie_break, Some(window_size)),
+          train(tie_break, None),
+        );
+      }
+    }
+  }
+
+  #[test]
   fn test_hot_pair_window_bounds_and_releases_occurrences() {
     let mut trainer = BpeTrainer::<u8, Idx>::from_words_with_config(
       [
@@ -1481,7 +1535,6 @@ mod tests {
     );
 
     trainer.init_training();
-    assert!(trainer.pre_merges.values().all(|merge| merge.data.occurs_in.is_empty()));
     assert_eq!(trainer.hot_resident_pairs(), 1);
     assert_eq!(trainer.hot_pair_window_stats().unwrap().hydration_scans, 1);
 
@@ -1506,13 +1559,7 @@ mod tests {
       },
     );
     trainer.init_training();
-    let residents = trainer
-      .pre_merges
-      .keys()
-      .copied()
-      .map(|tp| (tp, AHashSet::new()))
-      .collect();
-    trainer.hot_window.replace_residents(residents);
+    trainer.pre_merges.force_all_resident_empty();
 
     trainer.prune_hot_occurrences();
 
@@ -1536,12 +1583,10 @@ mod tests {
     trainer.step().unwrap();
 
     let target = 256;
-    let occurrences = trainer
-      .hot_window
-      .occurrences(&(target, b'q' as Idx))
-      .unwrap();
-    assert_eq!(occurrences.len(), 3);
-    assert!([0, 1, 2].into_iter().all(|word_idx| occurrences.contains(&word_idx)));
+    assert_eq!(
+      trainer.pre_merges.occurrence_vec(&(target, b'q' as Idx)),
+      [0, 1, 2],
+    );
     assert_eq!(trainer.hot_pair_window_stats().unwrap().hydration_scans, 1);
   }
 
@@ -1556,15 +1601,15 @@ mod tests {
       },
     );
     trainer.init_training();
-    assert!(trainer.hot_window.contains(&(b'b' as Idx, b'a' as Idx)));
+    assert!(trainer.pre_merges.is_resident(&(b'b' as Idx, b'a' as Idx)));
 
     trainer.step().unwrap();
 
     assert_eq!(
-      trainer.pre_merges[&(b'b' as Idx, b'a' as Idx)].data.freq,
+      trainer.pre_merges.get(&(b'b' as Idx, b'a' as Idx)).unwrap().freq,
       0,
     );
-    assert!(!trainer.hot_window.contains(&(b'b' as Idx, b'a' as Idx)));
+    assert!(!trainer.pre_merges.is_resident(&(b'b' as Idx, b'a' as Idx)));
   }
 
   #[test]
@@ -1585,7 +1630,7 @@ mod tests {
       trainer.init_training();
 
       let resident = trainer
-        .hot_window
+        .pre_merges
         .resident_pairs()
         .copied()
         .collect::<AHashSet<_>>();
@@ -1611,7 +1656,7 @@ mod tests {
 
     assert_eq!(trainer.hot_resident_pairs(), 1);
     assert_eq!(
-      trainer.hot_window.resident_pairs().copied().next(),
+      trainer.pre_merges.resident_pairs().copied().next(),
       Some((CharIdx::Char('你'), CharIdx::Idx(b'a' as Idx))),
     );
   }
@@ -1654,11 +1699,11 @@ mod tests {
     assert_eq!(pre_merge_snapshot(&byte_parallel), byte_expected);
     assert_eq!(byte_parallel.pre_merges.len(), 2);
     let aa = (b'a' as Idx, b'a' as Idx);
-    assert_eq!(byte_parallel.pre_merges.get(&aa).unwrap().data.freq, 14);
-    assert_eq!(byte_parallel.pre_merges.get(&aa).unwrap().data.occurs_in_vec(), [0, 1]);
+    assert_eq!(byte_parallel.pre_merges.get(&aa).unwrap().freq, 14);
+    assert_eq!(byte_parallel.pre_merges.occurrence_vec(&aa), [0, 1]);
     let bb = (b'b' as Idx, b'b' as Idx);
-    assert_eq!(byte_parallel.pre_merges.get(&bb).unwrap().data.freq, 10);
-    assert_eq!(byte_parallel.pre_merges.get(&bb).unwrap().data.occurs_in_vec(), [2]);
+    assert_eq!(byte_parallel.pre_merges.get(&bb).unwrap().freq, 10);
+    assert_eq!(byte_parallel.pre_merges.occurrence_vec(&bb), [2]);
 
     let words = [("你你", 3), ("你", 5), ("你好你", 7)];
     let mut unicode_reference = BpeTrainer::<Character, CharIdx>::from_words(words, &[]);
@@ -1673,17 +1718,17 @@ mod tests {
     assert_eq!(pre_merge_snapshot(&unicode_parallel), unicode_expected);
     assert_eq!(unicode_parallel.pre_merges.len(), 5);
     let initial_ni = (CharIdx::Idx(u32::MAX), CharIdx::Char('你'));
-    assert_eq!(unicode_parallel.pre_merges.get(&initial_ni).unwrap().data.freq, 25);
+    assert_eq!(unicode_parallel.pre_merges.get(&initial_ni).unwrap().freq, 25);
     let initial_hao = (CharIdx::Idx(u32::MAX), CharIdx::Char('好'));
-    assert_eq!(unicode_parallel.pre_merges.get(&initial_hao).unwrap().data.freq, 7);
+    assert_eq!(unicode_parallel.pre_merges.get(&initial_hao).unwrap().freq, 7);
     for (tp, freq, occurs_in) in [
       ((CharIdx::Char('你'), CharIdx::Char('你')), 3, vec![0]),
       ((CharIdx::Char('你'), CharIdx::Char('好')), 7, vec![2]),
       ((CharIdx::Char('好'), CharIdx::Char('你')), 7, vec![2]),
     ] {
-      let merge = unicode_parallel.pre_merges.get(&tp).unwrap();
-      assert_eq!(merge.data.freq, freq);
-      assert_eq!(merge.data.occurs_in_vec(), occurs_in);
+      let pair = unicode_parallel.pre_merges.get(&tp).unwrap();
+      assert_eq!(pair.freq, freq);
+      assert_eq!(unicode_parallel.pre_merges.occurrence_vec(&tp), occurs_in);
     }
 
     unicode_reference.step().unwrap();
@@ -1710,10 +1755,10 @@ mod tests {
     assert_eq!(pre_merge_snapshot(&signed_sequential), signed_expected);
     assert_eq!(pre_merge_snapshot(&signed_parallel), signed_expected);
     assert_eq!(signed_parallel.pre_merges.len(), 2);
-    assert_eq!(signed_parallel.pre_merges.get(&aa).unwrap().data.freq, 0);
-    assert_eq!(signed_parallel.pre_merges.get(&aa).unwrap().data.occurs_in_vec(), [1, 2, 3]);
-    assert_eq!(signed_parallel.pre_merges.get(&bb).unwrap().data.freq, 1);
-    assert_eq!(signed_parallel.pre_merges.get(&bb).unwrap().data.occurs_in_vec(), [4]);
+    assert_eq!(signed_parallel.pre_merges.get(&aa).unwrap().freq, 0);
+    assert_eq!(signed_parallel.pre_merges.occurrence_vec(&aa), [1, 2, 3]);
+    assert_eq!(signed_parallel.pre_merges.get(&bb).unwrap().freq, 1);
+    assert_eq!(signed_parallel.pre_merges.occurrence_vec(&bb), [4]);
     signed_parallel.step().unwrap();
     assert_eq!(signed_parallel.merges.last().unwrap().content.0.debug_display(), "b");
     assert_eq!(signed_parallel.merges.last().unwrap().content.1.debug_display(), "b");
@@ -1742,7 +1787,7 @@ mod tests {
       signed_unicode_expected,
     );
     let signed_initial_ni = (CharIdx::Idx(u32::MAX), CharIdx::Char('你'));
-    assert_eq!(signed_unicode_parallel.pre_merges.get(&signed_initial_ni).unwrap().data.freq, 0);
+    assert_eq!(signed_unicode_parallel.pre_merges.get(&signed_initial_ni).unwrap().freq, 0);
     signed_unicode_parallel.step().unwrap();
     assert_eq!(signed_unicode_parallel.merges.last().unwrap().content.0.debug_display(), "a");
     assert_eq!(signed_unicode_parallel.merges.last().unwrap().content.1.debug_display(), "b");
@@ -1913,14 +1958,14 @@ mod tests {
 
     bpe.init_training();
 
-    assert_eq!(bpe.pre_merges.get(&initial_unit).unwrap().data.freq, 11);
-    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().data.freq, 3);
+    assert_eq!(bpe.pre_merges.get(&initial_unit).unwrap().freq, 11);
+    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().freq, 3);
 
     bpe.step().unwrap();
     bpe.init_training();
 
     assert!(!bpe.pre_merges.contains_key(&initial_unit));
-    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().data.freq, 3);
+    assert_eq!(bpe.pre_merges.get(&repeated_pair).unwrap().freq, 3);
   }
 
   #[test]
