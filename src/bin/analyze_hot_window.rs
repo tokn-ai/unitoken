@@ -9,6 +9,7 @@ use std::{
 use clap::{Parser, ValueEnum};
 use ordermap::OrderMap;
 use serde::Serialize;
+use serde_json::Value;
 use unitoken::bpe::{
   trainer::analysis::{
     analyze_byte_words, analyze_unicode_words, HotWindowAnalysisReport,
@@ -18,6 +19,7 @@ use unitoken::bpe::{
 };
 
 const TOOL_NAME: &str = "analyze_hot_window";
+const WORD_INVENTORY_MANIFEST_CONTRACT: &str = "unitoken_word_inventory_manifest_v1";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Unit {
@@ -159,13 +161,88 @@ struct Source<'a> {
   initial_alphabet: &'a str,
   tie_break: &'a str,
   special_tokens: &'a [String],
+  word_inventory_manifest_path: Option<&'a Path>,
+  word_inventory_manifest: Option<&'a Value>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct BigramFrequencyGuard {
+  cutoff_freq: Option<Freq>,
+  max_excluded_freq: Option<Freq>,
+  final_merge_freq: Option<Freq>,
+  final_merge_minus_bigram_cutoff: Option<Freq>,
+  final_merge_above_bigram_cutoff: Option<bool>,
+  final_merge_above_max_excluded_freq: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct Output<'a> {
   metadata: Metadata<'a>,
   source: Source<'a>,
+  bigram_frequency_guard: Option<BigramFrequencyGuard>,
   analysis: HotWindowAnalysisReport,
+}
+
+fn word_inventory_manifest_path(words_path: &Path) -> PathBuf {
+  let stem = words_path
+    .file_stem()
+    .and_then(|stem| stem.to_str())
+    .unwrap_or("words");
+  words_path.with_file_name(format!("{stem}.manifest.json"))
+}
+
+fn load_word_inventory_manifest(words_path: &Path) -> Result<Option<(PathBuf, Value)>, Box<dyn Error>> {
+  let path = word_inventory_manifest_path(words_path);
+  if !path.exists() {
+    return Ok(None);
+  }
+  let manifest = serde_json::from_reader::<_, Value>(BufReader::new(File::open(&path)?))?;
+  if manifest.get("contract").and_then(Value::as_str)
+    != Some(WORD_INVENTORY_MANIFEST_CONTRACT)
+  {
+    return Err(format!("unsupported word inventory manifest: {}", path.display()).into());
+  }
+  if manifest
+    .pointer("/words/file_name")
+    .and_then(Value::as_str)
+    != words_path.file_name().and_then(|name| name.to_str())
+  {
+    return Err(format!("word inventory manifest does not describe {}", words_path.display()).into());
+  }
+  if manifest.pointer("/words/bytes").and_then(Value::as_u64)
+    != Some(fs::metadata(words_path)?.len())
+  {
+    return Err(format!("word inventory manifest byte size does not match {}", words_path.display()).into());
+  }
+  Ok(Some((path, manifest)))
+}
+
+fn bigram_frequency_guard(
+  final_merge_freq: Option<Freq>,
+  manifest: Option<&Value>,
+) -> Option<BigramFrequencyGuard> {
+  let bigrams = manifest?.get("unicode_bigrams")?;
+  if bigrams.is_null() {
+    return None;
+  }
+  let cutoff_freq = bigrams.get("cutoff_freq").and_then(Value::as_i64);
+  let max_excluded_freq = bigrams
+    .get("max_excluded_freq")
+    .and_then(Value::as_i64);
+  Some(BigramFrequencyGuard {
+    cutoff_freq,
+    max_excluded_freq,
+    final_merge_freq,
+    final_merge_minus_bigram_cutoff: final_merge_freq
+      .zip(cutoff_freq)
+      .and_then(|(final_freq, cutoff)| final_freq.checked_sub(cutoff)),
+    final_merge_above_bigram_cutoff: final_merge_freq
+      .zip(cutoff_freq)
+      .map(|(final_freq, cutoff)| final_freq > cutoff),
+    final_merge_above_max_excluded_freq: final_merge_freq
+      .zip(max_excluded_freq)
+      .map(|(final_freq, max_excluded)| final_freq > max_excluded),
+  })
 }
 
 fn inferred_dataset_name(path: &Path) -> String {
@@ -225,6 +302,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("warning: debug build; use `cargo run --release --features analysis --bin analyze_hot_window -- ...` for timing data");
   }
 
+  let word_inventory_manifest = load_word_inventory_manifest(&args.words)?;
+
   let file = File::open(&args.words)?;
   let words = serde_json::from_reader::<_, OrderMap<String, Freq>>(BufReader::new(file))?;
   let raw_unique_words = words.len();
@@ -265,6 +344,10 @@ fn main() -> Result<(), Box<dyn Error>> {
       args.policy.into(),
     ),
   };
+  let frequency_guard = bigram_frequency_guard(
+    analysis.final_merge_freq,
+    word_inventory_manifest.as_ref().map(|(_, manifest)| manifest),
+  );
 
   let dataset_name = args
     .dataset_name
@@ -318,7 +401,14 @@ fn main() -> Result<(), Box<dyn Error>> {
       },
       tie_break: args.tie_break.as_str(),
       special_tokens: &args.special_tokens,
+      word_inventory_manifest_path: word_inventory_manifest
+        .as_ref()
+        .map(|(path, _)| path.as_path()),
+      word_inventory_manifest: word_inventory_manifest
+        .as_ref()
+        .map(|(_, manifest)| manifest),
     },
+    bigram_frequency_guard: frequency_guard,
     analysis,
   };
 
@@ -335,4 +425,41 @@ fn main() -> Result<(), Box<dyn Error>> {
   writer.flush()?;
   eprintln!("wrote {}", output_path.display());
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+
+  #[test]
+  fn manifest_path_stays_next_to_words() {
+    assert_eq!(
+      word_inventory_manifest_path(Path::new("inventory/_words.json")),
+      PathBuf::from("inventory/_words.manifest.json"),
+    );
+  }
+
+  #[test]
+  fn frequency_guard_reports_strict_cutoff_boundary() {
+    let manifest = json!({
+      "unicode_bigrams": {
+        "cutoff_freq": 5,
+        "max_excluded_freq": 4,
+      },
+    });
+    assert_eq!(
+      bigram_frequency_guard(Some(5), Some(&manifest)),
+      Some(BigramFrequencyGuard {
+        cutoff_freq: Some(5),
+        max_excluded_freq: Some(4),
+        final_merge_freq: Some(5),
+        final_merge_minus_bigram_cutoff: Some(0),
+        final_merge_above_bigram_cutoff: Some(false),
+        final_merge_above_max_excluded_freq: Some(true),
+      }),
+    );
+    assert_eq!(bigram_frequency_guard(Some(5), None), None);
+  }
 }

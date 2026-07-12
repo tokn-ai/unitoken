@@ -14,10 +14,13 @@ from uni_tokenizer import BpeTrainer
 from common import SPECIAL_TOKENS
 from common import add_report_args
 from common import benchmark_metadata
+from common import bigram_frequency_guard
 from common import bucket_steps
 from common import duration_summary
 from common import load_words
+from common import load_word_inventory_manifest
 from common import resolve_report_path
+from common import word_inventory_manifest_path
 from common import write_report
 
 
@@ -77,6 +80,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--bucket-size must be at least 1")
 
   words = load_words(args.words, args.max_occurrences)
+  manifest = load_word_inventory_manifest(args.words)
+  unitoken_result = profile_training_core(words, args.vocab_size, args.bucket_size, args.unit)
+  guard = (
+    bigram_frequency_guard(unitoken_result["final_merge_freq"], manifest)
+    if args.max_occurrences is None
+    else None
+  )
+  if guard is not None:
+    unitoken_result["bigram_frequency_guard"] = guard
   result = {
     "metadata": benchmark_metadata(
       contract="fixed_words_unitoken_training_core_profile",
@@ -96,9 +108,15 @@ def main(argv: Sequence[str] | None = None) -> int:
       "occurrences": sum(freq for _, freq in words),
       "unitoken_input_kind": "compressed_word_counts",
       "unit": args.unit,
+      "word_inventory_manifest_path": (
+        str(word_inventory_manifest_path(args.words))
+        if manifest is not None
+        else None
+      ),
+      "word_inventory_manifest": manifest,
     },
     "target_vocab_size": args.vocab_size,
-    "unitoken": profile_training_core(words, args.vocab_size, args.bucket_size, args.unit),
+    "unitoken": unitoken_result,
   }
 
   rendered = json.dumps(result, indent=2)

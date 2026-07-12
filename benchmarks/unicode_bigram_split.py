@@ -20,6 +20,7 @@ from common import SPECIAL_TOKENS
 from common import add_report_args
 from common import benchmark_metadata
 from common import resolve_report_path
+from common import write_word_inventory_manifest
 from common import write_report
 
 
@@ -153,6 +154,18 @@ def main(argv: Sequence[str] | None = None) -> int:
   )
   unicode_bigrams = bigram_selection.bigrams
   build_bigrams_s = time.perf_counter() - started
+  unicode_bigram_manifest = {
+    "top_k": args.top_k,
+    "min_freq": args.min_freq,
+    "mixed_boundary": unicode_bigram_mixed_boundary,
+    "retained": len(unicode_bigrams),
+    "cutoff_freq": bigram_selection.cutoff_freq,
+    "max_excluded_freq": bigram_selection.max_excluded_freq,
+  }
+  unicode_bigram_result = {
+    **unicode_bigram_manifest,
+    "build_s": build_bigrams_s,
+  }
 
   baseline_words, baseline_pretokenize_s = collect_words(base, args.text, args.chunk_size, boundary)
   split = PreTokenizer(
@@ -162,9 +175,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     unicode_bigram_mixed_boundary=unicode_bigram_mixed_boundary,
   )
   split_words, split_pretokenize_s = collect_words(split, args.text, args.chunk_size, boundary)
+  words_manifest = None
   if args.save_words:
     args.save_words.parent.mkdir(parents=True, exist_ok=True)
     save_words(args.save_words, split_words)
+    words_manifest = write_word_inventory_manifest(
+      args.save_words,
+      source={
+        "input_kind": "raw_text",
+        "path": str(args.text),
+        "bytes": args.text.stat().st_size,
+      },
+      pretokenizer={
+        "special_tokens": SPECIAL_TOKENS,
+        "end_of_text": SPECIAL_TOKENS[0],
+        "pat_str": "default",
+        "chunk_size": args.chunk_size,
+        "boundary": boundary,
+        "unicode_bigram_mixed_boundary": unicode_bigram_mixed_boundary,
+      },
+      unicode_bigrams=unicode_bigram_manifest,
+      unique_words=len(split_words),
+      weighted_occurrences=sum(split_words.values()),
+    )
 
   result: dict[str, Any] = {
     "metadata": benchmark_metadata(
@@ -186,15 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       "boundary": boundary,
       "unit": unit,
     },
-    "unicode_bigram": {
-      "top_k": args.top_k,
-      "min_freq": args.min_freq,
-      "mixed_boundary": unicode_bigram_mixed_boundary,
-      "retained": len(unicode_bigrams),
-      "cutoff_freq": bigram_selection.cutoff_freq,
-      "max_excluded_freq": bigram_selection.max_excluded_freq,
-      "build_s": build_bigrams_s,
-    },
+    "unicode_bigram": unicode_bigram_result,
     "baseline": {
       "pretokenize_s": baseline_pretokenize_s,
       **inventory_summary(baseline_words),
@@ -202,6 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     "unicode_bigram_split": {
       "pretokenize_s": split_pretokenize_s,
       **inventory_summary(split_words),
+      "words_manifest": str(words_manifest) if words_manifest else None,
     },
   }
 

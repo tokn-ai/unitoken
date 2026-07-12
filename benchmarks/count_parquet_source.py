@@ -13,6 +13,8 @@ import pyarrow.parquet as pq
 
 from uni_tokenizer import PreTokenizer
 
+from common import write_word_inventory_manifest
+
 
 GIB = 1024 ** 3
 DEFAULT_WORDS_OUTPUT = (
@@ -146,6 +148,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
   started = time.perf_counter()
   word_counter.save(args.words_output)
   save_s = time.perf_counter() - started
+  words_manifest = write_word_inventory_manifest(
+    args.words_output,
+    source={
+      "input_kind": "parquet_records",
+      "input_dir": str(args.input_dir),
+      "files": [
+        {"path": str(path), "bytes": path.stat().st_size}
+        for path in source.paths
+      ],
+      "size_bytes": args.size_bytes,
+      "column": args.column,
+      "records": word_pass["records"],
+      "bytes": word_pass["bytes"],
+    },
+    pretokenizer={
+      "special_tokens": [],
+      "end_of_text": None,
+      "pat_str": "default",
+      "boundary": "source_record",
+      "unicode_bigram_mixed_boundary": "keep",
+    },
+    unicode_bigrams={
+      "top_k": args.top_k,
+      "min_freq": args.min_freq,
+      "selected": len(bigrams),
+      "cutoff_freq": bigram_selection.cutoff_freq,
+      "max_excluded_freq": bigram_selection.max_excluded_freq,
+    },
+    unique_words=word_counter.len,
+    weighted_occurrences=None,
+  )
 
   return {
     "contract": "parquet_source_two_pass_exact_words",
@@ -170,6 +203,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     "word_pass": word_pass,
     "unique_words": word_counter.len,
     "words_output": str(args.words_output),
+    "words_manifest": str(words_manifest),
     "words_output_bytes": args.words_output.stat().st_size,
     "save_words_s": save_s,
     "max_rss_bytes": max_rss_bytes(),

@@ -18,6 +18,85 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SPECIAL_TOKENS = ["<|endoftext|>"]
 DEFAULT_CHUNK_SIZE = 1024 * 1024
 DEFAULT_BENCHMARK_DIR = Path("out") / "benchmarks"
+WORD_INVENTORY_MANIFEST_CONTRACT = "unitoken_word_inventory_manifest_v1"
+
+
+def word_inventory_manifest_path(words_path: Path) -> Path:
+  return words_path.with_name(f"{words_path.stem}.manifest.json")
+
+
+def write_word_inventory_manifest(
+  words_path: Path,
+  *,
+  source: dict[str, Any],
+  pretokenizer: dict[str, Any],
+  unicode_bigrams: dict[str, Any] | None,
+  unique_words: int,
+  weighted_occurrences: int | None,
+) -> Path:
+  manifest_path = word_inventory_manifest_path(words_path)
+  manifest = {
+    "contract": WORD_INVENTORY_MANIFEST_CONTRACT,
+    "words": {
+      "file_name": words_path.name,
+      "bytes": words_path.stat().st_size,
+      "unique_words": unique_words,
+      "weighted_occurrences": weighted_occurrences,
+    },
+    "source": source,
+    "pretokenizer": pretokenizer,
+    "unicode_bigrams": unicode_bigrams,
+  }
+  manifest_path.write_text(
+    json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+  )
+  return manifest_path
+
+
+def load_word_inventory_manifest(words_path: Path) -> dict[str, Any] | None:
+  manifest_path = word_inventory_manifest_path(words_path)
+  if not manifest_path.exists():
+    return None
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  if manifest.get("contract") != WORD_INVENTORY_MANIFEST_CONTRACT:
+    raise ValueError(f"unsupported word inventory manifest: {manifest_path}")
+  if manifest.get("words", {}).get("file_name") != words_path.name:
+    raise ValueError(f"word inventory manifest does not describe {words_path}")
+  if manifest.get("words", {}).get("bytes") != words_path.stat().st_size:
+    raise ValueError(f"word inventory manifest byte size does not match {words_path}")
+  return manifest
+
+
+def bigram_frequency_guard(
+  final_merge_freq: int | None,
+  manifest: dict[str, Any] | None,
+) -> dict[str, int | bool | None] | None:
+  if manifest is None or manifest.get("unicode_bigrams") is None:
+    return None
+  bigrams = manifest["unicode_bigrams"]
+  cutoff_freq = bigrams.get("cutoff_freq")
+  max_excluded_freq = bigrams.get("max_excluded_freq")
+  return {
+    "cutoff_freq": cutoff_freq,
+    "max_excluded_freq": max_excluded_freq,
+    "final_merge_freq": final_merge_freq,
+    "final_merge_minus_bigram_cutoff": (
+      final_merge_freq - cutoff_freq
+      if final_merge_freq is not None and cutoff_freq is not None
+      else None
+    ),
+    "final_merge_above_bigram_cutoff": (
+      final_merge_freq > cutoff_freq
+      if final_merge_freq is not None and cutoff_freq is not None
+      else None
+    ),
+    "final_merge_above_max_excluded_freq": (
+      final_merge_freq > max_excluded_freq
+      if final_merge_freq is not None and max_excluded_freq is not None
+      else None
+    ),
+  }
 
 
 def load_words(path: Path, max_occurrences: int | None) -> list[tuple[str, int]]:

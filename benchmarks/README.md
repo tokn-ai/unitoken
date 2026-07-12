@@ -122,6 +122,12 @@ same experiment, `final_merge_above_bigram_cutoff` is the strict configuration
 guard: equality or a lower final merge frequency is reported as a failed guard,
 but the benchmark still completes so the failure can be inspected.
 
+Saved word inventories may carry a sibling `_words.manifest.json`. The
+manifest records source identity, pretokenizer settings, Unicode-bigram
+selection boundaries, and inventory statistics. Fixed-word training and
+hot-window reports load this sidecar automatically and evaluate the frequency
+guard without relying on directory names.
+
 Example raw-text unitoken trainer profile:
 
 ```bash
