@@ -4,7 +4,7 @@ from collections.abc import Iterator, Sequence
 from os import PathLike
 from typing import Literal, Protocol
 
-from ._lib import BigramCounter, PreTokenizer as _PreTokenizer, WordCounter
+from ._lib import BigramCounter, PreTokenizer as _PreTokenizer, UnicodeBigramSelection, WordCounter
 
 
 BoundaryMode = Literal["auto", "eot", "line", "utf8"]
@@ -94,6 +94,24 @@ class PreTokenizer:
     min_freq: int = 16,
   ) -> list[str]:
     return self._inner.build_unicode_bigrams_from_file(
+      path,
+      chunk_size=chunk_size,
+      boundary=boundary,
+      top_k=top_k,
+      min_freq=min_freq,
+    )
+
+  def select_unicode_bigrams_from_file(
+    self,
+    path: str | PathLike,
+    *,
+    chunk_size: int = 1024 * 1024,
+    boundary: BoundaryMode = "auto",
+    top_k: int = 100_000,
+    min_freq: int = 16,
+  ) -> UnicodeBigramSelection:
+    """Select Unicode bigrams and retain their effective frequency boundary."""
+    return self._inner.select_unicode_bigrams_from_file(
       path,
       chunk_size=chunk_size,
       boundary=boundary,

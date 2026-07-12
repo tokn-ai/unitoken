@@ -69,6 +69,11 @@ class BpeTrainer:
     return self._trainer.vocab_size()
 
   @property
+  def last_merge_freq(self) -> int | None:
+    """Frequency of the most recently completed pair merge."""
+    return self._trainer.last_merge_freq
+
+  @property
   def unit(self) -> Unit:
     """Atomic BPE unit used by this trainer."""
     return self._unit

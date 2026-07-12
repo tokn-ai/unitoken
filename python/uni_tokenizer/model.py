@@ -22,6 +22,11 @@ class BpeModel:
     """Return a snapshot of the validated token-to-id vocabulary."""
     return dict(self._model.get_vocab().items())
 
+  @property
+  def last_merge_freq(self) -> int | None:
+    """Frequency of the final pair merge, if the model contains one."""
+    return self._model.last_merge_freq
+
   def save_vocab_json(
     self,
     path: str | PathLike,

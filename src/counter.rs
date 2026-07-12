@@ -9,7 +9,7 @@ use crate::{
   bpe::Freq,
   pretokenizer::{
     PreTokenizer, count_unicode_bigrams, for_each_pretoken, for_each_regular_chunk,
-    is_unicode_bigram_script, select_unicode_bigrams,
+    is_unicode_bigram_script, select_unicode_bigrams, UnicodeBigramSelection,
   },
 };
 
@@ -205,11 +205,18 @@ impl BigramCounter {
   }
 
   pub fn selected(&self, top_k: usize, min_freq: Freq) -> Vec<(char, char)> {
-    let mut selected = select_unicode_bigrams(self.counts.clone(), top_k, min_freq)
+    let mut selected = self
+      .selection(top_k, min_freq)
+      .bigrams
       .into_iter()
       .collect::<Vec<_>>();
     selected.sort_unstable();
     selected
+  }
+
+  /// Select Unicode bigrams and preserve their effective frequency boundary.
+  pub fn selection(&self, top_k: usize, min_freq: Freq) -> UnicodeBigramSelection {
+    select_unicode_bigrams(self.counts.clone(), top_k, min_freq)
   }
 
   pub fn counts(&self) -> &AHashMap<(char, char), Freq> {
@@ -334,6 +341,10 @@ mod tests {
 
     assert_eq!(left.counts().get(&('你', '好')), Some(&2));
     assert_eq!(left.counts().get(&('世', '界')), Some(&2));
+    let selection = left.selection(1, 1);
+    assert_eq!(selection.cutoff_freq, Some(2));
+    assert_eq!(selection.max_excluded_freq, Some(1));
+    assert_eq!(selection.bigrams.len(), 2);
   }
 
   #[test]

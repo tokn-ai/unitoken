@@ -649,6 +649,14 @@ where
 }
 
 impl<C, I> BpeTrainer<C, I> {
+  /// Frequency of the most recently completed pair merge.
+  ///
+  /// Materializing an initial Unicode unit is not a pair merge and does not
+  /// change this value.
+  pub fn last_merge_freq(&self) -> Option<Freq> {
+    self.merges.last().map(|merge| merge.data.freq)
+  }
+
   /// Construct an empty trainer with no vocab, merges, or words.
   pub fn empty() -> Self {
     Self {
@@ -1489,6 +1497,26 @@ mod tests {
       assert!(matches!(model_merge.tp, (CharIdx::Idx(_), CharIdx::Idx(_))));
       assert!(model_merge.data.occurs_in.is_empty());
     }
+  }
+
+  #[test]
+  fn test_last_merge_freq_ignores_unicode_initial_units() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 7)],
+      &[],
+    );
+    bpe.init_training();
+    assert_eq!(bpe.last_merge_freq(), None);
+
+    bpe.step().unwrap();
+    assert_eq!(bpe.last_merge_freq(), None);
+    bpe.step().unwrap();
+    assert_eq!(bpe.last_merge_freq(), None);
+    bpe.step().unwrap();
+    assert_eq!(bpe.last_merge_freq(), Some(7));
+
+    let model = bpe.validate_model().unwrap();
+    assert_eq!(model.last_merge_freq(), Some(7));
   }
 
   #[test]

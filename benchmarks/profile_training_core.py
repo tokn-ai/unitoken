@@ -51,6 +51,7 @@ def profile_training_core(words: Sequence[tuple[str, int]], vocab_size: int, buc
 
   return {
     "vocab_size": trainer.vocab_size,
+    "final_merge_freq": trainer.last_merge_freq,
     "initial_vocab_size": initial_vocab_size,
     "add_words_s": add_words_s,
     "init_training_s": init_training_s,

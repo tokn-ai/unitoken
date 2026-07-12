@@ -115,6 +115,13 @@ separate shared heap inspection time from per-window hydration and prune time,
 and include payload-only memory estimates for the full exact occurrence state
 and each simulated window.
 
+Unicode-bigram selection reports record `cutoff_freq`, the least retained
+frequency after including cutoff ties, and `max_excluded_freq`. Training
+reports record `final_merge_freq`. When selection and training happen in the
+same experiment, `final_merge_above_bigram_cutoff` is the strict configuration
+guard: equality or a lower final merge frequency is reported as a failed guard,
+but the benchmark still completes so the failure can be inspected.
+
 Example raw-text unitoken trainer profile:
 
 ```bash

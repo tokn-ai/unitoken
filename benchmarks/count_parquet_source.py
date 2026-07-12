@@ -127,7 +127,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
   bigram_pass = scan_result(source, time.perf_counter() - started)
 
   started = time.perf_counter()
-  bigrams = bigram_counter.selected(top_k=args.top_k, min_freq=args.min_freq)
+  bigram_selection = bigram_counter.select(top_k=args.top_k, min_freq=args.min_freq)
+  bigrams = bigram_selection.bigrams
   selection_s = time.perf_counter() - started
   del bigram_counter
 
@@ -161,6 +162,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
       "top_k": args.top_k,
       "min_freq": args.min_freq,
       "selected": len(bigrams),
+      "cutoff_freq": bigram_selection.cutoff_freq,
+      "max_excluded_freq": bigram_selection.max_excluded_freq,
       "selection_s": selection_s,
     },
     "bigram_pass": bigram_pass,

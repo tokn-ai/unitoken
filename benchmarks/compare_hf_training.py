@@ -73,6 +73,7 @@ def train_unitoken(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[st
   return {
     "vocab": vocab,
     "vocab_size": trainer.vocab_size,
+    "final_merge_freq": trainer.last_merge_freq,
   }
 
 

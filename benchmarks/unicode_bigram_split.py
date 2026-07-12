@@ -12,6 +12,7 @@ from typing import Any, cast
 from uni_tokenizer import BpeTrainer
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
+from uni_tokenizer import Unit
 from uni_tokenizer import UnicodeBigramMixedBoundary
 
 from common import DEFAULT_CHUNK_SIZE
@@ -78,8 +79,12 @@ def save_words(path: Path, words: dict[str, int]) -> None:
   path.write_text(json.dumps(sorted_words, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def train_unitoken(words: dict[str, int], vocab_size: int) -> dict[str, Any]:
-  trainer = BpeTrainer(SPECIAL_TOKENS, unit="byte", initial_alphabet="byte_level")
+def train_unitoken(words: dict[str, int], vocab_size: int, unit: Unit) -> dict[str, Any]:
+  trainer = BpeTrainer(
+    SPECIAL_TOKENS,
+    unit=unit,
+    initial_alphabet="byte_level" if unit == "byte" else None,
+  )
   started = time.perf_counter()
   trainer.add_words(list(words.items()))
   add_words_s = time.perf_counter() - started
@@ -98,6 +103,7 @@ def train_unitoken(words: dict[str, int], vocab_size: int) -> dict[str, Any]:
 
   return {
     "vocab_size": trainer.vocab_size,
+    "final_merge_freq": trainer.last_merge_freq,
     "add_words_s": add_words_s,
     "init_training_s": init_training_s,
     "step_summary": duration_summary(step_times),
@@ -119,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--top-k", type=int, default=100_000)
   parser.add_argument("--min-freq", type=int, default=16)
   parser.add_argument("--unicode-bigram-mixed-boundary", choices=["keep", "split"], default="keep")
+  parser.add_argument("--unit", choices=["byte", "unicode"], default="unicode")
   parser.add_argument("--vocab-size", type=int, help="Optionally train unitoken on both inventories.")
   parser.add_argument("--save-words", type=Path, help="Save the Unicode bigram split word-frequency inventory as JSON.")
   add_report_args(parser)
@@ -132,17 +139,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--min-freq must be at least 1")
 
   boundary = cast(BoundaryMode, args.boundary)
+  unit = cast(Unit, args.unit)
   unicode_bigram_mixed_boundary = cast(UnicodeBigramMixedBoundary, args.unicode_bigram_mixed_boundary)
   base = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
 
   started = time.perf_counter()
-  unicode_bigrams = base.build_unicode_bigrams_from_file(
+  bigram_selection = base.select_unicode_bigrams_from_file(
     args.text,
     chunk_size=args.chunk_size,
     boundary=boundary,
     top_k=args.top_k,
     min_freq=args.min_freq,
   )
+  unicode_bigrams = bigram_selection.bigrams
   build_bigrams_s = time.perf_counter() - started
 
   baseline_words, baseline_pretokenize_s = collect_words(base, args.text, args.chunk_size, boundary)
@@ -166,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       experiment_name=args.experiment_name,
       notes=[
         "Compares baseline pretokenization with unicode-bigram-guided splitting.",
+        "final_merge_above_bigram_cutoff is a strict configuration guard; equality fails even though cutoff-frequency ties are retained.",
       ],
     ),
     "source": {
@@ -174,12 +184,15 @@ def main(argv: Sequence[str] | None = None) -> int:
       "text_bytes": args.text.stat().st_size,
       "chunk_size": args.chunk_size,
       "boundary": boundary,
+      "unit": unit,
     },
     "unicode_bigram": {
       "top_k": args.top_k,
       "min_freq": args.min_freq,
       "mixed_boundary": unicode_bigram_mixed_boundary,
       "retained": len(unicode_bigrams),
+      "cutoff_freq": bigram_selection.cutoff_freq,
+      "max_excluded_freq": bigram_selection.max_excluded_freq,
       "build_s": build_bigrams_s,
     },
     "baseline": {
@@ -194,8 +207,31 @@ def main(argv: Sequence[str] | None = None) -> int:
 
   if args.vocab_size:
     result["target_vocab_size"] = args.vocab_size
-    result["baseline"]["training"] = train_unitoken(baseline_words, args.vocab_size)
-    result["unicode_bigram_split"]["training"] = train_unitoken(split_words, args.vocab_size)
+    result["baseline"]["training"] = train_unitoken(
+      baseline_words,
+      args.vocab_size,
+      unit,
+    )
+    split_training = train_unitoken(split_words, args.vocab_size, unit)
+    final_merge_freq = split_training["final_merge_freq"]
+    cutoff_freq = bigram_selection.cutoff_freq
+    max_excluded_freq = bigram_selection.max_excluded_freq
+    split_training["final_merge_above_bigram_cutoff"] = (
+      final_merge_freq > cutoff_freq
+      if final_merge_freq is not None and cutoff_freq is not None
+      else None
+    )
+    split_training["final_merge_minus_bigram_cutoff"] = (
+      final_merge_freq - cutoff_freq
+      if final_merge_freq is not None and cutoff_freq is not None
+      else None
+    )
+    split_training["final_merge_above_max_excluded_freq"] = (
+      final_merge_freq > max_excluded_freq
+      if final_merge_freq is not None and max_excluded_freq is not None
+      else None
+    )
+    result["unicode_bigram_split"]["training"] = split_training
 
   rendered = json.dumps(result, indent=2)
   if not args.quiet:

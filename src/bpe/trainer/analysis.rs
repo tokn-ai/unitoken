@@ -153,6 +153,7 @@ pub struct HotWindowAnalysisReport {
   pub target_vocab_size: usize,
   pub initial_vocab_size: usize,
   pub final_vocab_size: usize,
+  pub final_merge_freq: Option<Freq>,
   pub completed: bool,
   pub initial_unit_steps: u64,
   pub pair_merge_steps: u64,
@@ -908,6 +909,7 @@ where
   }
   let simulation_merge_seconds = merge_started.elapsed().as_secs_f64();
   let final_vocab_size = trainer.vocab.len();
+  let final_merge_freq = trainer.last_merge_freq();
   let final_oracle = oracle_snapshot(&trainer);
   assert_eq!(
     oracle_accounting.current,
@@ -956,6 +958,7 @@ where
     target_vocab_size,
     initial_vocab_size,
     final_vocab_size,
+    final_merge_freq,
     completed: final_vocab_size >= target_vocab_size,
     initial_unit_steps,
     pair_merge_steps,
@@ -1117,6 +1120,7 @@ mod tests {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[("abc", 10)]), &[]);
     let (report, _) = run_threshold(trainer, 258, &[1]);
     let window = &report.windows[0];
+    assert_eq!(report.final_merge_freq, Some(10));
     assert_eq!(window.hydration_scans, 1);
     assert_eq!(window.cold_winners, 1);
     assert_eq!(window.hot_winners, 1);
@@ -1468,6 +1472,7 @@ mod tests {
     let trainer = BpeTrainer::<u8, Idx>::from_words(words(&[]), &[]);
     let (report, _) = run_baseline(trainer, 257, &[1]);
     assert!(!report.completed);
+    assert_eq!(report.final_merge_freq, None);
     assert_eq!(report.final_vocab_size, 256);
     assert_eq!(report.pair_merge_steps, 0);
     assert_eq!(report.windows[0].hydration_scans, 0);
