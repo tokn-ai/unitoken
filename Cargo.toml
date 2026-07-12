@@ -1,6 +1,6 @@
 [package]
 name = "unitoken"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Fast BPE tokenizer/trainer with a Rust core and Python bindings"
 repository = "https://github.com/tokn-ai/unitoken"
