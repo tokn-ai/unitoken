@@ -7,10 +7,6 @@ use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train
 
 use super::*;
 
-#[cfg(any(test, feature = "analysis"))]
-#[doc(hidden)]
-pub mod analysis;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialAlphabet {
   /// Insert bytes in raw byte order, preserving GPT-2/tiktoken-compatible ids.
@@ -1607,6 +1603,71 @@ mod tests {
     let stats = trainer.hot_pair_window_stats().unwrap();
     assert_eq!(stats.batch_prunes, 1);
     assert_eq!(stats.prune_evictions, 4);
+  }
+
+  #[test]
+  fn test_hot_pair_window_admits_complete_multiword_postings() {
+    let mut trainer = BpeTrainer::<u8, Idx>::from_words_with_config(
+      [("abq", 10), ("abqr", 9), ("abqs", 8)],
+      &[],
+      BpeTrainerConfig {
+        hot_pair_window_size: Some(1),
+        ..BpeTrainerConfig::default()
+      },
+    );
+    trainer.init_training();
+    trainer.step().unwrap();
+
+    let target = 256;
+    let occurrences = &trainer.hot_occurrences[&(target, b'q' as Idx)];
+    assert_eq!(occurrences.len(), 3);
+    assert!([0, 1, 2].into_iter().all(|word_idx| occurrences.contains(&word_idx)));
+    assert_eq!(trainer.hot_pair_window_stats().unwrap().hydration_scans, 1);
+  }
+
+  #[test]
+  fn test_hot_pair_window_cutoff_ties_use_exact_tie_break() {
+    for (tie_break, expected) in [
+      (TieBreak::SmallestPairId, [(b'a', b'b'), (b'c', b'd')]),
+      (TieBreak::LargestContent, [(b'e', b'f'), (b'c', b'd')]),
+    ] {
+      let mut trainer = BpeTrainer::<u8, Idx>::from_words_with_config(
+        [("ab", 10), ("cd", 10), ("ef", 10)],
+        &[],
+        BpeTrainerConfig {
+          tie_break,
+          hot_pair_window_size: Some(2),
+          ..BpeTrainerConfig::default()
+        },
+      );
+      trainer.init_training();
+
+      let resident = trainer.hot_occurrences.keys().copied().collect::<AHashSet<_>>();
+      let expected = expected
+        .map(|(left, right)| (left as Idx, right as Idx))
+        .into_iter()
+        .collect::<AHashSet<_>>();
+      assert_eq!(resident, expected);
+    }
+  }
+
+  #[test]
+  fn test_unicode_initial_units_do_not_enter_hot_pair_window() {
+    let mut trainer = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+      [("你a", 10)],
+      &[],
+      BpeTrainerConfig {
+        hot_pair_window_size: Some(1),
+        ..BpeTrainerConfig::default()
+      },
+    );
+    trainer.init_training();
+
+    assert_eq!(trainer.hot_resident_pairs(), 1);
+    assert_eq!(
+      trainer.hot_occurrences.keys().copied().next(),
+      Some((CharIdx::Char('你'), CharIdx::Idx(b'a' as Idx))),
+    );
   }
 
   #[test]

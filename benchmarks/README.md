@@ -86,34 +86,26 @@ python benchmarks/profile_training_core.py \
   --experiment-name baseline_release
 ```
 
-Simulate bounded occurrence windows without changing exact merge selection:
+Profile the production bounded occurrence window against exact occurrence
+storage:
 
 ```bash
-cargo run --release --features analysis --bin analyze_hot_window -- \
+python benchmarks/profile_training_core.py \
   --words out/data/fineweb2/cmn_Hani/fineweb2_cmn_Hani_1GiB.unicode_bigram_top10k_min16/_words.json \
   --unit unicode \
   --vocab-size 10000 \
-  --window-sizes 1024,4096,16384,65536 \
-  --policy threshold-hysteresis \
+  --hot-pair-window-size 4096 \
   --dataset-name cmn_Hani_1GiB \
   --config-name unicode \
-  --experiment-name threshold_hysteresis
+  --experiment-name hot4096
 ```
 
-The simulator uses the exact trainer as an oracle. On a cold winner, it
-hydrates the current top-K pairs in one inventory scan. The default
-`threshold-hysteresis` policy also admits a newly created pair
-immediately when its frequency reaches the least frequency in the most recent
-top-K refill, using the complete occurrence set emitted by that merge. The
-cutoff remains fixed until another refill or prune. Crossing the 2K resident
-trigger batch-prunes occurrence postings back to the exact current top K using
-the configured merge tie-break; one merge can transiently exceed 2K before the
-post-step prune. Eviction never removes the exact pair metadata used to choose
-winners. Use `--policy threshold-no-evict` for the unbounded comparison and
-`--policy replace-top-k` for the original fixed-window baseline. Reports
-separate shared heap inspection time from per-window hydration and prune time,
-and include payload-only memory estimates for the full exact occurrence state
-and each simulated window.
+On a cold winner, the trainer hydrates the exact current top-K pairs in one
+inventory scan. Newly created pairs at or above the latest top-K frequency
+threshold are admitted with complete postings. Crossing 2K resident pairs
+batch-prunes postings back to K using the configured exact tie-break. Reports
+include hydration and prune counters, resident posting capacity, phase-level
+RSS, and the final merge frequency guard.
 
 Unicode-bigram selection reports record `cutoff_freq`, the least retained
 frequency after including cutoff ties, and `max_excluded_freq`. Training
