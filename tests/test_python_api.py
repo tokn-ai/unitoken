@@ -85,6 +85,46 @@ def test_validate_model_rejects_duplicate_serialized_vocab(unit: str) -> None:
 
 
 @pytest.mark.parametrize(
+  ("unit", "word", "vocab_size"),
+  [("byte", "ab", 257), ("unicode", "你好", 259)],
+)
+def test_validate_model_enforces_strict_bigram_cutoff(
+  unit: str,
+  word: str,
+  vocab_size: int,
+) -> None:
+  trainer = BpeTrainer([], unit=unit)  # type: ignore[arg-type]
+  trainer.add_words({word: 7})
+  trainer.train(vocab_size=vocab_size)
+
+  model = trainer.validate_model(bigram_cutoff_freq=6)
+
+  assert model.last_merge_freq == 7
+  with pytest.raises(ValueError, match="must be greater.*cutoff frequency 7"):
+    trainer.validate_model(bigram_cutoff_freq=7)
+  with pytest.raises(ValueError, match="cutoff frequency must be positive"):
+    trainer.validate_model(bigram_cutoff_freq=0)
+
+
+def test_save_files_forwards_bigram_cutoff(tmp_path: Path) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"你好": 7})
+  trainer.train(vocab_size=259)
+  vocab_path = tmp_path / "vocab.json"
+  merges_path = tmp_path / "merges.txt"
+
+  with pytest.raises(ValueError, match="must be greater.*cutoff frequency 7"):
+    trainer.save_files(
+      vocab_path,
+      merges_path,
+      bigram_cutoff_freq=7,
+    )
+
+  assert not vocab_path.exists()
+  assert not merges_path.exists()
+
+
+@pytest.mark.parametrize(
   ("tie_break", "expected_tail"),
   [
     ("smallest_pair_id", ["你", "好", "你好"]),

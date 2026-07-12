@@ -130,16 +130,32 @@ class BpeTrainer:
     """
     return self._trainer.step()
 
-  def validate_model(self) -> "BpeModel":
-    """Validate the trainer state and return an immutable model snapshot."""
-    from .model import BpeModel
-    return BpeModel(self._trainer.validate_model())
+  def validate_model(self, *, bigram_cutoff_freq: int | None = None) -> "BpeModel":
+    """Validate the trainer state and return an immutable model snapshot.
 
-  def save(self, name: str, *, outdir: str | PathLike = ".", format: FileFormat | None = None) -> None:
-    """Validate a snapshot and save it under `name`."""
+    When `bigram_cutoff_freq` is provided, the final pair merge frequency must
+    be strictly greater than the least-retained Unicode-bigram frequency.
+    """
+    from .model import BpeModel
+    return BpeModel(self._trainer.validate_model(bigram_cutoff_freq=bigram_cutoff_freq))
+
+  def save(
+    self,
+    name: str,
+    *,
+    outdir: str | PathLike = ".",
+    format: FileFormat | None = None,
+    bigram_cutoff_freq: int | None = None,
+  ) -> None:
+    """Validate a snapshot, optionally enforce the bigram cutoff, and save it under `name`."""
     vocab_path = Path(outdir) / f"vocab.{name}[{self.unit}].json"
     merges_path = Path(outdir) / f"merges.{name}[{self.unit}].txt"
-    self.save_files(vocab_path, merges_path, format=format)
+    self.save_files(
+      vocab_path,
+      merges_path,
+      format=format,
+      bigram_cutoff_freq=bigram_cutoff_freq,
+    )
 
   def save_files(
     self,
@@ -147,7 +163,10 @@ class BpeTrainer:
     merges_path: str | PathLike,
     *,
     format: FileFormat | None = None,
+    bigram_cutoff_freq: int | None = None,
   ) -> None:
-    """Validate a snapshot and save its vocabulary and merge list."""
+    """Validate a snapshot, optionally enforce the bigram cutoff, and save its files."""
     resolved_format = _resolve_format(self.unit, format)
-    self.validate_model().save_files(vocab_path, merges_path, format=resolved_format)
+    self.validate_model(
+      bigram_cutoff_freq=bigram_cutoff_freq,
+    ).save_files(vocab_path, merges_path, format=resolved_format)

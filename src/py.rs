@@ -55,7 +55,7 @@ pub trait BpeTrainerBaseImpl: Sized {
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
   fn get_vocab(&self) -> Vocabulary;
-  fn validate_model(&self, py: Python) -> PyResult<BpeModelBase>;
+  fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase>;
 }
 
 fn save_model_vocab<C, I>(model: &BpeModel<C, I>, path: &PathBuf, spec: &dyn Spec<C, I>) -> MyResult<()> {
@@ -278,8 +278,12 @@ impl BpeTrainer_u8_Idx {
   }
 
   /// Validate the current state and return an immutable model snapshot.
-  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
-    py.detach(|| self.inner.validate_model())
+  #[pyo3(signature = (*, bigram_cutoff_freq=None))]
+  pub fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase> {
+    py.detach(|| match bigram_cutoff_freq {
+      Some(cutoff) => self.inner.validate_model_with_bigram_cutoff(cutoff),
+      None => self.inner.validate_model(),
+    })
       .map(|model| BpeModelBase { inner: BpeModelInner::Byte(model) })
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }
@@ -390,8 +394,12 @@ impl BpeTrainer_Character_CharIdx {
   }
 
   /// Validate the current state and return an immutable model snapshot.
-  pub fn validate_model(&self, py: Python) -> PyResult<BpeModelBase> {
-    py.detach(|| self.inner.validate_model())
+  #[pyo3(signature = (*, bigram_cutoff_freq=None))]
+  pub fn validate_model(&self, py: Python, bigram_cutoff_freq: Option<i64>) -> PyResult<BpeModelBase> {
+    py.detach(|| match bigram_cutoff_freq {
+      Some(cutoff) => self.inner.validate_model_with_bigram_cutoff(cutoff),
+      None => self.inner.validate_model(),
+    })
       .map(|model| BpeModelBase { inner: BpeModelInner::Unicode(model) })
       .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
   }

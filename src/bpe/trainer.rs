@@ -647,6 +647,35 @@ where
       merges,
     ))
   }
+
+  /// Validate the current state and require the final pair merge to be more
+  /// frequent than the least-retained Unicode bigram.
+  ///
+  /// A final merge at the cutoff is rejected because preprocessing decisions
+  /// at that same frequency overlap the learned merge boundary.
+  pub fn validate_model_with_bigram_cutoff(
+    &self, bigram_cutoff_freq: Freq,
+  ) -> MyResult<BpeModel<C, I>>
+  where
+    C: CharSplit + Clone + Ord,
+    I: HasChar<C>,
+  {
+    if bigram_cutoff_freq <= 0 {
+      return Err(MyError::InvalidBpeModel(format!(
+        "Unicode bigram cutoff frequency must be positive, got {bigram_cutoff_freq}",
+      )));
+    }
+    let model = self.validate_model()?;
+    match model.last_merge_freq() {
+      Some(last_merge_freq) if last_merge_freq > bigram_cutoff_freq => Ok(model),
+      Some(last_merge_freq) => Err(MyError::InvalidBpeModel(format!(
+        "final merge frequency {last_merge_freq} must be greater than Unicode bigram cutoff frequency {bigram_cutoff_freq}",
+      ))),
+      None => Err(MyError::InvalidBpeModel(format!(
+        "model has no pair merge; final merge frequency must be greater than Unicode bigram cutoff frequency {bigram_cutoff_freq}",
+      ))),
+    }
+  }
 }
 
 impl<C, I> BpeTrainer<C, I> {
@@ -1945,6 +1974,73 @@ mod tests {
 
     let model = bpe.validate_model().unwrap();
     assert_eq!(model.last_merge_freq(), Some(7));
+  }
+
+  fn byte_pair_trainer(freq: Freq) -> BpeTrainer<u8, Idx> {
+    let mut trainer = BpeTrainer::from_words([("ab", freq)], &[]);
+    trainer.train_until(257).unwrap();
+    assert_eq!(trainer.last_merge_freq(), Some(freq));
+    trainer
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_accepts_final_merge_above_cutoff() {
+    let trainer = byte_pair_trainer(7);
+
+    let model = trainer.validate_model_with_bigram_cutoff(6).unwrap();
+
+    assert_eq!(model.last_merge_freq(), Some(7));
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_rejects_final_merge_at_cutoff() {
+    let trainer = byte_pair_trainer(7);
+    trainer.validate_model().unwrap();
+
+    let error = trainer.validate_model_with_bigram_cutoff(7).unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains(
+      "final merge frequency 7 must be greater than Unicode bigram cutoff frequency 7",
+    ));
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_rejects_final_merge_below_cutoff() {
+    let trainer = byte_pair_trainer(6);
+
+    let error = trainer.validate_model_with_bigram_cutoff(7).unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains(
+      "final merge frequency 6 must be greater than Unicode bigram cutoff frequency 7",
+    ));
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_rejects_model_without_pair_merge() {
+    let trainer = BpeTrainer::<u8, Idx>::from_words([("a", 7)], &[]);
+    trainer.validate_model().unwrap();
+
+    let error = trainer.validate_model_with_bigram_cutoff(6).unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains(
+      "model has no pair merge; final merge frequency must be greater than Unicode bigram cutoff frequency 6",
+    ));
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_rejects_non_positive_cutoff() {
+    let trainer = byte_pair_trainer(7);
+
+    for cutoff in [0, -1] {
+      let error = trainer.validate_model_with_bigram_cutoff(cutoff).unwrap_err();
+      assert!(matches!(error, MyError::InvalidBpeModel(_)));
+      assert!(error.to_string().contains(
+        &format!("Unicode bigram cutoff frequency must be positive, got {cutoff}"),
+      ));
+    }
   }
 
   #[test]

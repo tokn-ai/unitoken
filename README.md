@@ -39,6 +39,17 @@ enc = BpeEncoder.load("demo")
 ids = enc.encode("hello")
 ```
 
+For a model trained from a retained Unicode-bigram selection, pass its cutoff
+when validating:
+
+```python
+model = trainer.validate_model(bigram_cutoff_freq=selection.cutoff_freq)
+```
+
+Validation requires the final pair merge frequency to be strictly greater than
+the cutoff. Equality is rejected because preprocessing decisions at the same
+frequency overlap the learned merge boundary.
+
 Streaming two-pass counting
 ---------------------------
 
