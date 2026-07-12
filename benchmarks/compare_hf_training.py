@@ -24,8 +24,11 @@ from common import REPO_ROOT
 from common import SPECIAL_TOKENS
 from common import add_report_args
 from common import benchmark_metadata
+from common import bigram_frequency_guard
 from common import load_words
+from common import load_word_inventory_manifest
 from common import resolve_report_path
+from common import word_inventory_manifest_path
 from common import write_report
 
 
@@ -73,6 +76,7 @@ def train_unitoken(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[st
   return {
     "vocab": vocab,
     "vocab_size": trainer.vocab_size,
+    "final_merge_freq": trainer.last_merge_freq,
   }
 
 
@@ -205,6 +209,7 @@ def without_vocab(result: dict[str, Any]) -> dict[str, Any]:
 
 def run_words(args: argparse.Namespace) -> dict[str, Any]:
   words = load_words(args.words, args.max_occurrences)
+  manifest = load_word_inventory_manifest(args.words)
   occurrence_count = sum(freq for _, freq in words)
 
   unitoken = time_call(
@@ -212,6 +217,13 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
     lambda: train_unitoken(words, args.vocab_size),
     args.repeats,
   )
+  guard = (
+    bigram_frequency_guard(unitoken["final_merge_freq"], manifest)
+    if args.max_occurrences is None
+    else None
+  )
+  if guard is not None:
+    unitoken["bigram_frequency_guard"] = guard
   hf = time_call(
     "huggingface.train",
     lambda: train_hugging_face(words, args.vocab_size),
@@ -243,6 +255,12 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
       "occurrences": occurrence_count,
       "huggingface_input_kind": "expanded_word_iterator",
       "unitoken_input_kind": "compressed_word_counts",
+      "word_inventory_manifest_path": (
+        str(word_inventory_manifest_path(args.words))
+        if manifest is not None
+        else None
+      ),
+      "word_inventory_manifest": manifest,
     },
     "target_vocab_size": args.vocab_size,
     "same_vocab": same_vocab,

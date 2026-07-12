@@ -36,6 +36,9 @@ class BpeTrainer:
     Sequence of tokens reserved in the vocabulary.
   unit:
     Atomic BPE unit: `"byte"` or `"unicode"`.
+  hot_pair_window_size:
+    If set, retain occurrence postings for an exact top-K candidate window.
+    Smaller values reduce memory but may require additional inventory scans.
   """
   def __init__(
     self,
@@ -45,6 +48,7 @@ class BpeTrainer:
     initial_alphabet: InitialAlphabet | None = None,
     tie_break: TieBreak | None = None,
     parallel_merge_min_occurs_in: int | None = None,
+    hot_pair_window_size: int | None = None,
   ) -> None:
     _validate_unit(unit)
     self._unit = unit
@@ -54,6 +58,7 @@ class BpeTrainer:
         initial_alphabet=initial_alphabet,
         tie_break=tie_break,
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
+        hot_pair_window_size=hot_pair_window_size,
       )
     elif unit == "byte":
       self._trainer = BpeTrainer_u8_Idx(
@@ -61,12 +66,24 @@ class BpeTrainer:
         initial_alphabet=initial_alphabet,
         tie_break=tie_break,
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
+        hot_pair_window_size=hot_pair_window_size,
       )
 
   @property
   def vocab_size(self) -> int:
     """Current vocabulary size."""
     return self._trainer.vocab_size()
+
+  @property
+  def last_merge_freq(self) -> int | None:
+    """Frequency of the most recently completed pair merge."""
+    return self._trainer.last_merge_freq
+
+  @property
+  def hot_pair_window_stats(self) -> dict[str, int] | None:
+    """Diagnostics for the bounded pair-posting window, if enabled."""
+    stats = self._trainer.hot_pair_window_stats
+    return None if stats is None else dict(stats)
 
   @property
   def unit(self) -> Unit:

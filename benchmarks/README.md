@@ -85,6 +85,51 @@ python benchmarks/profile_training_core.py \
   --experiment-name baseline_release
 ```
 
+Profile the production bounded occurrence window against exact occurrence
+storage:
+
+```bash
+python benchmarks/profile_training_core.py \
+  --words out/data/fineweb2/cmn_Hani/fineweb2_cmn_Hani_1GiB.unicode_bigram_top10k_min16/_words.json \
+  --unit unicode \
+  --vocab-size 10000 \
+  --hot-pair-window-size 4096 \
+  --dataset-name cmn_Hani_1GiB \
+  --config-name unicode \
+  --experiment-name hot4096
+```
+
+K=4096 is the current measured starting point for this inventory shape, not a
+correctness requirement or universal optimum. Exact storage remains the API
+default. Smaller windows retain fewer occurrence sets but may trigger more
+inventory hydration scans; larger windows trade memory for fewer scans.
+
+On a cold winner, the trainer hydrates the exact current top-K pairs in one
+inventory scan. Newly created pairs at or above the latest top-K frequency
+threshold are admitted with complete occurrence sets. Crossing 2K resident
+pairs releases occurrence sets back to K using the configured exact tie-break.
+Reports include hydration and prune counters, resident occurrence-set capacity,
+phase-level RSS, and the final merge frequency guard.
+
+The final 1 GiB Unicode-bigram run (3,855,974 unique words, vocabulary size
+10,000) measured 1,797 MiB observed training peak RSS and 5.58s in exact mode,
+versus 1,649 MiB and 5.85s at K=4096. The bounded run used two hydration scans,
+peaked at 4,847 resident pairs, required no batch prune, and matched the exact
+final merge frequency of 4,183.
+
+Unicode-bigram selection reports record `cutoff_freq`, the least retained
+frequency after including cutoff ties, and `max_excluded_freq`. Training
+reports record `final_merge_freq`. When selection and training happen in the
+same experiment, `final_merge_above_bigram_cutoff` is the strict configuration
+guard: equality or a lower final merge frequency is reported as a failed guard,
+but the benchmark still completes so the failure can be inspected.
+
+Saved word inventories may carry a sibling `_words.manifest.json`. The
+manifest records source identity, pretokenizer settings, Unicode-bigram
+selection boundaries, and inventory statistics. Fixed-word training reports
+load this sidecar automatically and evaluate the frequency guard without
+relying on directory names.
+
 Example raw-text unitoken trainer profile:
 
 ```bash

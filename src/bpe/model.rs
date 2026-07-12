@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{MyResult, spec::Spec};
 
-use super::{Merge, Word};
+use super::{Freq, Merge, Word};
 
 /// An immutable BPE model produced by validating a trainer snapshot.
 #[derive(Debug)]
@@ -38,6 +38,11 @@ impl<C, I> BpeModel<C, I> {
   /// Validated merge rules in rank order.
   pub fn merges(&self) -> &[Merge<C, I>] {
     &self.merges
+  }
+
+  /// Frequency of the final pair merge, if the model contains one.
+  pub fn last_merge_freq(&self) -> Option<Freq> {
+    self.merges.last().map(|merge| merge.data.freq)
   }
 
   /// Serialize the vocabulary to JSON using `spec`.

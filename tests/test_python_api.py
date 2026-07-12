@@ -35,6 +35,29 @@ def test_trainer_exposes_unit_and_singular_vocab() -> None:
   assert isinstance(trainer.vocab, dict)
 
 
+def test_hot_pair_window_matches_exact_python_training() -> None:
+  words = {"cab": 11, "eab": 9, "gab": 7, "abi": 5, "abj": 3, "abk": 1}
+
+  def train(hot_pair_window_size: int | None) -> tuple[dict[bytes, int], int | None]:
+    trainer = BpeTrainer([], unit="byte", hot_pair_window_size=hot_pair_window_size)
+    trainer.add_words(words)
+    trainer.train(vocab_size=260)
+    trainer.validate_model()
+    if hot_pair_window_size is None:
+      assert trainer.hot_pair_window_stats is None
+    else:
+      assert trainer.hot_pair_window_stats is not None
+      assert trainer.hot_pair_window_stats["hydration_scans"] >= 1
+    return trainer.vocab, trainer.last_merge_freq
+
+  assert train(2) == train(None)
+
+
+def test_hot_pair_window_rejects_zero() -> None:
+  with pytest.raises(ValueError, match="must be positive"):
+    BpeTrainer([], hot_pair_window_size=0)
+
+
 def test_unknown_unit_is_rejected() -> None:
   with pytest.raises(ValueError, match="Unknown unit"):
     BpeTrainer([], unit="characters")  # type: ignore[arg-type]
@@ -82,6 +105,9 @@ def test_unicode_trainer_saves_only_loadable_merge_dependencies(
     model = trainer.validate_model()
     assert isinstance(model, BpeModel)
     assert model.unit == "unicode"
+    expected_last_merge_freq = None if vocab_size < 259 else 1
+    assert trainer.last_merge_freq == expected_last_merge_freq
+    assert model.last_merge_freq == expected_last_merge_freq
 
     tail = [
       token.decode("utf-8")
@@ -186,9 +212,12 @@ def test_source_counters_support_two_pass_replay_and_bounded_batches() -> None:
   pretokenizer = PreTokenizer([])
   bigram_counter = pretokenizer.bigram_counter()
   bigram_counter.add_source(source.scan(), max_records=1, max_bytes=8)
-  bigrams = bigram_counter.selected(top_k=1, min_freq=1)
+  selection = bigram_counter.select(top_k=1, min_freq=1)
+  bigrams = selection.bigrams
 
   assert bigrams == ["你好"]
+  assert selection.cutoff_freq == 2
+  assert selection.max_excluded_freq == 1
   assert dict(bigram_counter.items())["你好"] == 2
 
   word_counter = pretokenizer.with_unicode_bigrams(bigrams).word_counter()
@@ -196,6 +225,23 @@ def test_source_counters_support_two_pass_replay_and_bounded_batches() -> None:
 
   assert source.scans == 2
   assert word_counter.words() == {"世": 1, "你好": 2, "界": 1}
+
+
+def test_file_bigram_selection_reports_frequency_boundary(tmp_path: Path) -> None:
+  text = tmp_path / "corpus.txt"
+  text.write_text("你好世界你好", encoding="utf-8")
+
+  selection = PreTokenizer([]).select_unicode_bigrams_from_file(
+    text,
+    chunk_size=1024,
+    boundary="utf8",
+    top_k=1,
+    min_freq=1,
+  )
+
+  assert selection.bigrams == ["你好"]
+  assert selection.cutoff_freq == 2
+  assert selection.max_excluded_freq == 1
 
 
 def test_source_counter_merge() -> None:

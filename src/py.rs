@@ -6,10 +6,32 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use ordermap::OrderMap;
 use pyo3::{prelude::*, pymethods, types::{PyAny, PyIterator}};
 
-use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeModel, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
+use crate::{MyError, MyResult, bpe::{BpeEncoder, BpeModel, BpeTrainer, BpeTrainerConfig, CharIdx, CharSplit, Character, Idx, IdxLike, InitialAlphabet, TieBreak, Word, encoder::BpeBuilder, utils::ToWord}, counter::SourceBatchOptions, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, UnicodeBigramMixedBoundary, UnicodeBigramSelection as CoreUnicodeBigramSelection, parse_unicode_bigrams, unicode_bigram_to_string}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanStrToWord, Encoder, Train as _}};
 
 #[pyclass(subclass)]
 pub struct BpeTrainerBase;
+
+#[pyclass]
+pub struct UnicodeBigramSelection {
+  #[pyo3(get)]
+  pub bigrams: Vec<String>,
+  #[pyo3(get)]
+  pub cutoff_freq: Option<i64>,
+  #[pyo3(get)]
+  pub max_excluded_freq: Option<i64>,
+}
+
+impl From<CoreUnicodeBigramSelection> for UnicodeBigramSelection {
+  fn from(selection: CoreUnicodeBigramSelection) -> Self {
+    let mut bigrams = selection.bigrams.into_iter().collect::<Vec<_>>();
+    bigrams.sort_unstable();
+    Self {
+      bigrams: bigrams.into_iter().map(unicode_bigram_to_string).collect(),
+      cutoff_freq: selection.cutoff_freq,
+      max_excluded_freq: selection.max_excluded_freq,
+    }
+  }
+}
 
 enum BpeModelInner {
   Byte(BpeModel<u8, Idx>),
@@ -28,6 +50,7 @@ pub trait BpeTrainerBaseImpl: Sized {
 
   fn add_words(&mut self, py: Python, words: Vec<(String, i64)>);
   fn vocab_size(&self) -> usize;
+  fn last_merge_freq(&self) -> Option<i64>;
   fn init_training(&mut self, py: Python);
   fn train_until(&mut self, py: Python, vocab_size: usize) -> PyResult<i64>;
   fn step(&mut self, py: Python) -> PyResult<i64>;
@@ -70,6 +93,15 @@ impl BpeModelBase {
     }
   }
 
+  #[getter]
+  /// Frequency of the final pair merge, if the model contains one.
+  pub fn last_merge_freq(&self) -> Option<i64> {
+    match &self.inner {
+      BpeModelInner::Byte(model) => model.last_merge_freq(),
+      BpeModelInner::Unicode(model) => model.last_merge_freq(),
+    }
+  }
+
   /// Return a view of the validated vocabulary.
   pub fn get_vocab(&self) -> Vocabulary {
     let inner: Box<dyn VocabularyImpl + Send + Sync> = match &self.inner {
@@ -104,6 +136,7 @@ fn trainer_config(
   initial_alphabet: Option<&str>,
   tie_break: Option<&str>,
   parallel_merge_min_occurs_in: Option<usize>,
+  hot_pair_window_size: Option<usize>,
 ) -> PyResult<BpeTrainerConfig> {
   let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
     "raw" => InitialAlphabet::RawBytes,
@@ -115,10 +148,16 @@ fn trainer_config(
     "largest_content" => TieBreak::LargestContent,
     value => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown tie_break: {value}"))),
   };
+  if hot_pair_window_size == Some(0) {
+    return Err(pyo3::exceptions::PyValueError::new_err(
+      "hot_pair_window_size must be positive",
+    ));
+  }
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
     parallel_merge_min_occurs_in,
+    hot_pair_window_size,
   })
 }
 
@@ -146,14 +185,20 @@ impl BpeTrainer_u8_Idx {
   /// Create a new BPE trainer (byte-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
+    hot_pair_window_size: Option<usize>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
+    let config = trainer_config(
+      initial_alphabet,
+      tie_break,
+      parallel_merge_min_occurs_in,
+      hot_pair_window_size,
+    )?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
@@ -181,6 +226,27 @@ impl BpeTrainer_u8_Idx {
   /// Current vocabulary size.
   pub fn vocab_size(&self) -> usize {
     self.inner.vocab_size()
+  }
+
+  #[getter]
+  /// Frequency of the most recently completed pair merge.
+  pub fn last_merge_freq(&self) -> Option<i64> {
+    self.inner.last_merge_freq()
+  }
+
+  #[getter]
+  /// Diagnostics for the bounded pair-posting window, if enabled.
+  pub fn hot_pair_window_stats(&self) -> Option<BTreeMap<&'static str, u64>> {
+    let stats = self.inner.hot_pair_window_stats()?;
+    Some(BTreeMap::from([
+      ("hydration_scans", stats.hydration_scans),
+      ("hydrated_word_entries", stats.hydrated_word_entries),
+      ("batch_prunes", stats.batch_prunes),
+      ("prune_evictions", stats.prune_evictions),
+      ("peak_resident_pairs", stats.peak_resident_pairs as u64),
+      ("resident_pairs", self.inner.hot_resident_pairs() as u64),
+      ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
+    ]))
   }
 
   /// Initialize internal training state.
@@ -231,14 +297,20 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
+    hot_pair_window_size: Option<usize>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
+    let config = trainer_config(
+      initial_alphabet,
+      tie_break,
+      parallel_merge_min_occurs_in,
+      hot_pair_window_size,
+    )?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
@@ -266,6 +338,27 @@ impl BpeTrainer_Character_CharIdx {
   /// Current vocabulary size.
   pub fn vocab_size(&self) -> usize {
     self.inner.vocab_size()
+  }
+
+  #[getter]
+  /// Frequency of the most recently completed pair merge.
+  pub fn last_merge_freq(&self) -> Option<i64> {
+    self.inner.last_merge_freq()
+  }
+
+  #[getter]
+  /// Diagnostics for the bounded pair-posting window, if enabled.
+  pub fn hot_pair_window_stats(&self) -> Option<BTreeMap<&'static str, u64>> {
+    let stats = self.inner.hot_pair_window_stats()?;
+    Some(BTreeMap::from([
+      ("hydration_scans", stats.hydration_scans),
+      ("hydrated_word_entries", stats.hydrated_word_entries),
+      ("batch_prunes", stats.batch_prunes),
+      ("prune_evictions", stats.prune_evictions),
+      ("peak_resident_pairs", stats.peak_resident_pairs as u64),
+      ("resident_pairs", self.inner.hot_resident_pairs() as u64),
+      ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
+    ]))
   }
 
   /// Initialize internal training state.
@@ -453,13 +546,34 @@ impl PreTokenizer {
   pub fn py_build_unicode_bigrams_from_file(
     &self, py: Python, path: PathBuf, chunk_size: u64, boundary: &str, top_k: usize, min_freq: i64,
   ) -> PyResult<Vec<String>> {
+    Ok(
+      self
+        .py_select_unicode_bigrams_from_file(
+          py,
+          path,
+          chunk_size,
+          boundary,
+          top_k,
+          min_freq,
+        )?
+        .bigrams,
+    )
+  }
+
+  #[pyo3(name = "select_unicode_bigrams_from_file", signature = (path, *, chunk_size=1048576, boundary="auto", top_k=100000, min_freq=16))]
+  pub fn py_select_unicode_bigrams_from_file(
+    &self, py: Python, path: PathBuf, chunk_size: u64, boundary: &str, top_k: usize, min_freq: i64,
+  ) -> PyResult<UnicodeBigramSelection> {
     let options = chunk_options(chunk_size, boundary)?;
-    let bigrams = py.detach(||
-      self.build_unicode_bigram_set_from_file_with_options(path, options, top_k, min_freq)
+    let selection = py.detach(||
+      self.build_unicode_bigram_selection_from_file_with_options(
+        path,
+        options,
+        top_k,
+        min_freq,
+      )
     ).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    let mut bigrams = bigrams.into_iter().collect::<Vec<_>>();
-    bigrams.sort();
-    Ok(bigrams.into_iter().map(unicode_bigram_to_string).collect())
+    Ok(selection.into())
   }
 }
 
@@ -682,10 +796,12 @@ impl BigramCounter {
 
   #[pyo3(name = "selected")]
   pub fn py_selected(&self, top_k: usize, min_freq: i64) -> Vec<String> {
-    BigramCounter::selected(self, top_k, min_freq)
-      .into_iter()
-      .map(unicode_bigram_to_string)
-      .collect()
+    self.py_select(top_k, min_freq).bigrams
+  }
+
+  #[pyo3(name = "select")]
+  pub fn py_select(&self, top_k: usize, min_freq: i64) -> UnicodeBigramSelection {
+    self.selection(top_k, min_freq).into()
   }
 
   pub fn items(&self) -> Vec<(String, i64)> {

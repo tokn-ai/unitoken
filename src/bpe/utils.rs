@@ -310,7 +310,10 @@ where
   vocab.get(&idx).cloned().or_else(|| idx.idx_to_word()).ok_or_else(|| MyError::OovIdx(idx.to_u64()))
 }
 
-pub(crate) fn _update_merge_map<C, I>(merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>, changes: AHashMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>) -> Vec<(I, I)>
+pub(crate) fn _update_merge_map<C, I>(
+  merge_map: &mut HashMap<(I, I), Merge<C, I>>, merge: &Merge<C, I>,
+  changes: AHashMap<(I, I), MergeData>, vocab: Option<&BTreeMap<I, Word<C>>>,
+) -> Vec<(I, I)>
 where
   I: IdxLike + HasChar<C> + Hash,
   C: CanStrToWord,

@@ -12,6 +12,17 @@ use std::{
 
 use crate::{MyError, MyResult, bpe::Freq};
 
+/// Unicode bigrams retained by a frequency selection and its effective boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnicodeBigramSelection {
+  /// Retained bigrams, including every tie at `cutoff_freq`.
+  pub bigrams: AHashSet<(char, char)>,
+  /// Least frequency among retained bigrams, including all ties.
+  pub cutoff_freq: Option<Freq>,
+  /// Greatest frequency among counted bigrams that were not retained.
+  pub max_excluded_freq: Option<Freq>,
+}
+
 lazy_static! {
   /// PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
   pub static ref DEFAULT_PAT: Regex = Regex::new(r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+").unwrap();
@@ -252,6 +263,22 @@ impl PreTokenizer {
   pub fn build_unicode_bigram_set_from_file_with_options<P: AsRef<Path>>(
     &self, path: P, options: ChunkOptions, top_k: usize, min_freq: Freq,
   ) -> MyResult<AHashSet<(char, char)>> {
+    Ok(
+      self
+        .build_unicode_bigram_selection_from_file_with_options(
+          path,
+          options,
+          top_k,
+          min_freq,
+        )?
+        .bigrams,
+    )
+  }
+
+  /// Count and select Unicode bigrams while preserving the effective cutoff.
+  pub fn build_unicode_bigram_selection_from_file_with_options<P: AsRef<Path>>(
+    &self, path: P, options: ChunkOptions, top_k: usize, min_freq: Freq,
+  ) -> MyResult<UnicodeBigramSelection> {
     let boundaries = _find_chunk_boundaries_with_options(&path, options, &self.end_of_text)?;
     let path = path.as_ref().to_path_buf();
     let params = boundaries
@@ -356,23 +383,48 @@ pub fn unicode_bigram_to_string(bigram: (char, char)) -> String {
 
 pub(crate) fn select_unicode_bigrams(
   counts: AHashMap<(char, char), Freq>, top_k: usize, min_freq: Freq,
-) -> AHashSet<(char, char)> {
+) -> UnicodeBigramSelection {
   if top_k == 0 {
-    return AHashSet::new();
+    return UnicodeBigramSelection {
+      bigrams: AHashSet::new(),
+      cutoff_freq: None,
+      max_excluded_freq: counts.values().copied().max(),
+    };
   }
-  let mut sorted = counts
-    .into_iter()
-    .filter(|(_, freq)| *freq >= min_freq)
-    .collect::<Vec<_>>();
+  let mut max_below_min_freq = None;
+  let mut sorted = Vec::new();
+  for (bigram, freq) in counts {
+    if freq >= min_freq {
+      sorted.push((bigram, freq));
+    } else if max_below_min_freq.is_none_or(|current| freq > current) {
+      max_below_min_freq = Some(freq);
+    }
+  }
   sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-  let Some(cutoff_freq) = sorted.get(top_k - 1).map(|(_, freq)| *freq) else {
-    return sorted.into_iter().map(|(bigram, _)| bigram).collect();
+  let Some(cutoff_freq) = sorted
+    .get(top_k.min(sorted.len()).saturating_sub(1))
+    .map(|(_, freq)| *freq)
+  else {
+    return UnicodeBigramSelection {
+      bigrams: AHashSet::new(),
+      cutoff_freq: None,
+      max_excluded_freq: max_below_min_freq,
+    };
   };
-  sorted
-    .into_iter()
-    .take_while(|(_, freq)| *freq >= cutoff_freq)
-    .map(|(bigram, _)| bigram)
-    .collect()
+  let retained_len = sorted.partition_point(|(_, freq)| *freq >= cutoff_freq);
+  let max_excluded_freq = sorted
+    .get(retained_len)
+    .map(|(_, freq)| *freq)
+    .or(max_below_min_freq);
+  UnicodeBigramSelection {
+    bigrams: sorted
+      .into_iter()
+      .take(retained_len)
+      .map(|(bigram, _)| bigram)
+      .collect(),
+    cutoff_freq: Some(cutoff_freq),
+    max_excluded_freq,
+  }
 }
 
 pub(crate) fn count_unicode_bigrams(
@@ -910,8 +962,8 @@ mod tests {
     std::fs::write(path, format!("ab你{DEFAULT_EOT}bc你好한글かな")).unwrap();
 
     let pretokenizer = PreTokenizer::new(&vec![DEFAULT_EOT.to_string()], Some(DEFAULT_EOT));
-    let bigrams = pretokenizer
-      .build_unicode_bigram_set_from_file_with_options(
+    let selection = pretokenizer
+      .build_unicode_bigram_selection_from_file_with_options(
         path,
         ChunkOptions {
           hint: ChunkHint::Count(1),
@@ -921,6 +973,7 @@ mod tests {
         1,
       )
       .unwrap();
+    let bigrams = &selection.bigrams;
 
     assert!(bigrams.contains(&('你', '好')));
     assert!(bigrams.contains(&('한', '글')));
@@ -931,6 +984,8 @@ mod tests {
     assert!(!bigrams.contains(&('c', '你')));
     assert!(!bigrams.contains(&('b', '<')));
     assert!(!bigrams.contains(&('>', 'b')));
+    assert_eq!(selection.cutoff_freq, Some(1));
+    assert_eq!(selection.max_excluded_freq, None);
   }
 
   #[test]
@@ -944,14 +999,42 @@ mod tests {
     .into_iter()
     .collect::<AHashMap<_, _>>();
 
-    let selected = select_unicode_bigrams(counts, 2, 1);
+    let selection = select_unicode_bigrams(counts, 2, 1);
 
     assert_eq!(
-      selected,
+      selection.bigrams,
       [('你', '好'), ('世', '界'), ('한', '글')]
         .into_iter()
         .collect::<AHashSet<_>>()
     );
+    assert_eq!(selection.cutoff_freq, Some(5));
+    assert_eq!(selection.max_excluded_freq, Some(4));
+  }
+
+  #[test]
+  fn test_unicode_bigram_selection_reports_underfilled_and_empty_cutoffs() {
+    let counts = [
+      (('你', '好'), 10),
+      (('世', '界'), 5),
+      (('한', '글'), 4),
+    ]
+    .into_iter()
+    .collect::<AHashMap<_, _>>();
+
+    let underfilled = select_unicode_bigrams(counts.clone(), 10, 5);
+    assert_eq!(underfilled.cutoff_freq, Some(5));
+    assert_eq!(underfilled.max_excluded_freq, Some(4));
+    assert_eq!(underfilled.bigrams.len(), 2);
+
+    let filtered = select_unicode_bigrams(counts.clone(), 10, 11);
+    assert_eq!(filtered.cutoff_freq, None);
+    assert_eq!(filtered.max_excluded_freq, Some(10));
+    assert!(filtered.bigrams.is_empty());
+
+    let zero = select_unicode_bigrams(counts, 0, 1);
+    assert_eq!(zero.cutoff_freq, None);
+    assert_eq!(zero.max_excluded_freq, Some(10));
+    assert!(zero.bigrams.is_empty());
   }
 
   #[test]

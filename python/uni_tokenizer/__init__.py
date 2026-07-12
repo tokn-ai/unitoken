@@ -1,7 +1,7 @@
 from .trainer import BpeTrainer, FileFormat, Unit
 from .model import BpeModel
 from .encoder import BpeEncoder
-from .pretokenizer import BigramCounter, BoundaryMode, PreTokenizer, Source, UnicodeBigramMixedBoundary, WordCounter
+from .pretokenizer import BigramCounter, BoundaryMode, PreTokenizer, Source, UnicodeBigramMixedBoundary, UnicodeBigramSelection, WordCounter
 from .tiktoken_compat import (
   Encoding,
   encoding_for_model,
@@ -27,6 +27,7 @@ __all__ = [
   "PreTokenizer",
   "Source",
   "UnicodeBigramMixedBoundary",
+  "UnicodeBigramSelection",
   "Unit",
   "WordCounter",
   "encoding_for_model",
