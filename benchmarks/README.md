@@ -12,6 +12,60 @@ out/
   benchmarks/    # benchmark measurement reports
 ```
 
+Rust regression benchmark
+-------------------------
+
+The authoritative core regression benchmark is the harness-free Rust target
+in `benches/regression/`. It runs with Cargo's optimized `bench` profile and
+spawns a fresh child process for every exact or bounded occurrence-storage
+sample. Running it without a subcommand executes the checked-in byte and
+Unicode smoke cases:
+
+```bash
+cargo bench --bench regression
+```
+
+Run a pinned word-frequency inventory at independent vocabulary checkpoints:
+
+```bash
+cargo bench --bench regression -- trainer \
+  --words /path/to/_words.json \
+  --unit unicode \
+  --vocab-sizes 300,10000,100000 \
+  --hot-pair-window-sizes 4096 \
+  --rayon-threads 8 \
+  --repeats 3 \
+  --output out/benchmarks/regression/cmn_hani.json
+```
+
+Each report uses the versioned `unitoken_trainer_regression_v1` contract and
+contains raw phase durations, phase-boundary RSS, 5 ms sampled peaks for trainer
+construction and training, the cumulative whole-process high-water mark,
+bounded-window statistics, and canonical SHA-256 fingerprints. The sampled
+training peak starts after the JSON inventory has been transferred into the
+trainer, so a transient inventory-loading high-water mark cannot mask it.
+Fingerprints are computed from length-prefixed semantic model and final-word
+state data rather than formatted vocabulary or merge files.
+The parent writes the report even when a child or correctness gate fails, then
+returns a nonzero status so CI retains an inspectable failure artifact.
+
+Correctness gates require every run to reach its target, validate successfully,
+remain deterministic across repeats, and produce identical exact/K models and
+final word states. The checked-in smoke cases also pin golden semantic model
+and inventory hashes, catching common-mode code changes and accidental fixture
+changes. Pass `--expected-input-sha256` and `--expected-model-sha256` to add the
+same guards to a custom run. Determinism is reported as `null` with one sample;
+use `--repeats 2` or more to evaluate that gate. For a Unicode-bigram inventory,
+pass `--bigram-cutoff-freq`; model validation then strictly requires
+`last_merge_freq > bigram_cutoff_freq`, so equality fails.
+
+Timing and RSS remain measurements rather than correctness gates. Compare them
+only across reports produced on matching hardware, operating systems, thread
+counts, and corpus artifacts. Reports record the CPU and hardware model,
+logical CPU count, total memory, Rust version, and benchmark binary hash to make
+that check explicit. Python may still prepare external Parquet or SQL inputs and
+plot reports, but it is not in the measured Rust trainer path.
+
 Benchmark report paths default to:
 
 ```text

@@ -66,6 +66,9 @@ debug = true
 debug = "line-tables-only"
 # RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
+[profile.bench]
+inherits = "release"
+
 [features]
 default = []
 hotpath = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
@@ -77,11 +80,19 @@ py = ["dep:pyo3", "dep:ndarray", "dep:numpy"]
 cli = ["dep:tracing-subscriber", "dep:indicatif", "dep:chrono", "dep:clap"]
 
 [dev-dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
 pyo3-introspection = "0.27"
 criterion = "0.5.1"
+libc = "0.2"
+sha2 = "0.10"
 
 [[bench]]
 name = "bpe"
+harness = false
+
+[[bench]]
+name = "regression"
+path = "benches/regression/main.rs"
 harness = false
 
 # [patch.crates-io]
