@@ -72,6 +72,45 @@ native word inventory without constructing a Python dictionary; the counter is
 empty and reusable afterward. `word_counter.words()` remains available for
 small inventories, but copies the complete result into Python memory.
 
+Bounded-memory BPE training
+---------------------------
+
+By default, the trainer retains occurrence sets for every discovered pair.
+For large word inventories, `hot_pair_window_size` bounds persistent occurrence
+sets while preserving exact global pair frequencies, winner selection, and
+tie-breaking:
+
+```python
+trainer = BpeTrainer(
+  [],
+  unit="unicode",
+  hot_pair_window_size=4096,
+)
+trainer.add_word_counter(word_counter)
+trainer.train(vocab_size=10_000)
+```
+
+`4096` is a measured starting point, not a correctness setting. Smaller K uses
+less memory but can require more full inventory scans when a cold pair wins.
+Larger K retains more occurrence sets and generally reduces those scans. On a
+cold winner, the trainer hydrates the exact current top K; newly created pairs
+at or above the latest top-K frequency threshold are admitted immediately. If
+resident pairs grow beyond 2K, they are pruned back to the exact top K.
+
+On the 1 GiB FineWeb2 Chinese Unicode-bigram inventory used by the benchmark
+suite (3,855,974 unique words, vocabulary size 10,000), one release run measured:
+
+| occurrence mode | observed training peak RSS | total training | hydration scans |
+|---|---:|---:|---:|
+| exact (default) | 1,797 MiB | 5.58s | — |
+| K=4096 | 1,649 MiB | 5.85s | 2 |
+
+Both modes produced the same final merge frequency and model. Inspect
+`trainer.hot_pair_window_stats` for hydration, pruning, resident-pair, and
+occurrence-capacity diagnostics. Corpus shape and target vocabulary size affect
+the best K, so benchmark representative inventories before changing the
+default for a deployment.
+
 Tiktoken-compatible API
 -----------------------
 

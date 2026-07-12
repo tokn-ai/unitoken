@@ -26,7 +26,6 @@ Training benchmarks use explicit contracts in their JSON metadata:
 
 ```text
 fixed_words_unitoken_training_core_profile
-fixed_words_exact_hot_window_simulation_v1
 fixed_words_unitoken_vs_hf_expanded_iterator
 raw_text_unitoken_trainer_profile
 raw_text_unitoken_vs_hf
@@ -100,12 +99,23 @@ python benchmarks/profile_training_core.py \
   --experiment-name hot4096
 ```
 
+K=4096 is the current measured starting point for this inventory shape, not a
+correctness requirement or universal optimum. Exact storage remains the API
+default. Smaller windows retain fewer occurrence sets but may trigger more
+inventory hydration scans; larger windows trade memory for fewer scans.
+
 On a cold winner, the trainer hydrates the exact current top-K pairs in one
 inventory scan. Newly created pairs at or above the latest top-K frequency
-threshold are admitted with complete postings. Crossing 2K resident pairs
-batch-prunes postings back to K using the configured exact tie-break. Reports
-include hydration and prune counters, resident posting capacity, phase-level
-RSS, and the final merge frequency guard.
+threshold are admitted with complete occurrence sets. Crossing 2K resident
+pairs releases occurrence sets back to K using the configured exact tie-break.
+Reports include hydration and prune counters, resident occurrence-set capacity,
+phase-level RSS, and the final merge frequency guard.
+
+The final 1 GiB Unicode-bigram run (3,855,974 unique words, vocabulary size
+10,000) measured 1,797 MiB observed training peak RSS and 5.58s in exact mode,
+versus 1,649 MiB and 5.85s at K=4096. The bounded run used two hydration scans,
+peaked at 4,847 resident pairs, required no batch prune, and matched the exact
+final merge frequency of 4,183.
 
 Unicode-bigram selection reports record `cutoff_freq`, the least retained
 frequency after including cutoff ties, and `max_excluded_freq`. Training
@@ -116,9 +126,9 @@ but the benchmark still completes so the failure can be inspected.
 
 Saved word inventories may carry a sibling `_words.manifest.json`. The
 manifest records source identity, pretokenizer settings, Unicode-bigram
-selection boundaries, and inventory statistics. Fixed-word training and
-hot-window reports load this sidecar automatically and evaluate the frequency
-guard without relying on directory names.
+selection boundaries, and inventory statistics. Fixed-word training reports
+load this sidecar automatically and evaluate the frequency guard without
+relying on directory names.
 
 Example raw-text unitoken trainer profile:
 
