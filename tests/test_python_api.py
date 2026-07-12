@@ -35,6 +35,29 @@ def test_trainer_exposes_unit_and_singular_vocab() -> None:
   assert isinstance(trainer.vocab, dict)
 
 
+def test_hot_pair_window_matches_exact_python_training() -> None:
+  words = {"cab": 11, "eab": 9, "gab": 7, "abi": 5, "abj": 3, "abk": 1}
+
+  def train(hot_pair_window_size: int | None) -> tuple[dict[bytes, int], int | None]:
+    trainer = BpeTrainer([], unit="byte", hot_pair_window_size=hot_pair_window_size)
+    trainer.add_words(words)
+    trainer.train(vocab_size=260)
+    trainer.validate_model()
+    if hot_pair_window_size is None:
+      assert trainer.hot_pair_window_stats is None
+    else:
+      assert trainer.hot_pair_window_stats is not None
+      assert trainer.hot_pair_window_stats["hydration_scans"] >= 1
+    return trainer.vocab, trainer.last_merge_freq
+
+  assert train(2) == train(None)
+
+
+def test_hot_pair_window_rejects_zero() -> None:
+  with pytest.raises(ValueError, match="must be positive"):
+    BpeTrainer([], hot_pair_window_size=0)
+
+
 def test_unknown_unit_is_rejected() -> None:
   with pytest.raises(ValueError, match="Unknown unit"):
     BpeTrainer([], unit="characters")  # type: ignore[arg-type]

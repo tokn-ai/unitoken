@@ -325,6 +325,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     },
     tie_break: args.tie_break.into(),
     parallel_merge_min_occurs_in: None,
+    hot_pair_window_size: None,
   };
   let analysis = match args.unit {
     Unit::Byte => analyze_byte_words(

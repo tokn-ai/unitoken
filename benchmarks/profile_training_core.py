@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import resource
 import sys
 import time
 from collections.abc import Sequence
@@ -27,12 +28,24 @@ from common import write_report
 SCRIPT_NAME = "profile_training_core"
 
 
-def profile_training_core(words: Sequence[tuple[str, int]], vocab_size: int, bucket_size: int, unit: str) -> dict[str, Any]:
+def peak_rss_bytes() -> int:
+  peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+  return peak if sys.platform == "darwin" else peak * 1024
+
+
+def profile_training_core(
+  words: Sequence[tuple[str, int]],
+  vocab_size: int,
+  bucket_size: int,
+  unit: str,
+  hot_pair_window_size: int | None,
+) -> dict[str, Any]:
   gc.collect()
   trainer = BpeTrainer(
     SPECIAL_TOKENS,
     unit=unit,
     initial_alphabet="byte_level" if unit == "byte" else None,
+    hot_pair_window_size=hot_pair_window_size,
   )
 
   started = time.perf_counter()
@@ -61,6 +74,8 @@ def profile_training_core(words: Sequence[tuple[str, int]], vocab_size: int, buc
     "step_summary": duration_summary(step_times),
     "step_buckets": bucket_steps(step_times, bucket_size),
     "total_train_s": add_words_s + init_training_s + sum(step_times),
+    "process_peak_rss_bytes": peak_rss_bytes(),
+    "hot_pair_window_stats": trainer.hot_pair_window_stats,
   }
 
 
@@ -71,6 +86,11 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--unit", choices=["byte", "unicode"], default="byte", help="BPE unit used for training.")
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a faster smoke profile.")
   parser.add_argument("--bucket-size", type=int, default=500)
+  parser.add_argument(
+    "--hot-pair-window-size",
+    type=int,
+    help="Retain occurrence postings for only the exact top-K pair window.",
+  )
   add_report_args(parser)
   args = parser.parse_args(argv)
 
@@ -78,10 +98,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.error("--vocab-size must be at least 1")
   if args.bucket_size < 1:
     parser.error("--bucket-size must be at least 1")
+  if args.hot_pair_window_size is not None and args.hot_pair_window_size < 1:
+    parser.error("--hot-pair-window-size must be at least 1")
 
   words = load_words(args.words, args.max_occurrences)
   manifest = load_word_inventory_manifest(args.words)
-  unitoken_result = profile_training_core(words, args.vocab_size, args.bucket_size, args.unit)
+  unitoken_result = profile_training_core(
+    words,
+    args.vocab_size,
+    args.bucket_size,
+    args.unit,
+    args.hot_pair_window_size,
+  )
   guard = (
     bigram_frequency_guard(unitoken_result["final_merge_freq"], manifest)
     if args.max_occurrences is None
@@ -108,6 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       "occurrences": sum(freq for _, freq in words),
       "unitoken_input_kind": "compressed_word_counts",
       "unit": args.unit,
+      "hot_pair_window_size": args.hot_pair_window_size,
       "word_inventory_manifest_path": (
         str(word_inventory_manifest_path(args.words))
         if manifest is not None

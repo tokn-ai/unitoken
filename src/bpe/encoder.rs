@@ -416,7 +416,7 @@ where
         continue;
       };
       let changes = _merge(&mut words, &merge, *target, None);
-      _update_merge_map(&mut pre_merges, &merge, changes, None);
+      _update_merge_map(&mut pre_merges, &merge, changes, None, true);
     }
 
     Ok(words.into_iter().map(|i| i.idxs.to_word()).collect())

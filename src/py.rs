@@ -136,6 +136,7 @@ fn trainer_config(
   initial_alphabet: Option<&str>,
   tie_break: Option<&str>,
   parallel_merge_min_occurs_in: Option<usize>,
+  hot_pair_window_size: Option<usize>,
 ) -> PyResult<BpeTrainerConfig> {
   let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
     "raw" => InitialAlphabet::RawBytes,
@@ -147,10 +148,16 @@ fn trainer_config(
     "largest_content" => TieBreak::LargestContent,
     value => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown tie_break: {value}"))),
   };
+  if hot_pair_window_size == Some(0) {
+    return Err(pyo3::exceptions::PyValueError::new_err(
+      "hot_pair_window_size must be positive",
+    ));
+  }
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
     parallel_merge_min_occurs_in,
+    hot_pair_window_size,
   })
 }
 
@@ -178,14 +185,20 @@ impl BpeTrainer_u8_Idx {
   /// Create a new BPE trainer (byte-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
+    hot_pair_window_size: Option<usize>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
+    let config = trainer_config(
+      initial_alphabet,
+      tie_break,
+      parallel_merge_min_occurs_in,
+      hot_pair_window_size,
+    )?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
@@ -219,6 +232,21 @@ impl BpeTrainer_u8_Idx {
   /// Frequency of the most recently completed pair merge.
   pub fn last_merge_freq(&self) -> Option<i64> {
     self.inner.last_merge_freq()
+  }
+
+  #[getter]
+  /// Diagnostics for the bounded pair-posting window, if enabled.
+  pub fn hot_pair_window_stats(&self) -> Option<BTreeMap<&'static str, u64>> {
+    let stats = self.inner.hot_pair_window_stats()?;
+    Some(BTreeMap::from([
+      ("hydration_scans", stats.hydration_scans),
+      ("hydrated_word_entries", stats.hydrated_word_entries),
+      ("batch_prunes", stats.batch_prunes),
+      ("prune_evictions", stats.prune_evictions),
+      ("peak_resident_pairs", stats.peak_resident_pairs as u64),
+      ("resident_pairs", self.inner.hot_resident_pairs() as u64),
+      ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
+    ]))
   }
 
   /// Initialize internal training state.
@@ -269,14 +297,20 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
     tie_break: Option<&str>,
     parallel_merge_min_occurs_in: Option<usize>,
+    hot_pair_window_size: Option<usize>,
   ) -> PyResult<(Self, BpeTrainerBase)> {
-    let config = trainer_config(initial_alphabet, tie_break, parallel_merge_min_occurs_in)?;
+    let config = trainer_config(
+      initial_alphabet,
+      tie_break,
+      parallel_merge_min_occurs_in,
+      hot_pair_window_size,
+    )?;
     Ok((
       Self {
         inner: BpeTrainer::new_with_config(vec![], special_tokens, config),
@@ -310,6 +344,21 @@ impl BpeTrainer_Character_CharIdx {
   /// Frequency of the most recently completed pair merge.
   pub fn last_merge_freq(&self) -> Option<i64> {
     self.inner.last_merge_freq()
+  }
+
+  #[getter]
+  /// Diagnostics for the bounded pair-posting window, if enabled.
+  pub fn hot_pair_window_stats(&self) -> Option<BTreeMap<&'static str, u64>> {
+    let stats = self.inner.hot_pair_window_stats()?;
+    Some(BTreeMap::from([
+      ("hydration_scans", stats.hydration_scans),
+      ("hydrated_word_entries", stats.hydrated_word_entries),
+      ("batch_prunes", stats.batch_prunes),
+      ("prune_evictions", stats.prune_evictions),
+      ("peak_resident_pairs", stats.peak_resident_pairs as u64),
+      ("resident_pairs", self.inner.hot_resident_pairs() as u64),
+      ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
+    ]))
   }
 
   /// Initialize internal training state.
