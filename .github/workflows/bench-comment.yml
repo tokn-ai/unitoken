@@ -1,0 +1,43 @@
+name: Benchmark comment
+
+on:
+  workflow_run:
+    workflows: [ Benchmark ]
+    types: [ completed ]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout trusted comment renderer
+        uses: actions/checkout@v4
+
+      - name: Download benchmark reports
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: benchmark-results
+          path: ${{ runner.temp }}/benchmark-results
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Update PR benchmark comment
+        uses: actions/github-script@v7
+        env:
+          BENCHMARK_RESULTS_DIR: ${{ runner.temp }}/benchmark-results
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        with:
+          script: |
+            const updateBenchmarkComment = require(
+              './.github/scripts/update-benchmark-comment.cjs'
+            );
+            await updateBenchmarkComment({ github, context, core });
