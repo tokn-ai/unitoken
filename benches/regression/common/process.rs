@@ -6,12 +6,6 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-  config::CaseRequest,
-  report::{CaseOutcome, RunStatus},
-  runner::execute_case,
-};
-
 pub fn run_isolated_protocol<Request, Outcome>(
   child_command: &str,
   requests: &[Request],
@@ -82,20 +76,6 @@ where
   let passed = passed(&outcome);
   write_json_atomic(result_path, &outcome)?;
   Ok(passed)
-}
-
-pub fn run_isolated_cases(requests: &[CaseRequest]) -> Result<Vec<CaseOutcome>, String> {
-  run_isolated_protocol(
-    "case",
-    requests,
-    CaseRequest::id,
-    validate_child_outcome,
-    |request, message| CaseOutcome::failed(request, "child_process", message),
-  )
-}
-
-pub fn run_child(request_path: &Path, result_path: &Path) -> Result<bool, String> {
-  run_protocol_child(request_path, result_path, execute_case, |outcome| outcome.measurement.is_some())
 }
 
 pub(crate) struct TemporaryDirectory {
@@ -182,23 +162,6 @@ pub fn validate_outcome_shape(
     return Err(format!("child exit status {status} disagrees with result status"));
   }
   Ok(())
-}
-
-fn validate_child_outcome(
-  request: &CaseRequest,
-  status: &ExitStatus,
-  outcome: CaseOutcome,
-) -> Result<CaseOutcome, String> {
-  if outcome.request != *request || outcome.case_id != request.id() {
-    return Err("child result does not match its request".to_string());
-  }
-  validate_outcome_shape(
-    status,
-    outcome.status == RunStatus::Completed,
-    outcome.measurement.is_some(),
-    outcome.error.is_some(),
-  )?;
-  Ok(outcome)
 }
 
 fn child_failure_message(status: &ExitStatus, stderr: &[u8], stdout: &[u8], read_error: &str) -> String {

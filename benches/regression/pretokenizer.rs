@@ -6,23 +6,23 @@ use std::{
   time::Instant,
 };
 
-use clap::{Args, ValueEnum};
+use clap::{Args as ClapArgs, ValueEnum};
 use serde::{Deserialize, Serialize};
 use unitoken::{
   bpe::Freq,
-  pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, UnicodeBigramMixedBoundary},
+  pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer},
 };
 
-use crate::{
-  fingerprint::{
-    fingerprint_unicode_bigrams, fingerprint_word_counts, sha256_file, sha256_hex,
-  },
+use crate::common::{
+  config::UnicodeBigramMixedBoundaryName as MixedBoundaryName,
+  environment::{default_suite_report_path, environment_report, resolve_threads},
+  fingerprint::{fingerprint_unicode_bigrams, fingerprint_word_counts, sha256_file, sha256_hex},
   process::{run_isolated_protocol, run_protocol_child, validate_outcome_shape, write_json_atomic},
   report::{EnvironmentReport, RunFailure, RunStatus},
   rss,
   util::{
-    FileIdentity, duration_ms, duration_ns, file_stem, format_bytes, now_seconds, short_hash,
-    resolve_path_for_comparison, throughput_mib, validate_sha256,
+    FileIdentity, duration_ms, duration_ns, file_stem, format_bytes, now_seconds, resolve_path_for_comparison,
+    short_hash, throughput_mib, validate_sha256,
   },
 };
 
@@ -60,32 +60,8 @@ impl BoundaryName {
   }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-#[value(rename_all = "snake_case")]
-pub enum MixedBoundaryName {
-  Keep,
-  Split,
-}
-
-impl MixedBoundaryName {
-  fn core(self) -> UnicodeBigramMixedBoundary {
-    match self {
-      Self::Keep => UnicodeBigramMixedBoundary::Keep,
-      Self::Split => UnicodeBigramMixedBoundary::Split,
-    }
-  }
-
-  pub(crate) fn as_str(self) -> &'static str {
-    match self {
-      Self::Keep => "keep",
-      Self::Split => "split",
-    }
-  }
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct PretokenizerArgs {
+#[derive(Clone, Debug, ClapArgs)]
+pub struct Args {
   /// Raw UTF-8 corpus file.
   #[arg(long)]
   pub text: PathBuf,
@@ -352,7 +328,8 @@ pub struct PretokenizerSuiteReport {
   pub gates: PretokenizerGates,
 }
 
-pub fn run(args: PretokenizerArgs, environment: EnvironmentReport) -> Result<(), String> {
+pub fn run(args: Args) -> Result<(), String> {
+  let environment = environment_report();
   let repeats = args.repeats;
   if repeats == 0 {
     return Err("--repeats must be positive".to_string());
@@ -371,7 +348,7 @@ pub fn run(args: PretokenizerArgs, environment: EnvironmentReport) -> Result<(),
       return Err("--unicode-bigrams-output requires --unicode-bigram-top-k".to_string());
     }
   }
-  let rayon_threads = super::resolve_threads(args.rayon_threads)?;
+  let rayon_threads = resolve_threads(args.rayon_threads)?;
   let name = args
     .name
     .unwrap_or_else(|| file_stem(&args.text, "pretokenizer"));
@@ -437,7 +414,7 @@ pub fn run(args: PretokenizerArgs, environment: EnvironmentReport) -> Result<(),
   };
   let output = args
     .output
-    .unwrap_or_else(|| super::default_suite_report_path(&report_name, &report.environment));
+    .unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
   validate_output_paths(
     &output,
     &case.text_path,

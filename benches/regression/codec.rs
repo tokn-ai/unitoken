@@ -7,7 +7,7 @@ use std::{
   time::Instant,
 };
 
-use clap::{Args, ValueEnum};
+use clap::{Args as ClapArgs, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unitoken::{
@@ -17,18 +17,16 @@ use unitoken::{
   traits::{CanEncode, Encode},
 };
 
-use crate::{
-  config::Unit,
+use crate::common::{
+  config::{UnicodeBigramMixedBoundaryName, Unit},
+  environment::{default_suite_report_path, environment_report, resolve_threads},
   fingerprint::{fingerprint_token_ids, sha256_file, sha256_hex, to_hex},
-  process::{
-    TemporaryDirectory, run_isolated_protocol, run_protocol_child, validate_outcome_shape,
-    write_json_atomic,
-  },
+  process::{TemporaryDirectory, run_isolated_protocol, run_protocol_child, validate_outcome_shape, write_json_atomic},
   report::{EnvironmentReport, RunFailure, RunStatus},
   rss,
   util::{
-    FileIdentity, duration_ms, duration_ns, file_stem, format_bytes, now_seconds, short_hash,
-    resolve_path_for_comparison, throughput_mib, validate_sha256,
+    FileIdentity, duration_ms, duration_ns, file_stem, format_bytes, now_seconds, resolve_path_for_comparison,
+    short_hash, throughput_mib, validate_sha256,
   },
 };
 
@@ -59,8 +57,8 @@ impl CodecPhase {
   }
 }
 
-#[derive(Clone, Debug, Args)]
-pub struct CodecArgs {
+#[derive(Clone, Debug, ClapArgs)]
+pub struct Args {
   /// Raw UTF-8 corpus file to encode and round-trip.
   #[arg(long)]
   pub text: PathBuf,
@@ -85,7 +83,7 @@ pub struct CodecArgs {
   #[arg(long)]
   pub unicode_bigrams: Option<PathBuf>,
   #[arg(long, value_enum, default_value = "keep")]
-  pub unicode_bigram_mixed_boundary: super::pretokenizer_bench::MixedBoundaryName,
+  pub unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundaryName,
   /// Reserved special token. Repeat to configure more than one.
   #[arg(long = "special-token")]
   pub special_tokens: Vec<String>,
@@ -118,7 +116,7 @@ pub struct CodecCaseConfig {
   pub requested_chunks: usize,
   pub pat_str: Option<String>,
   pub unicode_bigrams_path: Option<PathBuf>,
-  pub unicode_bigram_mixed_boundary: super::pretokenizer_bench::MixedBoundaryName,
+  pub unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundaryName,
   pub special_tokens: Vec<String>,
   pub rayon_threads: usize,
   pub expected_input_sha256: Option<String>,
@@ -158,7 +156,7 @@ impl CodecCaseConfig {
     if self.unicode_bigrams_path.is_some() && self.unit != Unit::Unicode {
       return Err("unicode_bigrams is only compatible with unicode units".to_string());
     }
-    if self.unicode_bigram_mixed_boundary != super::pretokenizer_bench::MixedBoundaryName::Keep
+    if self.unicode_bigram_mixed_boundary != UnicodeBigramMixedBoundaryName::Keep
       && self.unit != Unit::Unicode
     {
       return Err("unicode_bigram_mixed_boundary is only configurable with unicode units".to_string());
@@ -237,7 +235,7 @@ pub struct CodecModelReport {
   pub unicode_bigrams_file_sha256: Option<String>,
   pub unicode_bigrams_semantic_sha256: Option<String>,
   pub unicode_bigram_count: Option<usize>,
-  pub unicode_bigram_mixed_boundary: super::pretokenizer_bench::MixedBoundaryName,
+  pub unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundaryName,
   pub resolved_pat_str: String,
   pub end_of_text: String,
   pub encoder_config_sha256: String,
@@ -362,12 +360,13 @@ pub struct CodecSuiteReport {
   pub gates: CodecGates,
 }
 
-pub fn run(args: CodecArgs, environment: EnvironmentReport) -> Result<(), String> {
+pub fn run(args: Args) -> Result<(), String> {
+  let environment = environment_report();
   let repeats = args.repeats;
   if repeats == 0 {
     return Err("--repeats must be positive".to_string());
   }
-  let rayon_threads = super::resolve_threads(args.rayon_threads)?;
+  let rayon_threads = resolve_threads(args.rayon_threads)?;
   let name = args.name.unwrap_or_else(|| file_stem(&args.text, "codec"));
   let special_tokens = if args.special_tokens.is_empty() {
     vec![unitoken::pretokenizer::DEFAULT_EOT.to_string()]
@@ -436,7 +435,7 @@ pub fn run(args: CodecArgs, environment: EnvironmentReport) -> Result<(), String
   };
   let output = args
     .output
-    .unwrap_or_else(|| super::default_suite_report_path(&report_name, &report.environment));
+    .unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
   validate_codec_output_path(&output, &report.config)?;
   write_json_atomic(&output, &report)?;
   print_summary(&output, &report);
@@ -540,8 +539,8 @@ fn load_unicode_encoder(config: &CodecCaseConfig) -> Result<(BpeEncoder<Characte
     .build(&UnitokenSpec)
     .map_err(|error| ("model_build", error.to_string()))?;
   let mixed_boundary = match config.unicode_bigram_mixed_boundary {
-    super::pretokenizer_bench::MixedBoundaryName::Keep => UnicodeBigramMixedBoundary::Keep,
-    super::pretokenizer_bench::MixedBoundaryName::Split => UnicodeBigramMixedBoundary::Split,
+    UnicodeBigramMixedBoundaryName::Keep => UnicodeBigramMixedBoundary::Keep,
+    UnicodeBigramMixedBoundaryName::Split => UnicodeBigramMixedBoundary::Split,
   };
   encoder.pre_tokenizer = encoder
     .pre_tokenizer
@@ -573,8 +572,8 @@ fn build_model_report<C>(
     .transpose()
     .map_err(|error| ("model_fingerprint", error))?;
   let unicode_bigram_mixed_boundary = match encoder.pre_tokenizer.unicode_bigram_mixed_boundary {
-    UnicodeBigramMixedBoundary::Keep => super::pretokenizer_bench::MixedBoundaryName::Keep,
-    UnicodeBigramMixedBoundary::Split => super::pretokenizer_bench::MixedBoundaryName::Split,
+    UnicodeBigramMixedBoundary::Keep => UnicodeBigramMixedBoundaryName::Keep,
+    UnicodeBigramMixedBoundary::Split => UnicodeBigramMixedBoundaryName::Split,
   };
   let unicode_bigrams_semantic_sha256 = encoder
     .pre_tokenizer
@@ -632,7 +631,7 @@ fn build_model_report<C>(
 
 fn fingerprint_unicode_bigram_config(
   bigrams: &ahash::AHashSet<(char, char)>,
-  mixed_boundary: super::pretokenizer_bench::MixedBoundaryName,
+  mixed_boundary: UnicodeBigramMixedBoundaryName,
 ) -> String {
   let mut sorted = bigrams.iter().copied().collect::<Vec<_>>();
   sorted.sort_unstable();

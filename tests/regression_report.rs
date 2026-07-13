@@ -1,26 +1,27 @@
 #![allow(dead_code)]
 
-#[path = "../benches/regression/config.rs"]
-mod config;
-#[path = "../benches/regression/fingerprint.rs"]
-mod fingerprint;
-#[path = "../benches/regression/report.rs"]
-mod report;
-#[path = "../benches/regression/util.rs"]
-mod util;
+#[path = "../benches/regression/common/mod.rs"]
+mod common;
+#[path = "../benches/regression/trainer.rs"]
+mod trainer;
 
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use config::{CaseConfig, CaseRequest, InitialAlphabetName, OccurrenceVariant, TieBreakName, Unit};
-use fingerprint::{
-  ModelFingerprints, fingerprint_model, fingerprint_token_ids, fingerprint_unicode_bigrams,
-  fingerprint_word_counts, sha256_hex,
+use common::{
+  config::Unit,
+  fingerprint::{
+    ModelFingerprints, fingerprint_model, fingerprint_token_ids, fingerprint_unicode_bigrams,
+    fingerprint_word_counts, sha256_hex,
+  },
+  report::{EnvironmentReport, RunStatus},
+  util::FileIdentity,
 };
-use report::{
-  CaseMeasurement, CaseOutcome, EnvironmentReport, InputReport, MemoryReport, RunStatus, SuiteReport, TimingReport,
-  TrainingCounts,
+use trainer::{
+  config::{CaseConfig, CaseRequest, InitialAlphabetName, OccurrenceVariant, TieBreakName},
+  report::{
+    CaseMeasurement, CaseOutcome, InputReport, MemoryReport, SuiteReport, TimingReport, TrainingCounts,
+  },
 };
-use util::FileIdentity;
 
 const INPUT_SHA256: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const MODEL_SHA256: &str = "2222222222222222222222222222222222222222222222222222222222222222";
