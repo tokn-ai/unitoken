@@ -93,7 +93,7 @@ struct TrainerArgs {
   tie_break: TieBreakName,
   #[arg(long)]
   parallel_merge_min_occurs_in: Option<usize>,
-  /// Require the final pair merge frequency to be strictly above this value.
+  /// Require the final pair merge frequency to be at least this value.
   #[arg(long)]
   bigram_cutoff_freq: Option<i64>,
   /// Optional golden semantic model hash. Requires one vocabulary checkpoint.
