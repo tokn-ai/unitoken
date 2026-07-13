@@ -383,6 +383,25 @@ where
     Some(merge)
   }
 
+  /// Put back a selected pair when an automatic stopping policy declines it.
+  pub(crate) fn restore_pair(&mut self, merge: Merge<C, I>) {
+    debug_assert!(merge.target.is_none());
+    let tp = merge.tp;
+    let occurs_in = self.occurs_in.insert(merge.data.occurs_in);
+    let previous = self.pairs.insert(tp, PairState {
+      content: merge.content,
+      target: None,
+      freq: merge.data.freq,
+      occurs_in: Some(occurs_in),
+    });
+    debug_assert!(previous.is_none());
+    if self.is_bounded() {
+      self.residents.insert(tp);
+      self.observe_peak();
+    }
+    self.debug_assert_residency();
+  }
+
   #[cfg(test)]
   pub(crate) fn clone_merge(&self, tp: &Pair<I>) -> Option<Merge<C, I>>
   where

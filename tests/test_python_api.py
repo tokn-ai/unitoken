@@ -85,6 +85,45 @@ def test_validate_model_rejects_duplicate_serialized_vocab(unit: str) -> None:
 
 
 @pytest.mark.parametrize(
+  ("unit", "word", "vocab_size"),
+  [("byte", "ab", 257), ("unicode", "你好", 259)],
+)
+def test_train_and_validate_model_use_inclusive_bigram_cutoff(
+  unit: str,
+  word: str,
+  vocab_size: int,
+) -> None:
+  trainer = BpeTrainer([], unit=unit, bigram_cutoff_freq=7)  # type: ignore[arg-type]
+  trainer.add_words({word: 7})
+  trainer.train(vocab_size=vocab_size)
+
+  model = trainer.validate_model()
+
+  assert model.last_merge_freq == 7
+
+
+def test_manual_step_below_cutoff_is_rejected_when_saving(tmp_path: Path) -> None:
+  trainer = BpeTrainer([], unit="byte", bigram_cutoff_freq=8)
+  trainer.add_words({"ab": 7})
+  trainer.init_training()
+  trainer.step()
+  vocab_path = tmp_path / "vocab.json"
+  merges_path = tmp_path / "merges.txt"
+
+  with pytest.raises(ValueError, match="must be at least.*cutoff frequency 8"):
+    trainer.save_files(vocab_path, merges_path)
+
+  assert not vocab_path.exists()
+  assert not merges_path.exists()
+
+
+@pytest.mark.parametrize("cutoff", [0, -1])
+def test_trainer_rejects_non_positive_bigram_cutoff(cutoff: int) -> None:
+  with pytest.raises(ValueError, match="bigram_cutoff_freq must be positive"):
+    BpeTrainer([], bigram_cutoff_freq=cutoff)
+
+
+@pytest.mark.parametrize(
   ("tie_break", "expected_tail"),
   [
     ("smallest_pair_id", ["你", "好", "你好"]),

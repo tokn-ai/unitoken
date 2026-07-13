@@ -62,6 +62,11 @@ pub struct BpeTrainerConfig {
   /// `None` preserves the full exact occurrence map. A positive value enables
   /// K-to-2K hysteresis with cold-winner hydration scans.
   pub hot_pair_window_size: Option<usize>,
+  /// Stop automatic training before applying a merge below this frequency.
+  ///
+  /// Manual [`Train::step`] calls ignore this policy, while model validation
+  /// rejects any resulting final pair merge below the cutoff.
+  pub bigram_cutoff_freq: Option<Freq>,
 }
 
 impl BpeTrainerConfig {
@@ -71,6 +76,7 @@ impl BpeTrainerConfig {
       tie_break: TieBreak::SmallestPairId,
       parallel_merge_min_occurs_in: None,
       hot_pair_window_size: None,
+      bigram_cutoff_freq: None,
     }
   }
 }
@@ -450,6 +456,10 @@ where
       config.hot_pair_window_size != Some(0),
       "hot_pair_window_size must be positive",
     );
+    assert!(
+      config.bigram_cutoff_freq.is_none_or(|cutoff| cutoff > 0),
+      "bigram_cutoff_freq must be positive",
+    );
     let mut bpe = Self::empty();
     bpe.config = config;
     bpe.pre_merges.reset(config.hot_pair_window_size);
@@ -641,11 +651,19 @@ where
         model_merge
       })
       .collect();
-    Ok(BpeModel::new(
+    let model = BpeModel::new(
       self.special_tokens.clone(),
       self.vocab.clone(),
       merges,
-    ))
+    );
+    if let (Some(cutoff), Some(last_merge_freq)) = (self.config.bigram_cutoff_freq, model.last_merge_freq())
+      && last_merge_freq < cutoff
+    {
+      return Err(MyError::InvalidBpeModel(format!(
+        "final merge frequency {last_merge_freq} must be at least Unicode bigram cutoff frequency {cutoff}",
+      )));
+    }
+    Ok(model)
   }
 }
 
@@ -976,7 +994,8 @@ where
     metrics::gauge!("bpe_trainer.words_count").set(self.words.len() as f64);
   }
 
-  /// Initialize trainer state and run merge steps until `vocab_size` is reached.
+  /// Train until the vocabulary reaches `vocab_size` or the next pair merge
+  /// falls below the configured cutoff.
   #[hotpath::measure]
   pub fn train_until(&mut self, vocab_size: usize) -> MyResult<()>
   where
@@ -988,6 +1007,14 @@ where
       let Some(merge) = self._get_largest_merge() else {
         return Err(MyError::TrainStep);
       };
+      if merge.target.is_none()
+        && self.config.bigram_cutoff_freq.is_some_and(|cutoff| merge.data.freq < cutoff)
+      {
+        let tp = merge.tp;
+        self.pre_merges.restore_pair(merge);
+        self.push_merge_candidate(tp);
+        break;
+      }
       self._step(merge);
       if self.vocab.len() % 100 == 0 {
         self._metrics();
@@ -1945,6 +1972,68 @@ mod tests {
 
     let model = bpe.validate_model().unwrap();
     assert_eq!(model.last_merge_freq(), Some(7));
+  }
+
+  fn byte_pair_trainer(freq: Freq, cutoff: Freq) -> BpeTrainer<u8, Idx> {
+    BpeTrainer::from_words_with_config(
+      [("ab", freq)],
+      &[],
+      BpeTrainerConfig {
+        bigram_cutoff_freq: Some(cutoff),
+        ..BpeTrainerConfig::default()
+      },
+    )
+  }
+
+  #[test]
+  fn test_train_until_and_validation_accept_merge_at_bigram_cutoff() {
+    let mut trainer = byte_pair_trainer(7, 7);
+    trainer.train_until(257).unwrap();
+
+    let model = trainer.validate_model().unwrap();
+
+    assert_eq!(model.last_merge_freq(), Some(7));
+  }
+
+  #[test]
+  fn test_train_until_stops_before_merge_below_bigram_cutoff() {
+    let mut trainer = byte_pair_trainer(6, 7);
+
+    trainer.train_until(257).unwrap();
+
+    assert_eq!(trainer.vocab_size(), 256);
+    assert_eq!(trainer.last_merge_freq(), None);
+    trainer.validate_model().unwrap();
+
+    trainer.step().unwrap();
+    assert_eq!(trainer.last_merge_freq(), Some(6));
+  }
+
+  #[test]
+  fn test_manual_step_ignores_cutoff_but_validation_rejects_result() {
+    let mut trainer = byte_pair_trainer(6, 7);
+    trainer.init_training();
+    trainer.step().unwrap();
+
+    assert_eq!(trainer.last_merge_freq(), Some(6));
+    let error = trainer.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains(
+      "final merge frequency 6 must be at least Unicode bigram cutoff frequency 7",
+    ));
+  }
+
+  #[test]
+  fn test_validation_with_bigram_cutoff_accepts_model_without_pair_merge() {
+    let trainer = byte_pair_trainer(6, 7);
+    trainer.validate_model().unwrap();
+  }
+
+  #[test]
+  #[should_panic(expected = "bigram_cutoff_freq must be positive")]
+  fn test_trainer_rejects_non_positive_bigram_cutoff() {
+    let _ = byte_pair_trainer(7, 0);
   }
 
   #[test]

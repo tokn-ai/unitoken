@@ -39,6 +39,9 @@ class BpeTrainer:
   hot_pair_window_size:
     If set, retain occurrence postings for an exact top-K candidate window.
     Smaller values reduce memory but may require additional inventory scans.
+  bigram_cutoff_freq:
+    Inclusive minimum frequency for pair merges performed by `train()`.
+    Manual `step()` calls ignore it, but model validation still enforces it.
   """
   def __init__(
     self,
@@ -49,6 +52,7 @@ class BpeTrainer:
     tie_break: TieBreak | None = None,
     parallel_merge_min_occurs_in: int | None = None,
     hot_pair_window_size: int | None = None,
+    bigram_cutoff_freq: int | None = None,
   ) -> None:
     _validate_unit(unit)
     self._unit = unit
@@ -59,6 +63,7 @@ class BpeTrainer:
         tie_break=tie_break,
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
         hot_pair_window_size=hot_pair_window_size,
+        bigram_cutoff_freq=bigram_cutoff_freq,
       )
     elif unit == "byte":
       self._trainer = BpeTrainer_u8_Idx(
@@ -67,6 +72,7 @@ class BpeTrainer:
         tie_break=tie_break,
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
         hot_pair_window_size=hot_pair_window_size,
+        bigram_cutoff_freq=bigram_cutoff_freq,
       )
 
   @property
@@ -117,9 +123,10 @@ class BpeTrainer:
     self._trainer.init_training()
 
   def train(self, vocab_size: int) -> None:
-    """Train until the vocab reaches `vocab_size` entries.
+    """Train until the vocab reaches `vocab_size` entries or the pair cutoff.
 
-    Training runs inside Rust until the target is reached.
+    Training runs inside Rust and may finish below the requested size when the
+    next pair frequency is below `bigram_cutoff_freq`.
     """
     self._trainer.train_until(vocab_size)
 
@@ -135,11 +142,21 @@ class BpeTrainer:
     from .model import BpeModel
     return BpeModel(self._trainer.validate_model())
 
-  def save(self, name: str, *, outdir: str | PathLike = ".", format: FileFormat | None = None) -> None:
+  def save(
+    self,
+    name: str,
+    *,
+    outdir: str | PathLike = ".",
+    format: FileFormat | None = None,
+  ) -> None:
     """Validate a snapshot and save it under `name`."""
     vocab_path = Path(outdir) / f"vocab.{name}[{self.unit}].json"
     merges_path = Path(outdir) / f"merges.{name}[{self.unit}].txt"
-    self.save_files(vocab_path, merges_path, format=format)
+    self.save_files(
+      vocab_path,
+      merges_path,
+      format=format,
+    )
 
   def save_files(
     self,
@@ -148,6 +165,6 @@ class BpeTrainer:
     *,
     format: FileFormat | None = None,
   ) -> None:
-    """Validate a snapshot and save its vocabulary and merge list."""
+    """Validate a snapshot and save its files."""
     resolved_format = _resolve_format(self.unit, format)
     self.validate_model().save_files(vocab_path, merges_path, format=resolved_format)

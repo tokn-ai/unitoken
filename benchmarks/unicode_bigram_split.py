@@ -208,7 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       experiment_name=args.experiment_name,
       notes=[
         "Compares baseline pretokenization with unicode-bigram-guided splitting.",
-        "final_merge_above_bigram_cutoff is a strict configuration guard; equality fails even though cutoff-frequency ties are retained.",
+        "final_merge_at_or_above_bigram_cutoff is inclusive because cutoff-frequency ties are retained.",
       ],
     ),
     "source": {
@@ -242,8 +242,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     final_merge_freq = split_training["final_merge_freq"]
     cutoff_freq = bigram_selection.cutoff_freq
     max_excluded_freq = bigram_selection.max_excluded_freq
-    split_training["final_merge_above_bigram_cutoff"] = (
-      final_merge_freq > cutoff_freq
+    split_training["final_merge_at_or_above_bigram_cutoff"] = (
+      final_merge_freq >= cutoff_freq
       if final_merge_freq is not None and cutoff_freq is not None
       else None
     )

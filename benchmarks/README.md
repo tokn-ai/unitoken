@@ -12,7 +12,122 @@ out/
   benchmarks/    # benchmark measurement reports
 ```
 
-Benchmark report paths default to:
+Rust regression benchmark
+-------------------------
+
+The authoritative core regression benchmarks are the harness-free Rust target
+in `benches/regression/`. It runs with Cargo's optimized `bench` profile and
+uses fresh child processes to isolate raw-corpus preprocessing, trainer, encode,
+and decode measurements. Running it without a subcommand executes the checked-in
+byte and Unicode trainer smoke cases:
+
+```bash
+cargo bench --bench regression
+```
+
+Run a pinned word-frequency inventory at independent vocabulary checkpoints:
+
+```bash
+cargo bench --bench regression -- trainer \
+  --words /path/to/_words.json \
+  --unit unicode \
+  --vocab-sizes 300,10000,100000 \
+  --hot-pair-window-sizes 4096 \
+  --rayon-threads 8 \
+  --repeats 3 \
+  --output out/benchmarks/regression/cmn_hani.json
+```
+
+Benchmark both raw-corpus preprocessing passes in an isolated process:
+
+```bash
+cargo bench --bench regression -- pretokenizer \
+  --text /path/to/corpus.txt \
+  --chunk-size 16777216 \
+  --boundary auto \
+  --unicode-bigram-top-k 20000 \
+  --unicode-bigram-min-freq 16 \
+  --unicode-bigram-mixed-boundary keep \
+  --unicode-bigrams-output out/data/corpus.unicode_bigrams.json \
+  --repeats 2 \
+  --output out/benchmarks/regression/pretokenizer.json
+```
+
+This reports the Unicode-bigram selection pass and frozen word-count pass
+separately, with semantic selection/inventory fingerprints and phase-local RSS.
+The optional canonical bigram artifact can be passed directly to the codec
+suite's `--unicode-bigrams` option.
+It is the raw-file path; Python `Source.scan()`, Parquet/SQL decoding, and
+Python-to-Rust prefetch require a separate source benchmark.
+
+Benchmark cold model/file encoding and isolated decode compute in independent
+child processes:
+
+```bash
+cargo bench --bench regression -- codec \
+  --text /path/to/corpus.txt \
+  --vocab /path/to/vocab.json \
+  --merges /path/to/merges.txt \
+  --unit unicode \
+  --format unitoken \
+  --chunks 1024 \
+  --unicode-bigram-mixed-boundary keep \
+  --repeats 2 \
+  --output out/benchmarks/regression/codec.json
+```
+
+The codec report gates token-count/hash determinism and exact UTF-8 round trips.
+Decode timing starts after loading the temporary token artifact; that load has
+its own timing field and may be page-cache hot after the encode process.
+Models trained with retained Unicode bigrams must also pass a JSON array through
+`--unicode-bigrams`, because vocab/merge files do not currently persist that
+pretokenizer configuration. Both suites default mixed-script boundaries to
+`keep`, matching the public pretokenizer API; use `split` only for a pinned
+experiment that was trained with that policy.
+
+The three suites use independent versioned contracts:
+
+```text
+unitoken_pretokenizer_regression_v1
+unitoken_trainer_regression_v1
+unitoken_codec_regression_v1
+```
+
+Reports contain raw phase durations, phase-boundary RSS, 5 ms sampled peaks,
+the cumulative whole-process high-water mark, and canonical SHA-256
+fingerprints. Trainer reports additionally include bounded-window statistics;
+their sampled training peak starts after the JSON inventory has been
+transferred into the trainer, so a transient inventory-loading high-water mark
+cannot mask it. Semantic trainer fingerprints use length-prefixed model and
+final-word state data rather than formatted vocabulary or merge files.
+The parent writes the report even when a child or correctness gate fails, then
+returns a nonzero status so CI retains an inspectable failure artifact.
+The Linux/Python 3.13 CI job runs all three smoke suites and uploads their
+reports for 14 days.
+
+Trainer gates require every run to reach its target, validate successfully,
+remain deterministic across repeats, and produce identical exact/K models and
+final word states. Pretokenizer gates cover input, selected-bigram, and word
+inventory fingerprints; codec gates cover model/config identity, token IDs,
+and exact round trips. Expected SHA-256 and token-count flags can pin custom
+artifacts. Determinism is reported as `null` with one sample; use `--repeats 2`
+or more to evaluate that gate. For a Unicode-bigram inventory, pass
+`--bigram-cutoff-freq`; model validation then requires
+`last_merge_freq >= bigram_cutoff_freq`, so equality is valid.
+
+Timing and RSS remain measurements rather than correctness gates. Compare them
+only across reports produced on matching hardware, operating systems, thread
+counts, and corpus artifacts. Reports record the CPU and hardware model,
+logical CPU count, total memory, Rust version, and benchmark binary hash to make
+that check explicit. Python may still prepare external Parquet or SQL inputs and
+plot reports, but it is not in the measured Rust trainer path.
+
+When `--output` is omitted, Rust reports are named with the current abbreviated
+revision, a configuration key, and a `-dirty` suffix when appropriate, so runs
+from different commits or matrix configurations do not silently overwrite one
+another.
+
+Python benchmark report paths default to:
 
 ```text
 out/benchmarks/{script_name}/{dataset_name}.{config_name}.{experiment_name}.vocab{N}.json
@@ -120,8 +235,8 @@ final merge frequency of 4,183.
 Unicode-bigram selection reports record `cutoff_freq`, the least retained
 frequency after including cutoff ties, and `max_excluded_freq`. Training
 reports record `final_merge_freq`. When selection and training happen in the
-same experiment, `final_merge_above_bigram_cutoff` is the strict configuration
-guard: equality or a lower final merge frequency is reported as a failed guard,
+same experiment, `final_merge_at_or_above_bigram_cutoff` is the inclusive
+configuration guard: only a lower final merge frequency is reported as a failed guard,
 but the benchmark still completes so the failure can be inspected.
 
 Saved word inventories may carry a sibling `_words.manifest.json`. The
