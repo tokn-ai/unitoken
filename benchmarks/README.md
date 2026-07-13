@@ -102,8 +102,14 @@ cannot mask it. Semantic trainer fingerprints use length-prefixed model and
 final-word state data rather than formatted vocabulary or merge files.
 The parent writes the report even when a child or correctness gate fails, then
 returns a nonzero status so CI retains an inspectable failure artifact.
-The Linux/Python 3.13 CI job runs all three smoke suites and uploads their
-reports for 14 days.
+The dedicated `Benchmark` pull-request workflow runs all three smoke suites for
+the base and PR revisions sequentially on one Linux runner and uploads both
+report sets for 14 days. A separate `workflow_run` job reads those reports and
+updates one marked PR comment with timing and peak-RSS deltas. The benchmark
+workflow has read-only repository access; the write-enabled comment workflow
+never checks out or executes PR code. Correctness gates fail the benchmark,
+while performance deltas remain informational because hosted-runner noise is
+not controlled tightly enough for a stable threshold.
 
 Trainer gates require every run to reach its target, validate successfully,
 remain deterministic across repeats, and produce identical exact/K models and

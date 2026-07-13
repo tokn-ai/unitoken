@@ -146,6 +146,9 @@ pub(crate) mod config {
           self.name, self.target_vocab_size, minimum_vocab_size,
         ));
       }
+      if self.special_tokens.iter().any(String::is_empty) {
+        return Err(format!("case {} contains an empty special token", self.name));
+      }
       let unique_special_tokens = self.special_tokens.iter().collect::<BTreeSet<_>>();
       if unique_special_tokens.len() != self.special_tokens.len() {
         return Err(format!("case {} contains duplicate special tokens", self.name));
@@ -906,19 +909,19 @@ mod runner {
 pub struct SuiteOptions {
   /// Repeat every exact/bounded variant to check determinism.
   #[arg(long, default_value_t = 1)]
-  repeats: usize,
+  pub(crate) repeats: usize,
   /// Bounded occurrence-window sizes to compare with exact mode.
   #[arg(long, value_delimiter = ',', default_value = "4096")]
-  hot_pair_window_sizes: Vec<usize>,
+  pub(crate) hot_pair_window_sizes: Vec<usize>,
   /// Rayon worker threads. Defaults to available parallelism, resolved once.
   #[arg(long)]
-  rayon_threads: Option<usize>,
+  pub(crate) rayon_threads: Option<usize>,
   /// Merge steps per timing/RSS observation bucket.
   #[arg(long, default_value_t = 500)]
-  bucket_size: usize,
+  pub(crate) bucket_size: usize,
   /// JSON report path. Defaults below out/benchmarks/regression/.
   #[arg(long)]
-  output: Option<PathBuf>,
+  pub(crate) output: Option<PathBuf>,
 }
 
 impl Default for SuiteOptions {
@@ -969,65 +972,6 @@ pub struct Args {
 }
 
 
-pub fn run_smoke(options: SuiteOptions) -> Result<(), String> {
-  let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-  let rayon_threads = resolve_threads(options.rayon_threads)?;
-  let cases = [
-    (
-      "smoke_en_byte_v300",
-      "fixtures/_words.tinystories_sample_5M.json",
-      Unit::Byte,
-      300usize,
-      "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
-      "fa65e898d4cec1be5b78732ec4738b20213856a2de73bba5ca34366d347e91c0",
-    ),
-    (
-      "smoke_en_byte_v1000",
-      "fixtures/_words.tinystories_sample_5M.json",
-      Unit::Byte,
-      1000usize,
-      "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
-      "197a9f7d6ec3630370b1a30e0392b0f2fbcd2de1d36ee4d05884f01f2a877be9",
-    ),
-    (
-      "smoke_zh_unicode_v300",
-      "fixtures/_words.TinyStories_all_data_zh_1M-sample.json",
-      Unit::Unicode,
-      300usize,
-      "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
-      "b3f2e74a4b169244774d71cd289d246847d4a56e585411436c1e4c44219e7b3a",
-    ),
-    (
-      "smoke_zh_unicode_v1000",
-      "fixtures/_words.TinyStories_all_data_zh_1M-sample.json",
-      Unit::Unicode,
-      1000usize,
-      "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
-      "34dcb3aeb65c2220f50158d594defb73f1d5649b296c0020220266ba70f1d9e1",
-    ),
-  ]
-  .into_iter()
-  .map(
-    |(name, relative_path, unit, target_vocab_size, expected_input_sha256, expected_model_sha256)| CaseConfig {
-      name: name.to_string(),
-      words_path: manifest_dir.join(relative_path),
-      unit,
-      initial_alphabet: InitialAlphabetName::RawBytes,
-      tie_break: TieBreakName::SmallestPairId,
-      parallel_merge_min_occurs_in: None,
-      target_vocab_size,
-      special_tokens: vec![DEFAULT_EOT.to_string()],
-      bucket_size: options.bucket_size,
-      bigram_cutoff_freq: None,
-      expected_input_sha256: Some(expected_input_sha256.to_string()),
-      expected_model_sha256: Some(expected_model_sha256.to_string()),
-      rayon_threads,
-    },
-  )
-  .collect::<Vec<_>>();
-  run_suite("smoke", cases, options)
-}
-
 pub fn run(args: Args) -> Result<(), String> {
   if args.vocab_sizes.is_empty() {
     return Err("at least one --vocab-sizes value is required".to_string());
@@ -1074,10 +1018,21 @@ pub fn run(args: Args) -> Result<(), String> {
   run_suite(&case_prefix, cases, args.suite)
 }
 
-fn run_suite(suite_name: &str, cases: Vec<CaseConfig>, mut options: SuiteOptions) -> Result<(), String> {
+pub(crate) fn run_suite(
+  suite_name: &str,
+  cases: Vec<CaseConfig>,
+  mut options: SuiteOptions,
+) -> Result<(), String> {
   validate_suite_options(&mut options)?;
+  if cases.is_empty() {
+    return Err("at least one trainer case is required".to_string());
+  }
+  let mut case_names = BTreeSet::new();
   for case in &cases {
     case.validate()?;
+    if !case_names.insert(&case.name) {
+      return Err(format!("duplicate trainer case name {}", case.name));
+    }
   }
   let input_paths = cases
     .iter()
@@ -1117,7 +1072,7 @@ fn validate_trainer_output_path(output: &Path, inputs: &[PathBuf]) -> Result<(),
   Ok(())
 }
 
-fn validate_suite_options(options: &mut SuiteOptions) -> Result<(), String> {
+pub(crate) fn validate_suite_options(options: &mut SuiteOptions) -> Result<(), String> {
   if options.repeats == 0 {
     return Err("--repeats must be positive".to_string());
   }

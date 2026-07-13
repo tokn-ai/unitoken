@@ -190,6 +190,43 @@ default, Hugging Face receives the same chunk boundaries as unitoken so vocab
 parity is not affected by iterator boundary differences. Pass
 `--hf-chunk-bytes` to force fixed byte chunks for Hugging Face.
 
+Rust regression benchmark suites
+--------------------------------
+
+Complete benchmark profiles live in `benches/regression/config/`. A profile
+can combine trainer, pretokenizer, and codec cases while keeping their inputs,
+correctness hashes, run settings, and report names in one reviewable file:
+
+```bash
+cargo bench --bench regression -- suite smoke
+cargo bench --bench regression -- suite 64mib
+cargo bench --bench regression -- suite 1gib
+```
+
+`smoke.yml` uses checked-in fixtures and is the profile run for pull requests.
+The `64mib.yml` and `1gib.yml` profiles use the prepared FineWeb2 Chinese word
+inventories under `out/data/`, so those local inputs must exist before running
+them. Validate a profile without executing its cases with `--check`:
+
+```bash
+cargo bench --bench regression -- suite 64mib --check
+```
+
+Run an unregistered profile with `--config`; relative config and input paths
+are resolved from the repository root:
+
+```bash
+cargo bench --bench regression -- suite \
+  --config benches/regression/config/smoke.yml \
+  --output-dir /tmp/unitoken-regression
+```
+
+Report paths are relative to `--output-dir`. Pretokenizer outputs consumed by
+later codec cases use logical artifact names, and validation requires every
+artifact consumer to have exactly one producer in the same suite. The legacy
+`smoke` subcommand remains a trainer-only shorthand whose cases now come from
+`smoke.yml`; use `suite smoke` for the complete smoke pipeline.
+
 Latest fixed-word trainer profile on the release build, using compressed
 `_words.json` inventories and `vocab_size=10000`:
 

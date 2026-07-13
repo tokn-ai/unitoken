@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unitoken::{
   bpe::{BpeEncoder, Character, Idx, encoder::BpeBuilder},
-  pretokenizer::{UnicodeBigramMixedBoundary, parse_unicode_bigrams},
+  pretokenizer::{PreTokenizer, UnicodeBigramMixedBoundary, parse_unicode_bigrams},
   spec::{gpt2::Gpt2Spec, unitoken::UnitokenSpec},
   traits::{CanEncode, Encode},
 };
@@ -32,6 +32,7 @@ use crate::common::{
 
 pub const CONTRACT: &str = "unitoken_codec_regression_v1";
 pub const SCHEMA_VERSION: u32 = 1;
+pub(crate) const DEFAULT_CHUNKS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -74,7 +75,7 @@ pub struct Args {
   #[arg(long)]
   pub name: Option<String>,
   /// Requested parallel file chunks; aligned boundaries may deduplicate.
-  #[arg(long, default_value_t = 1024)]
+  #[arg(long, default_value_t = DEFAULT_CHUNKS)]
   pub chunks: usize,
   /// Custom pretokenizer regex. Defaults to the library pattern.
   #[arg(long)]
@@ -127,7 +128,7 @@ pub struct CodecCaseConfig {
 }
 
 impl CodecCaseConfig {
-  fn validate(&self) -> Result<(), String> {
+  pub(crate) fn validate(&self) -> Result<(), String> {
     if self.name.trim().is_empty() {
       return Err("case name cannot be empty".to_string());
     }
@@ -146,6 +147,12 @@ impl CodecCaseConfig {
     if self.special_tokens.iter().collect::<BTreeSet<_>>().len() != self.special_tokens.len() {
       return Err("special tokens cannot contain duplicates".to_string());
     }
+    PreTokenizer::try_new(
+      &self.special_tokens,
+      self.special_tokens.first().map(String::as_str),
+      self.pat_str.as_deref(),
+    )
+    .map_err(|error| format!("invalid pretokenizer configuration: {error}"))?;
     match (self.format, self.unit) {
       (ModelFormat::Gpt2, Unit::Byte)
       | (ModelFormat::Unitoken, Unit::Byte | Unit::Unicode) => {}
@@ -361,7 +368,6 @@ pub struct CodecSuiteReport {
 }
 
 pub fn run(args: Args) -> Result<(), String> {
-  let environment = environment_report();
   let repeats = args.repeats;
   if repeats == 0 {
     return Err("--repeats must be positive".to_string());
@@ -392,8 +398,20 @@ pub fn run(args: Args) -> Result<(), String> {
     expected_token_count: args.expected_token_count,
     expected_token_sha256: args.expected_token_sha256,
   };
+  run_config(config, repeats, args.output)
+}
+
+pub(crate) fn run_config(
+  config: CodecCaseConfig,
+  repeats: usize,
+  output: Option<PathBuf>,
+) -> Result<(), String> {
+  let environment = environment_report();
+  if repeats == 0 {
+    return Err("repeats must be positive".to_string());
+  }
   config.validate()?;
-  if let Some(report_output) = args.output.as_deref() {
+  if let Some(report_output) = output.as_deref() {
     validate_codec_output_path(report_output, &config)?;
   }
   let artifact_dir = TemporaryDirectory::create("unitoken-codec")?;
@@ -426,16 +444,14 @@ pub fn run(args: Args) -> Result<(), String> {
   let report = CodecSuiteReport {
     schema_version: SCHEMA_VERSION,
     contract: CONTRACT.to_string(),
-    suite_name: name.clone(),
+    suite_name: config.name.clone(),
     generated_at_unix_seconds: now_seconds(),
     environment,
     config,
     samples,
     gates,
   };
-  let output = args
-    .output
-    .unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
+  let output = output.unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
   validate_codec_output_path(&output, &report.config)?;
   write_json_atomic(&output, &report)?;
   print_summary(&output, &report);

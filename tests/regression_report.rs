@@ -2,6 +2,12 @@
 
 #[path = "../benches/regression/common/mod.rs"]
 mod common;
+#[path = "../benches/regression/codec.rs"]
+mod codec;
+#[path = "../benches/regression/pretokenizer.rs"]
+mod pretokenizer;
+#[path = "../benches/regression/suite.rs"]
+mod suite;
 #[path = "../benches/regression/trainer.rs"]
 mod trainer;
 

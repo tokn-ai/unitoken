@@ -1,0 +1,100 @@
+name: Benchmark
+
+on:
+  pull_request:
+    branches: [ master ]
+    types: [ opened, reopened, synchronize ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout base revision
+        uses: actions/checkout@v4
+        with:
+          path: baseline
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Checkout PR revision
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('baseline/Cargo.lock', 'candidate/Cargo.lock') }}
+
+      - name: Run base benchmarks
+        id: baseline
+        continue-on-error: true
+        run: |
+          bash candidate/.github/scripts/run-benchmark-suite.sh \
+            "$GITHUB_WORKSPACE/baseline" \
+            "$GITHUB_WORKSPACE/benchmark-results/baseline" \
+            "$GITHUB_WORKSPACE/candidate/benches/regression/config/smoke.yml"
+
+      - name: Run PR benchmarks
+        id: candidate
+        if: always()
+        continue-on-error: true
+        run: |
+          bash candidate/.github/scripts/run-benchmark-suite.sh \
+            "$GITHUB_WORKSPACE/candidate" \
+            "$GITHUB_WORKSPACE/benchmark-results/candidate" \
+            "$GITHUB_WORKSPACE/candidate/benches/regression/config/smoke.yml"
+
+      - name: Record benchmark revisions
+        if: always()
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p benchmark-results
+          jq -n \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_sha "$HEAD_SHA" \
+            --argjson pull_request_number "$PULL_REQUEST_NUMBER" \
+            '{
+              schema_version: 1,
+              pull_request_number: $pull_request_number,
+              base_sha: $base_sha,
+              head_sha: $head_sha
+            }' > benchmark-results/metadata.json
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Require successful correctness gates
+        if: always()
+        env:
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        run: |
+          test "$BASELINE_OUTCOME" = success
+          test "$CANDIDATE_OUTCOME" = success

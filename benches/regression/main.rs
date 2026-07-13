@@ -1,6 +1,7 @@
 mod codec;
 mod common;
 mod pretokenizer;
+mod suite;
 mod trainer;
 
 use std::path::PathBuf;
@@ -27,6 +28,8 @@ enum Commands {
   Pretokenizer(pretokenizer::Args),
   /// Benchmark cold file encoding and independent decoding with a pinned model.
   Codec(codec::Args),
+  /// Run a named or custom YAML benchmark suite.
+  Suite(suite::Args),
   /// Execute one isolated trainer case. This is an internal protocol.
   #[command(hide = true)]
   Case(ChildArgs),
@@ -56,7 +59,8 @@ fn main() {
     Some(Commands::Trainer(args)) => trainer::run(args),
     Some(Commands::Pretokenizer(args)) => pretokenizer::run(args),
     Some(Commands::Codec(args)) => codec::run(args),
-    Some(Commands::Smoke(options)) => trainer::run_smoke(options),
+    Some(Commands::Smoke(options)) => suite::run_smoke_trainer(options),
+    Some(Commands::Suite(args)) => suite::run(args),
     Some(Commands::PretokenizerCase(args)) => child_result(
       pretokenizer::run_child(&args.request, &args.result),
       "isolated pretokenizer benchmark case failed",
@@ -65,7 +69,7 @@ fn main() {
       codec::run_child(&args.request, &args.result),
       "isolated codec benchmark phase failed",
     ),
-    None => trainer::run_smoke(trainer::SuiteOptions::default()),
+    None => suite::run_smoke_trainer(trainer::SuiteOptions::default()),
   };
   if let Err(error) = result {
     eprintln!("error: {error}");
