@@ -85,6 +85,7 @@ pyo3-introspection = "0.27"
 criterion = "0.5.1"
 libc = "0.2"
 sha2 = "0.10"
+serde_yaml_ng = "0.10.0"
 
 [[bench]]
 name = "bpe"

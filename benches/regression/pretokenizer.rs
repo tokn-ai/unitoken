@@ -28,7 +28,8 @@ use crate::common::{
 
 pub const CONTRACT: &str = "unitoken_pretokenizer_regression_v1";
 pub const SCHEMA_VERSION: u32 = 1;
-const DEFAULT_UNICODE_BIGRAM_MIN_FREQ: Freq = 16;
+pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_UNICODE_BIGRAM_MIN_FREQ: Freq = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -69,7 +70,7 @@ pub struct Args {
   #[arg(long)]
   pub name: Option<String>,
   /// Approximate bytes per parallel file chunk.
-  #[arg(long, default_value_t = 16 * 1024 * 1024)]
+  #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE)]
   pub chunk_size: u64,
   #[arg(long, value_enum, default_value = "auto")]
   pub boundary: BoundaryName,
@@ -131,7 +132,7 @@ pub struct PretokenizerCaseConfig {
 }
 
 impl PretokenizerCaseConfig {
-  fn validate(&self) -> Result<(), String> {
+  pub(crate) fn validate(&self) -> Result<(), String> {
     if self.name.trim().is_empty() {
       return Err("case name cannot be empty".to_string());
     }
@@ -150,6 +151,12 @@ impl PretokenizerCaseConfig {
     if self.special_tokens.iter().collect::<BTreeSet<_>>().len() != self.special_tokens.len() {
       return Err("special tokens cannot contain duplicates".to_string());
     }
+    PreTokenizer::try_new(
+      &self.special_tokens,
+      Some(&self.eot_token),
+      self.pat_str.as_deref(),
+    )
+    .map_err(|error| format!("invalid pretokenizer configuration: {error}"))?;
     if let Some(config) = &self.unicode_bigrams {
       if config.top_k == 0 {
         return Err("unicode_bigram_top_k must be positive".to_string());
@@ -329,7 +336,6 @@ pub struct PretokenizerSuiteReport {
 }
 
 pub fn run(args: Args) -> Result<(), String> {
-  let environment = environment_report();
   let repeats = args.repeats;
   if repeats == 0 {
     return Err("--repeats must be positive".to_string());
@@ -380,8 +386,20 @@ pub fn run(args: Args) -> Result<(), String> {
     expected_bigrams_sha256: args.expected_bigrams_sha256,
     expected_inventory_sha256: args.expected_inventory_sha256,
   };
+  run_config(case, repeats, args.output)
+}
+
+pub(crate) fn run_config(
+  case: PretokenizerCaseConfig,
+  repeats: usize,
+  output: Option<PathBuf>,
+) -> Result<(), String> {
+  let environment = environment_report();
+  if repeats == 0 {
+    return Err("repeats must be positive".to_string());
+  }
   case.validate()?;
-  if let Some(report_output) = args.output.as_deref() {
+  if let Some(report_output) = output.as_deref() {
     validate_output_paths(
       report_output,
       &case.text_path,
@@ -406,15 +424,13 @@ pub fn run(args: Args) -> Result<(), String> {
   let report = PretokenizerSuiteReport {
     schema_version: SCHEMA_VERSION,
     contract: CONTRACT.to_string(),
-    suite_name: name.clone(),
+    suite_name: case.name.clone(),
     generated_at_unix_seconds: now_seconds(),
     environment,
     samples: outcomes,
     gates,
   };
-  let output = args
-    .output
-    .unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
+  let output = output.unwrap_or_else(|| default_suite_report_path(&report_name, &report.environment));
   validate_output_paths(
     &output,
     &case.text_path,

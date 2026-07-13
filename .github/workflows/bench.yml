@@ -49,7 +49,8 @@ jobs:
         run: |
           bash candidate/.github/scripts/run-benchmark-suite.sh \
             "$GITHUB_WORKSPACE/baseline" \
-            "$GITHUB_WORKSPACE/benchmark-results/baseline"
+            "$GITHUB_WORKSPACE/benchmark-results/baseline" \
+            "$GITHUB_WORKSPACE/candidate/benches/regression/config/smoke.yml"
 
       - name: Run PR benchmarks
         id: candidate
@@ -58,7 +59,8 @@ jobs:
         run: |
           bash candidate/.github/scripts/run-benchmark-suite.sh \
             "$GITHUB_WORKSPACE/candidate" \
-            "$GITHUB_WORKSPACE/benchmark-results/candidate"
+            "$GITHUB_WORKSPACE/benchmark-results/candidate" \
+            "$GITHUB_WORKSPACE/candidate/benches/regression/config/smoke.yml"
 
       - name: Record benchmark revisions
         if: always()

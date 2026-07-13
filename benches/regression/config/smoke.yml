@@ -1,0 +1,82 @@
+schema_version: 1
+name: smoke
+
+defaults:
+  repeats: 2
+  special_tokens:
+    - <|endoftext|>
+
+trainer:
+  output: trainer.json
+  bucket_size: 500
+  hot_pair_window_sizes: [4096]
+  cases:
+    - name: smoke_en_byte_v300
+      words: fixtures/_words.tinystories_sample_5M.json
+      unit: byte
+      target_vocab_size: 300
+      expected_input_sha256: 20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4
+      expected_model_sha256: fa65e898d4cec1be5b78732ec4738b20213856a2de73bba5ca34366d347e91c0
+    - name: smoke_en_byte_v1000
+      words: fixtures/_words.tinystories_sample_5M.json
+      unit: byte
+      target_vocab_size: 1000
+      expected_input_sha256: 20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4
+      expected_model_sha256: 197a9f7d6ec3630370b1a30e0392b0f2fbcd2de1d36ee4d05884f01f2a877be9
+    - name: smoke_zh_unicode_v300
+      words: fixtures/_words.TinyStories_all_data_zh_1M-sample.json
+      unit: unicode
+      target_vocab_size: 300
+      expected_input_sha256: ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a
+      expected_model_sha256: b3f2e74a4b169244774d71cd289d246847d4a56e585411436c1e4c44219e7b3a
+    - name: smoke_zh_unicode_v1000
+      words: fixtures/_words.TinyStories_all_data_zh_1M-sample.json
+      unit: unicode
+      target_vocab_size: 1000
+      expected_input_sha256: ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a
+      expected_model_sha256: 34dcb3aeb65c2220f50158d594defb73f1d5649b296c0020220266ba70f1d9e1
+
+pretokenizer:
+  - name: ci_zh_pretokenizer
+    text: fixtures/TinyStories_all_data_zh_1M-sample.txt
+    output: pretokenizer.json
+    chunk_size: 1048576
+    unicode_bigrams:
+      top_k: 100
+      min_freq: 2
+      mixed_boundary: split
+      artifact: unicode_bigrams
+    expected_input_sha256: c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3
+    expected_bigrams_sha256: 2e88788add465df26296cd56b0369b9d1056850e5e7fe5584c19354b191288f7
+    expected_inventory_sha256: c749404bcf209b877e75215c94ce297c7aa4f7511e7ee3eb7dd6ae2ee71735cf
+
+codec:
+  - name: ci_en_codec
+    text: fixtures/tinystories_sample_5M.txt
+    vocab: fixtures/vocab.tinystories_sample_5M.json
+    merges: fixtures/merges.tinystories_sample_5M.txt
+    output: codec-byte.json
+    unit: byte
+    format: gpt2
+    chunks: 8
+    expected_input_sha256: 7cc2577b9e1f9ed703b13ca651103bf421c91912fcbcb2d024213858e0981d87
+    expected_vocab_sha256: ad20f9939e447a91cba3875775bcdeec208c0849187d16870d50aec95b499492
+    expected_merges_sha256: 948f039e415c8448e5223c02fc22d4b4a2f4e31b64005e7119da3d1ca10ada72
+    expected_token_count: 1424317
+    expected_token_sha256: 59054b2420d287b3f243e9fb3eda7fc827cc83f49450ef272c438600bc1bf6e2
+  - name: ci_zh_codec
+    text: fixtures/TinyStories_all_data_zh_1M-sample.txt
+    vocab: fixtures/vocab.TinyStories_all_data_zh_1M-sample.uni.json
+    merges: fixtures/merges.TinyStories_all_data_zh_1M-sample.uni.txt
+    output: codec-unicode.json
+    unit: unicode
+    format: unitoken
+    chunks: 8
+    unicode_bigrams:
+      artifact: unicode_bigrams
+    unicode_bigram_mixed_boundary: split
+    expected_input_sha256: c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3
+    expected_vocab_sha256: 8931292e5594186561164f5da2c8557e1e99ae41b647e548c3ef996b08d233d6
+    expected_merges_sha256: 2c347f27fb94b61afddfb82a0d910c1142d4076f8d74175c30aa77d9b2c24297
+    expected_token_count: 886572
+    expected_token_sha256: 532a8595665ca19acc8e74b423258c09314d22316730498dd41348d860381180
