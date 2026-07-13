@@ -1,7 +1,7 @@
 use std::{
   fmt::Display,
   fs,
-  time::{Duration, Instant},
+  time::Instant,
 };
 
 use ordermap::OrderMap;
@@ -21,6 +21,7 @@ use crate::{
     TrainingCounts,
   },
   rss,
+  util::duration_ns,
 };
 
 struct LoadedInventory {
@@ -286,8 +287,4 @@ where
     final_merge_at_or_above_bigram_cutoff,
     hot_pair_window,
   })
-}
-
-fn duration_ns(duration: Duration) -> u64 {
-  duration.as_nanos().min(u64::MAX as u128) as u64
 }

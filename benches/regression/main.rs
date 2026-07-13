@@ -1,15 +1,17 @@
 mod config;
+mod codec_bench;
 mod fingerprint;
 mod process;
+mod pretokenizer_bench;
 mod report;
 mod rss;
 mod runner;
+mod util;
 
 use std::{
   collections::BTreeSet,
   path::{Path, PathBuf},
   process::Command,
-  time::{SystemTime, UNIX_EPOCH},
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -20,10 +22,11 @@ use crate::{
   fingerprint::sha256_hex,
   process::{run_child, run_isolated_cases, write_json_atomic},
   report::{EnvironmentReport, RunStatus, SuiteReport},
+  util::{format_bytes, now_seconds, resolve_path_for_comparison},
 };
 
 #[derive(Debug, Parser)]
-#[command(about = "Rust-only BPE trainer regression benchmark")]
+#[command(about = "Rust-only tokenizer regression benchmark")]
 struct Cli {
   /// Accepted because `cargo bench` supplies this to harness-free targets.
   #[arg(long, global = true, hide = true)]
@@ -38,9 +41,19 @@ enum Commands {
   Smoke(SuiteOptions),
   /// Run exact and bounded training against one pinned word inventory.
   Trainer(TrainerArgs),
+  /// Benchmark raw-corpus Unicode-bigram selection and word counting.
+  Pretokenizer(pretokenizer_bench::PretokenizerArgs),
+  /// Benchmark cold file encoding and independent decoding with a pinned model.
+  Codec(codec_bench::CodecArgs),
   /// Execute one isolated child case. This is an internal protocol.
   #[command(hide = true)]
   Case(ChildArgs),
+  /// Execute one isolated pretokenizer case. This is an internal protocol.
+  #[command(name = "pretokenizer-case", hide = true)]
+  PretokenizerCase(ChildArgs),
+  /// Execute one isolated codec phase. This is an internal protocol.
+  #[command(name = "codec-case", hide = true)]
+  CodecCase(ChildArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -126,7 +139,19 @@ fn main() {
       Err(error) => Err(error),
     },
     Some(Commands::Trainer(args)) => run_trainer_suite(args),
+    Some(Commands::Pretokenizer(args)) => pretokenizer_bench::run(args, environment_report()),
+    Some(Commands::Codec(args)) => codec_bench::run(args, environment_report()),
     Some(Commands::Smoke(options)) => run_smoke_suite(options),
+    Some(Commands::PretokenizerCase(args)) => match pretokenizer_bench::run_child(&args.request, &args.result) {
+      Ok(true) => Ok(()),
+      Ok(false) => Err("isolated pretokenizer benchmark case failed".to_string()),
+      Err(error) => Err(error),
+    },
+    Some(Commands::CodecCase(args)) => match codec_bench::run_child(&args.request, &args.result) {
+      Ok(true) => Ok(()),
+      Ok(false) => Err("isolated codec benchmark phase failed".to_string()),
+      Err(error) => Err(error),
+    },
     None => run_smoke_suite(SuiteOptions::default()),
   };
   if let Err(error) = result {
@@ -245,17 +270,22 @@ fn run_suite(suite_name: &str, cases: Vec<CaseConfig>, mut options: SuiteOptions
   for case in &cases {
     case.validate()?;
   }
+  let input_paths = cases
+    .iter()
+    .map(|case| case.words_path.clone())
+    .collect::<Vec<_>>();
+  if let Some(output) = options.output.as_deref() {
+    validate_trainer_output_path(output, &input_paths)?;
+  }
   let requests = build_requests(cases, &options);
   let outcomes = run_isolated_cases(&requests)?;
   let environment = environment_report();
-  let generated_at_unix_seconds = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs();
+  let generated_at_unix_seconds = now_seconds();
   let report = SuiteReport::new(suite_name.to_string(), generated_at_unix_seconds, environment, outcomes);
   let output = options
     .output
     .unwrap_or_else(|| default_report_path(suite_name, &report));
+  validate_trainer_output_path(&output, &input_paths)?;
   write_json_atomic(&output, &report)?;
   print_summary(&output, &report);
   if report.gates.passed {
@@ -266,6 +296,16 @@ fn run_suite(suite_name: &str, cases: Vec<CaseConfig>, mut options: SuiteOptions
       output.display()
     ))
   }
+}
+
+fn validate_trainer_output_path(output: &Path, inputs: &[PathBuf]) -> Result<(), String> {
+  let output = resolve_path_for_comparison(output)?;
+  for input in inputs {
+    if output == resolve_path_for_comparison(input)? {
+      return Err("report output cannot overwrite the word inventory".to_string());
+    }
+  }
+  Ok(())
 }
 
 fn validate_suite_options(options: &mut SuiteOptions) -> Result<(), String> {
@@ -314,7 +354,7 @@ fn build_requests(cases: Vec<CaseConfig>, options: &SuiteOptions) -> Vec<CaseReq
   requests
 }
 
-fn resolve_threads(requested: Option<usize>) -> Result<usize, String> {
+pub(crate) fn resolve_threads(requested: Option<usize>) -> Result<usize, String> {
   let threads = requested.unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(1));
   if threads == 0 {
     return Err("--rayon-threads must be positive".to_string());
@@ -322,7 +362,7 @@ fn resolve_threads(requested: Option<usize>) -> Result<usize, String> {
   Ok(threads)
 }
 
-fn environment_report() -> EnvironmentReport {
+pub(crate) fn environment_report() -> EnvironmentReport {
   let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
   let hardware = hardware_info();
   let git_commit = command_output(
@@ -461,20 +501,26 @@ fn command_output(command: &mut Command) -> Option<String> {
 }
 
 fn default_report_path(suite_name: &str, report: &SuiteReport) -> PathBuf {
-  let revision = report
-    .environment
+  default_suite_report_path(suite_name, &report.environment)
+}
+
+pub(crate) fn default_suite_report_path(
+  report_name: &str,
+  environment: &EnvironmentReport,
+) -> PathBuf {
+  let revision = environment
     .git_commit
     .as_deref()
     .map(|commit| &commit[..commit.len().min(12)])
     .unwrap_or("unknown");
-  let dirty = if report.environment.git_dirty == Some(true) {
+  let dirty = if environment.git_dirty == Some(true) {
     "-dirty"
   } else {
     ""
   };
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     .join("out/benchmarks/regression")
-    .join(format!("{revision}{dirty}.{}.json", sanitize_name(suite_name)))
+    .join(format!("{revision}{dirty}.{}.json", sanitize_name(report_name)))
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -506,10 +552,4 @@ fn print_summary(path: &Path, report: &SuiteReport) {
     }
   }
   println!("correctness gates passed: {}", report.gates.passed);
-}
-
-fn format_bytes(bytes: Option<u64>) -> String {
-  bytes
-    .map(|bytes| format!("{:.1} MiB", bytes as f64 / 1024.0 / 1024.0))
-    .unwrap_or_else(|| "unsupported".to_string())
 }

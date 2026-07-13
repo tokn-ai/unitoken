@@ -86,8 +86,8 @@ def bigram_frequency_guard(
       if final_merge_freq is not None and cutoff_freq is not None
       else None
     ),
-    "final_merge_above_bigram_cutoff": (
-      final_merge_freq > cutoff_freq
+    "final_merge_at_or_above_bigram_cutoff": (
+      final_merge_freq >= cutoff_freq
       if final_merge_freq is not None and cutoff_freq is not None
       else None
     ),

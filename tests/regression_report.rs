@@ -6,15 +6,21 @@ mod config;
 mod fingerprint;
 #[path = "../benches/regression/report.rs"]
 mod report;
+#[path = "../benches/regression/util.rs"]
+mod util;
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use config::{CaseConfig, CaseRequest, InitialAlphabetName, OccurrenceVariant, TieBreakName, Unit};
-use fingerprint::{ModelFingerprints, fingerprint_model, sha256_hex};
+use fingerprint::{
+  ModelFingerprints, fingerprint_model, fingerprint_token_ids, fingerprint_unicode_bigrams,
+  fingerprint_word_counts, sha256_hex,
+};
 use report::{
   CaseMeasurement, CaseOutcome, EnvironmentReport, InputReport, MemoryReport, RunStatus, SuiteReport, TimingReport,
   TrainingCounts,
 };
+use util::FileIdentity;
 
 const INPUT_SHA256: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const MODEL_SHA256: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -40,6 +46,67 @@ fn semantic_fingerprint_is_stable_and_unit_scoped() {
     sha256_hex(b"abc"),
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   );
+}
+
+#[test]
+fn unicode_bigram_fingerprint_is_canonical_and_stable() {
+  let left = ahash::AHashSet::from_iter([('你', '好'), ('世', '界')]);
+  let right = ahash::AHashSet::from_iter([('世', '界'), ('你', '好')]);
+  let fingerprint = fingerprint_unicode_bigrams(&left, Some(7), Some(6));
+  assert_eq!(
+    fingerprint,
+    fingerprint_unicode_bigrams(&right, Some(7), Some(6)),
+  );
+  assert_eq!(
+    fingerprint,
+    "8a1119f324ec0ac8e187eaa67f4778b8d62bfb2038a86b90f870a9f358dd354a",
+  );
+  assert_eq!(
+    fingerprint_unicode_bigrams(&left, None, None),
+    "aeef9e5e16bbf6657816d4cf7c472fd7aad3f1486f4f224ed3ce7ee5500884a4",
+  );
+  assert_eq!(
+    fingerprint_unicode_bigrams(&left, Some(0), Some(0)),
+    "ea792ed37e186f3d94190a90a1c2feb06a09be1b8fd8a9b0a17be3eae93b0af9",
+  );
+  assert_ne!(
+    fingerprint_unicode_bigrams(&left, None, None),
+    fingerprint_unicode_bigrams(&left, Some(0), Some(0)),
+  );
+}
+
+#[test]
+fn word_count_fingerprint_is_stable() {
+  let words = BTreeMap::from([("hello".to_string(), 3), ("world".to_string(), 2)]);
+  assert_eq!(
+    fingerprint_word_counts(&words),
+    "51dac90b89ff08bb5448d61ec4ca2a0afd5ee8e087d24e3a8332894059e26684",
+  );
+}
+
+#[test]
+fn token_id_fingerprint_is_raw_u32_le() {
+  assert_eq!(
+    fingerprint_token_ids(&[1, 2, 3]),
+    "4636993d3e1da4e9d6b8f87b79e8f7c6d018580d52661950eabc3845c5897a4d",
+  );
+  assert_eq!(
+    fingerprint_token_ids(&[1, 2, 3]),
+    sha256_hex(&[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]),
+  );
+}
+
+#[test]
+fn file_identity_detects_changes_during_a_benchmark() {
+  let path = std::env::temp_dir().join(format!(
+    "unitoken-regression-file-identity-{}",
+    std::process::id(),
+  ));
+  fs::write(&path, b"before").unwrap();
+  let identity = FileIdentity::capture(&path).unwrap();
+  fs::write(&path, b"after-change").unwrap();
+  assert!(identity.ensure_unchanged(&path).is_err());
+  fs::remove_file(path).unwrap();
 }
 
 #[test]

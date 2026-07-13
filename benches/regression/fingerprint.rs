@@ -1,5 +1,13 @@
+use std::{
+  collections::BTreeMap,
+  fs,
+  io::{BufReader, Read},
+  path::Path,
+};
+
+use ahash::AHashSet;
 use sha2::{Digest, Sha256};
-use unitoken::bpe::{BpeModel, CharIdx, Character, Merge, PreToken, Word};
+use unitoken::bpe::{BpeModel, CharIdx, Character, Freq, Idx, Merge, PreToken, Word};
 
 const FINGERPRINT_VERSION: u64 = 1;
 
@@ -72,6 +80,60 @@ impl CanonicalUnit for Character {
 pub fn sha256_hex(bytes: &[u8]) -> String {
   let mut digest = Sha256::new();
   digest.update(bytes);
+  to_hex(&digest.finalize())
+}
+
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+  let file = fs::File::open(path)
+    .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+  let mut reader = BufReader::new(file);
+  let mut digest = Sha256::new();
+  let mut buffer = vec![0u8; 1024 * 1024];
+  loop {
+    let read = reader
+      .read(&mut buffer)
+      .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if read == 0 {
+      break;
+    }
+    digest.update(&buffer[..read]);
+  }
+  Ok(to_hex(&digest.finalize()))
+}
+
+pub fn fingerprint_unicode_bigrams(
+  bigrams: &AHashSet<(char, char)>,
+  cutoff_freq: Option<Freq>,
+  max_excluded_freq: Option<Freq>,
+) -> String {
+  let mut sorted = bigrams.iter().copied().collect::<Vec<_>>();
+  sorted.sort_unstable();
+  let mut fingerprint = CanonicalSha256::new(b"unitoken:unicode_bigrams");
+  fingerprint.update_len(sorted.len());
+  for (left, right) in sorted {
+    fingerprint.update_u64(left as u32 as u64);
+    fingerprint.update_u64(right as u32 as u64);
+  }
+  fingerprint.update_optional_i64(cutoff_freq);
+  fingerprint.update_optional_i64(max_excluded_freq);
+  fingerprint.finish_hex()
+}
+
+pub fn fingerprint_word_counts(words: &BTreeMap<String, Freq>) -> String {
+  let mut fingerprint = CanonicalSha256::new(b"unitoken:word_counts");
+  fingerprint.update_len(words.len());
+  for (word, frequency) in words {
+    fingerprint.update_bytes(word.as_bytes());
+    fingerprint.update_i64(*frequency);
+  }
+  fingerprint.finish_hex()
+}
+
+pub fn fingerprint_token_ids(ids: &[Idx]) -> String {
+  let mut digest = Sha256::new();
+  for id in ids {
+    digest.update(id.to_le_bytes());
+  }
   to_hex(&digest.finalize())
 }
 
@@ -176,6 +238,16 @@ impl CanonicalSha256 {
     self.digest.update(value.to_le_bytes());
   }
 
+  fn update_optional_i64(&mut self, value: Option<i64>) {
+    match value {
+      None => self.update_tag(0),
+      Some(value) => {
+        self.update_tag(1);
+        self.update_i64(value);
+      }
+    }
+  }
+
   fn update_len(&mut self, value: usize) {
     self.update_u64(value as u64);
   }
@@ -201,7 +273,7 @@ impl CanonicalSha256 {
   }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub fn to_hex(bytes: &[u8]) -> String {
   const HEX: &[u8; 16] = b"0123456789abcdef";
   let mut result = String::with_capacity(bytes.len() * 2);
   for byte in bytes {

@@ -42,11 +42,12 @@ def test_word_inventory_manifest_round_trip_and_frequency_guard(tmp_path: Path) 
     "max_excluded_freq": 4,
     "final_merge_freq": 6,
     "final_merge_minus_bigram_cutoff": 1,
-    "final_merge_above_bigram_cutoff": True,
+    "final_merge_at_or_above_bigram_cutoff": True,
     "final_merge_above_max_excluded_freq": True,
   }
-  assert bigram_frequency_guard(5, manifest)["final_merge_above_bigram_cutoff"] is False
-  assert bigram_frequency_guard(None, manifest)["final_merge_above_bigram_cutoff"] is None
+  assert bigram_frequency_guard(5, manifest)["final_merge_at_or_above_bigram_cutoff"] is True
+  assert bigram_frequency_guard(4, manifest)["final_merge_at_or_above_bigram_cutoff"] is False
+  assert bigram_frequency_guard(None, manifest)["final_merge_at_or_above_bigram_cutoff"] is None
 
 
 def test_word_inventory_manifest_rejects_mismatched_words_file(tmp_path: Path) -> None:
