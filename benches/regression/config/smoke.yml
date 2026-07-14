@@ -72,9 +72,8 @@ codec:
     unit: unicode
     format: unitoken
     chunks: 8
-    unicode_bigrams:
-      artifact: unicode_bigrams
-    unicode_bigram_mixed_boundary: split
+    # This fixture uses the legacy PAT-only training boundaries. The selected
+    # Unicode bigrams above are an independent pretokenizer benchmark artifact.
     expected_input_sha256: c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3
     expected_vocab_sha256: 8931292e5594186561164f5da2c8557e1e99ae41b647e548c3ef996b08d233d6
     expected_merges_sha256: 2c347f27fb94b61afddfb82a0d910c1142d4076f8d74175c30aa77d9b2c24297

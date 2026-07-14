@@ -623,8 +623,8 @@ mod tests {
   };
 
   use super::{
-    SuiteConfig, artifact_path, build_trainer_cases, load_named_config, load_selected_config,
-    manifest_dir, resolve_artifact, trainer_options, validate_config,
+    ArtifactReference, SuiteConfig, artifact_path, build_trainer_cases, load_named_config,
+    load_selected_config, manifest_dir, resolve_artifact, trainer_options, validate_config,
   };
 
   #[test]
@@ -710,11 +710,9 @@ mod tests {
   fn artifact_consumers_require_a_suite_producer() {
     let manifest_dir = manifest_dir();
     let (config_path, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
-    config.codec[1]
-      .unicode_bigrams
-      .as_mut()
-      .unwrap()
-      .artifact = "missing".to_string();
+    config.codec[1].unicode_bigrams = Some(ArtifactReference {
+      artifact: "missing".to_string(),
+    });
 
     let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
     assert!(error.contains("artifact missing has no pretokenizer producer"));
@@ -784,6 +782,7 @@ mod tests {
     assert_eq!(config.codec[1].output, Path::new("codec-unicode.json"));
     assert!(config.codec[0].split_on_vocab_bigrams);
     assert!(config.codec[1].split_on_vocab_bigrams);
+    assert!(config.codec[1].unicode_bigrams.is_none());
     assert_eq!(
       trainer
         .cases
