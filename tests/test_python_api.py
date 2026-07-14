@@ -28,6 +28,58 @@ def test_encoder_uses_unit_and_singular_vocab() -> None:
   assert encoded.tolist() == [2]
 
 
+def test_encoder_can_disable_vocab_bigram_splitting() -> None:
+  enabled = BpeEncoder(
+    unit="byte",
+    vocab={b"a": 0, b"b": 1, b"ab": 2, b"x": 3},
+    merges=[(b"a", b"b")],
+    pat_str=r"\S+",
+  )
+  disabled = BpeEncoder(
+    unit="byte",
+    vocab={b"a": 0, b"b": 1, b"ab": 2, b"x": 3},
+    merges=[(b"a", b"b")],
+    pat_str=r"\S+",
+    split_on_vocab_bigrams=False,
+  )
+  text = "ab" + "x" * 32
+
+  assert enabled._encoder.pre_tokenizer().get_words(text) == {"ab": 1, "x": 32}
+  assert disabled._encoder.pre_tokenizer().get_words(text) == {text: 1}
+  assert enabled.encode(text) == disabled.encode(text) == disabled.encode_word(text)
+
+
+def test_encode_word_is_atomic_bpe_not_exact_vocab_lookup() -> None:
+  encoder = BpeEncoder(
+    unit="byte",
+    vocab={b"a": 0, b"b": 1, b"ab": 2},
+    merges=[],
+    special_tokens=["ab"],
+  )
+
+  assert encoder.encode_word("ab") == [0, 1]
+  assert encoder.encode_words(["ab"]) == [[0, 1]]
+  assert encoder.encode("ab") == [2]
+
+
+def test_unicode_encoder_rejects_mixed_fallback_byte_vocab_token() -> None:
+  with pytest.raises(RuntimeError, match="only singleton fallback byte tokens are allowed"):
+    BpeEncoder(
+      unit="unicode",
+      vocab={b"\x80": 0, b"a": 1, b"\x80a": 2},
+      merges=[],
+    )
+
+
+def test_unicode_encoder_rejects_fallback_byte_merge() -> None:
+  with pytest.raises(RuntimeError, match=r"Unicode merge 0 .* contains a fallback byte"):
+    BpeEncoder(
+      unit="unicode",
+      vocab={b"\xc3": 0, b"\xa9": 1, b"\xc3\xa9": 2},
+      merges=[(b"\xc3", b"\xa9")],
+    )
+
+
 def test_trainer_exposes_unit_and_singular_vocab() -> None:
   trainer = BpeTrainer(["<|endoftext|>"], unit="byte")
 
@@ -221,6 +273,18 @@ def test_validated_byte_model_saves_with_default_format(tmp_path: Path) -> None:
   encoded = encoder.encode_word("ab")
   assert len(encoded) == 1
   assert encoder.decode(encoded) == "ab"
+
+  disabled = BpeEncoder.load(
+    unit="byte",
+    format="gpt2",
+    vocab_file=vocab_file,
+    merges_file=merges_file,
+    split_on_vocab_bigrams=False,
+  )
+  text = "ab" + "x" * 32
+  assert encoder._encoder.pre_tokenizer().get_words(text) == {"ab": 1, "x": 32}
+  assert disabled._encoder.pre_tokenizer().get_words(text) == {text: 1}
+  assert encoder.encode(text) == disabled.encode(text)
 
 
 def test_validated_model_is_an_immutable_trainer_snapshot() -> None:

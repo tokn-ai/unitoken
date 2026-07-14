@@ -161,6 +161,8 @@ struct CodecConfig {
   #[serde(default = "default_codec_chunks")]
   chunks: usize,
   pat_str: Option<String>,
+  #[serde(default = "default_split_on_vocab_bigrams")]
+  split_on_vocab_bigrams: bool,
   unicode_bigrams: Option<ArtifactReference>,
   #[serde(default = "default_mixed_boundary")]
   unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundaryName,
@@ -307,6 +309,7 @@ fn build_codec_case(
     format: case.format,
     requested_chunks: case.chunks,
     pat_str: case.pat_str.clone(),
+    split_on_vocab_bigrams: case.split_on_vocab_bigrams,
     unicode_bigrams_path,
     unicode_bigram_mixed_boundary: case.unicode_bigram_mixed_boundary,
     special_tokens: case.special_tokens.clone().unwrap_or_else(|| defaults.special_tokens()),
@@ -599,6 +602,10 @@ fn default_codec_chunks() -> usize {
   codec::DEFAULT_CHUNKS
 }
 
+fn default_split_on_vocab_bigrams() -> bool {
+  true
+}
+
 #[cfg(test)]
 #[allow(
   unused_imports,
@@ -775,6 +782,8 @@ mod tests {
     assert_eq!(config.pretokenizer[0].output, Path::new("pretokenizer.json"));
     assert_eq!(config.codec[0].output, Path::new("codec-byte.json"));
     assert_eq!(config.codec[1].output, Path::new("codec-unicode.json"));
+    assert!(config.codec[0].split_on_vocab_bigrams);
+    assert!(config.codec[1].split_on_vocab_bigrams);
     assert_eq!(
       trainer
         .cases

@@ -2,12 +2,15 @@
 extern crate tracing;
 
 pub mod bpe;
+pub mod bigram;
 pub mod counter;
 pub mod spec;
 pub mod pretokenizer;
 pub mod traits;
 #[cfg(feature = "py")]
 pub mod py;
+
+pub use bigram::Bigram;
 
 #[derive(thiserror::Error, Debug)]
 pub enum MyError {

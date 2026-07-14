@@ -185,6 +185,9 @@ struct EncodeArgs {
   num_chunks: u32,
   #[arg(long = "version", default_value = "2")]
   version: u8,
+  /// Keep PAT words intact instead of applying vocab-derived bigram partitioning.
+  #[arg(long = "no-vocab-bigram-split")]
+  no_vocab_bigram_split: bool,
   #[arg(short, long, default_value = "u8")]
   char: SpecLevel,
   #[arg(long = "out-spec")]
@@ -348,6 +351,7 @@ pub struct BpeEncoderParams {
   pub output_path: PathBuf,
   pub version: u8,
   pub vocab_size: Option<usize>,
+  pub split_on_vocab_bigrams: bool,
 }
 
 fn bpe_encode<C>(BpeEncoderParams {
@@ -359,6 +363,7 @@ fn bpe_encode<C>(BpeEncoderParams {
   output_path,
   version,
   vocab_size,
+  split_on_vocab_bigrams,
 }: BpeEncoderParams, spec: &dyn Spec<C, Idx>)
 where
   BpeEncoder<C>: CanEncode<C, Idx>,
@@ -369,6 +374,7 @@ where
     .load_vocab_file(vocab_path, spec).unwrap()
     .set_special_tokens(special_tokens)
     .set_vocab_size(vocab_size)
+    .set_split_on_vocab_bigrams(split_on_vocab_bigrams)
     .build(spec).unwrap();
   // (spec, vocab_path, merges_path, special_tokens, vocab_size).expect("create bpe encoder");
 
@@ -461,6 +467,7 @@ fn run_encode(args: EncodeArgs) {
     output_path: out_file,
     version: args.version,
     vocab_size: args.vocab_size,
+    split_on_vocab_bigrams: !args.no_vocab_bigram_split,
   };
 
   debug!("Version: {}", params.version);
@@ -470,6 +477,7 @@ fn run_encode(args: EncodeArgs) {
   debug!("Output file: {}", params.output_path.display());
   debug!("Number of chunks: {}", params.num_chunks);
   debug!("Special tokens: {:?}", params.special_tokens);
+  debug!("Split on vocab bigrams: {}", params.split_on_vocab_bigrams);
 
   // TODO read special tokens from vocab file
   match args.char {

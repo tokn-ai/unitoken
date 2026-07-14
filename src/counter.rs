@@ -8,8 +8,8 @@ use crate::{
   MyError, MyResult,
   bpe::Freq,
   pretokenizer::{
-    PreTokenizer, count_unicode_bigrams, for_each_pretoken, for_each_regular_chunk,
-    is_unicode_bigram_script, select_unicode_bigrams, UnicodeBigramSelection,
+    PreTokenPiece, PreTokenizer, UnicodeBigramSelection, count_unicode_bigrams,
+    for_each_regular_chunk, is_unicode_bigram_script, select_unicode_bigrams,
   },
 };
 
@@ -77,33 +77,13 @@ fn count_words_borrowed<'a>(
   text: &'a str,
   counts: &mut BorrowedWordCounts<'a>,
 ) -> MyResult<()> {
-  if text.is_empty() {
-    return Ok(());
-  }
-  if pre_tokenizer.re_special_tokens.as_str() == "$^" {
-    return count_words_in_regular_text_borrowed(pre_tokenizer, text, counts);
-  }
-  for_each_regular_chunk(text, &pre_tokenizer.re_special_tokens, |chunk| {
-    count_words_in_regular_text_borrowed(pre_tokenizer, chunk, counts)
-  })
-}
-
-fn count_words_in_regular_text_borrowed<'a>(
-  pre_tokenizer: &PreTokenizer,
-  text: &'a str,
-  counts: &mut BorrowedWordCounts<'a>,
-) -> MyResult<()> {
-  for_each_pretoken(
-    text,
-    &pre_tokenizer.re_pat,
-    pre_tokenizer.unicode_bigrams.as_ref(),
-    pre_tokenizer.unicode_bigram_mixed_boundary,
-    |word| {
+  pre_tokenizer.for_each_piece(text, |piece| {
+    if let PreTokenPiece::Word(word) = piece {
       let frequency = counts.entry(word).or_insert(0);
       *frequency = frequency.checked_add(1).ok_or(MyError::FrequencyOverflow)?;
-      Ok(())
-    },
-  )
+    }
+    Ok(())
+  })
 }
 
 fn merge_borrowed_word_counts<'a>(
@@ -325,6 +305,7 @@ impl WordCounter {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::bigram::{Bigram, VocabBigramIndex};
   use crate::pretokenizer::parse_unicode_bigrams;
 
   #[test]
@@ -348,6 +329,17 @@ mod tests {
   }
 
   #[test]
+  fn bigram_counter_ignores_vocab_bigram_word_boundaries() {
+    let pre_tokenizer = PreTokenizer::new(&[], None)
+      .with_vocab_bigram_index(VocabBigramIndex::unicode(ahash::AHashSet::new()));
+    let mut counter = BigramCounter::new(pre_tokenizer);
+
+    counter.add_text("你好").unwrap();
+
+    assert_eq!(counter.counts().get(&('你', '好')), Some(&1));
+  }
+
+  #[test]
   fn word_counter_uses_frozen_bigrams_and_skips_special_tokens() {
     let bigrams = parse_unicode_bigrams(&["你好".to_string()]).unwrap();
     let pre_tokenizer = PreTokenizer::new(&["<eot>".to_string()], Some("<eot>"))
@@ -360,6 +352,34 @@ mod tests {
     assert_eq!(words.get("世"), Some(&1));
     assert_eq!(words.get("界"), Some(&1));
     assert!(!words.contains_key("<eot>"));
+  }
+
+  #[test]
+  fn word_counter_uses_vocab_bigram_pretokenization() {
+    let vocab_bigrams = [Bigram::new('a', 'b'), Bigram::new('b', 'c')]
+      .into_iter()
+      .collect();
+    let pre_tokenizer = PreTokenizer::try_new(
+      &["<eot>".to_string()],
+      Some("<eot>"),
+      Some(r"\p{L}+"),
+    )
+    .unwrap()
+    .with_vocab_bigram_index(VocabBigramIndex::unicode(vocab_bigrams));
+    let mut counter = WordCounter::new(pre_tokenizer);
+
+    counter.add_batch(&["abcz<eot>", "abcx"]).unwrap();
+
+    assert_eq!(
+      counter.words(),
+      [
+        ("abc".to_string(), 2),
+        ("x".to_string(), 1),
+        ("z".to_string(), 1),
+      ]
+      .into_iter()
+      .collect(),
+    );
   }
 
   #[test]
