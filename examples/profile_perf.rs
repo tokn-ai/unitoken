@@ -127,7 +127,7 @@ fn main() {
     let parts = split_special_tokens(&text, &bpe.pre_tokenizer.re_special_tokens).unwrap();
     parts.len()
   });
-  measure("regex_tokens_after_split", repeats, || {
+  measure("pat_tokens_after_special_split", repeats, || {
     let parts = split_special_tokens(&text, &bpe.pre_tokenizer.re_special_tokens).unwrap();
     let mut count = 0;
     for part in parts {

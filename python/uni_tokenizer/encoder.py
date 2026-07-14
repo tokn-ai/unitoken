@@ -21,6 +21,9 @@ class BpeEncoder:
     Optional list of special tokens. When provided, they are treated as indivisible tokens.
   merges / vocab:
     In-memory merge rules and vocabulary. If omitted, use :meth:`load` to load from files.
+  split_on_vocab_bigrams:
+    Whether encoding may partition PAT words using bigrams derived from the model vocabulary.
+    Disable it for byte models when that optimization is slower for the workload.
   """
   def __init__(
       self,
@@ -30,6 +33,7 @@ class BpeEncoder:
       merges: list[tuple[bytes, bytes]] | None = None,
       vocab: dict[bytes, int] | None = None,
       pat_str: str | None = None,
+      split_on_vocab_bigrams: bool = True,
   ) -> None:
     _validate_unit(unit)
     self.unit = unit
@@ -43,6 +47,7 @@ class BpeEncoder:
       vocab=cast(dict[Sequence[int], int], vocab),
       special_tokens=special_tokens,
       pat_str=pat_str,
+      split_on_vocab_bigrams=split_on_vocab_bigrams,
     )
 
   @classmethod
@@ -64,6 +69,7 @@ class BpeEncoder:
     merges_file: str | PathLike | None = None,
     vocab_file: str | PathLike | None = None,
     pat_str: str | None = None,
+    split_on_vocab_bigrams: bool = True,
   ) -> "BpeEncoder":
     """Load an encoder from vocab/merge files.
 
@@ -83,6 +89,9 @@ class BpeEncoder:
       Optional directory to resolve `merges_file`/`vocab_file` relative to.
     merges_file / vocab_file:
       Explicit filenames/paths for merges and vocab.
+    split_on_vocab_bigrams:
+      Whether encoding may partition PAT words using model-vocabulary bigrams.
+      Disable it for byte models when benchmarking shows no benefit.
     """
     resolved_format = _resolve_format(unit, format)
     if name is not None:
@@ -106,15 +115,16 @@ class BpeEncoder:
         vocab=None,
         special_tokens=special_tokens,
         pat_str=pat_str,
+        split_on_vocab_bigrams=split_on_vocab_bigrams,
       ),
     )
 
   def encode_word(self, /, word: str) -> list[int]:
-    """Encode a single word into token ids."""
+    """Encode one already-pretokenized word without PAT or special-token handling."""
     return self._encoder.encode_word(word)
 
   def encode_words(self, /, words: Sequence[str]) -> list[list[int]]:
-    """Encode multiple words into token ids."""
+    """Encode multiple already-pretokenized words into token ids."""
     return self._encoder.encode_words(words)
 
   def encode(self, /, text: str) -> list[int]:

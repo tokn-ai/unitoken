@@ -1,5 +1,7 @@
 use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
+use crate::bigram::{Bigram, VocabBigramIndex};
+
 pub mod trainer;
 mod pair;
 pub mod model;
@@ -275,6 +277,33 @@ pub trait CharSplit: Sized {
     v
   }
   fn from_vec_u8(v: &[u8]) -> Word<Self>;
+
+  #[doc(hidden)]
+  /// Return whether a vocabulary entry satisfies this unit type's model invariant.
+  ///
+  /// Custom unit types are accepted by default.
+  fn is_valid_model_vocab_word(_word: &Word<Self>) -> bool {
+    true
+  }
+
+  #[doc(hidden)]
+  /// Return whether a merge operand or target satisfies this unit type's model invariant.
+  ///
+  /// Custom unit types are accepted by default.
+  fn is_valid_model_merge_word(_word: &Word<Self>) -> bool {
+    true
+  }
+
+  #[doc(hidden)]
+  /// Build the optional vocab-derived index used to split encoding work.
+  ///
+  /// Custom unit types leave the optimization disabled by default.
+  fn build_vocab_bigram_index(
+    _vocab: &BTreeMap<Idx, Word<Self>>,
+    _excluded_token_ids: &AHashSet<Idx>,
+  ) -> VocabBigramIndex {
+    VocabBigramIndex::disabled()
+  }
 }
 impl CharSplit for u8 {
   fn char_split_u8(&self, buffer: &mut Vec<u8>) {
@@ -282,6 +311,22 @@ impl CharSplit for u8 {
   }
   fn from_vec_u8(v: &[u8]) -> Word<Self> {
     v.to_word()
+  }
+
+  fn build_vocab_bigram_index(
+    vocab: &BTreeMap<Idx, Word<Self>>,
+    excluded_token_ids: &AHashSet<Idx>,
+  ) -> VocabBigramIndex {
+    let mut bigrams = VocabBigramIndex::byte();
+    for (idx, token) in vocab {
+      if excluded_token_ids.contains(idx) {
+        continue;
+      }
+      for pair in token.windows(2) {
+        bigrams.insert_byte(Bigram::new(pair[0], pair[1]));
+      }
+    }
+    bigrams
   }
 }
 impl CharSplit for Character {
@@ -304,6 +349,39 @@ impl CharSplit for Character {
   }
   fn from_vec_u8(v: &[u8]) -> Word<Self> {
     _try_combine(v).to_word()
+  }
+
+  fn is_valid_model_vocab_word(word: &Word<Self>) -> bool {
+    matches!(word.as_ref(), [Character::Byte(_)])
+      || word.iter().all(|unit| matches!(unit, Character::Unicode(_)))
+  }
+
+  fn is_valid_model_merge_word(word: &Word<Self>) -> bool {
+    word.iter().all(|unit| matches!(unit, Character::Unicode(_)))
+  }
+
+  fn build_vocab_bigram_index(
+    vocab: &BTreeMap<Idx, Word<Self>>,
+    excluded_token_ids: &AHashSet<Idx>,
+  ) -> VocabBigramIndex {
+    let mut bigrams = AHashSet::new();
+    for (idx, token) in vocab {
+      if excluded_token_ids.contains(idx) {
+        continue;
+      }
+      let mut chars = token.iter().filter_map(|unit| match unit {
+        Character::Unicode(ch) => Some(*ch),
+        Character::Byte(_) => None,
+      });
+      let Some(mut left) = chars.next() else {
+        continue;
+      };
+      for right in chars {
+        bigrams.insert(Bigram::new(left, right));
+        left = right;
+      }
+    }
+    VocabBigramIndex::unicode(bigrams)
   }
 }
 

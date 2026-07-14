@@ -557,6 +557,15 @@ where
     }
     drop(vocab_contents);
 
+    for token in self.vocab.values() {
+      if !C::is_valid_model_vocab_word(token) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "Unicode vocabulary token {} contains fallback bytes; only singleton fallback byte tokens are allowed",
+          token.debug_display(),
+        )));
+      }
+    }
+
     let mut target_ids = BTreeSet::new();
     let mut outputs = Vec::with_capacity(self.merges.len());
     for (rank, merge) in self.merges.iter().enumerate() {
@@ -573,6 +582,12 @@ where
           return Err(MyError::InvalidBpeModel(format!(
             "merge {rank} {side} operand id resolves to {}, expected {}",
             actual.debug_display(),
+            expected.debug_display(),
+          )));
+        }
+        if !C::is_valid_model_merge_word(expected) {
+          return Err(MyError::InvalidBpeModel(format!(
+            "Unicode merge {rank} {side} operand {} contains a fallback byte",
             expected.debug_display(),
           )));
         }
@@ -600,6 +615,12 @@ where
           "merge {rank} target is {}, expected {}",
           target_content.debug_display(),
           output.debug_display(),
+        )));
+      }
+      if !C::is_valid_model_merge_word(target_content) {
+        return Err(MyError::InvalidBpeModel(format!(
+          "Unicode merge {rank} target {} contains a fallback byte",
+          target_content.debug_display(),
         )));
       }
       outputs.push(output);
@@ -2139,6 +2160,37 @@ mod tests {
 
     assert!(matches!(error, MyError::InvalidBpeModel(_)));
     assert!(error.to_string().contains("duplicate vocabulary token"));
+  }
+
+  #[test]
+  fn test_validation_rejects_mixed_unicode_fallback_token() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::new(vec![], vec![]);
+    let mixed = vec![Character::Byte(0x80), Character::Unicode('a')].to_word();
+    bpe.vocab.insert(CharIdx::Idx(256), mixed);
+
+    let error = bpe.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains("only singleton fallback byte tokens are allowed"));
+  }
+
+  #[test]
+  fn test_validation_rejects_unicode_fallback_byte_merge() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::new(vec![], vec![]);
+    let left = vec![Character::Byte(0xc3)].to_word();
+    let right = vec![Character::Byte(0xa9)].to_word();
+    let target: Word<Character> = "é".to_word();
+    let left_idx = *bpe.byte_vocab.get(&0xc3).unwrap();
+    let right_idx = *bpe.byte_vocab.get(&0xa9).unwrap();
+    let target_idx = CharIdx::Idx(256);
+    bpe.vocab.insert(target_idx, target);
+    bpe.merges = vec![Merge::new((left_idx, right_idx), (left, right)).with_target(target_idx)];
+
+    let error = bpe.validate_model().unwrap_err();
+
+    assert!(matches!(error, MyError::InvalidBpeModel(_)));
+    assert!(error.to_string().contains("merge 0 left operand"));
+    assert!(error.to_string().contains("fallback byte"));
   }
 
   #[test]

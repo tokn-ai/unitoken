@@ -39,6 +39,14 @@ enc = BpeEncoder.load("demo")
 ids = enc.encode("hello")
 ```
 
+Encoding uses model-vocabulary bigrams to partition long PAT words by default.
+This does not change token ids, but it is not always profitable for byte
+models. Disable it after benchmarking the target workload:
+
+```python
+enc = BpeEncoder.load("demo", split_on_vocab_bigrams=False)
+```
+
 For a model trained from a retained Unicode-bigram selection, configure its
 inclusive cutoff on the trainer:
 
@@ -204,6 +212,8 @@ cargo bench --bench regression -- suite 1gib
 ```
 
 `smoke.yml` uses checked-in fixtures and is the profile run for pull requests.
+Codec cases accept `split_on_vocab_bigrams: false` for measured opt-out
+comparisons; reports and encoder fingerprints record the selected value.
 The `64mib.yml` and `1gib.yml` profiles use the prepared FineWeb2 Chinese word
 inventories under `out/data/`, so those local inputs must exist before running
 them. Validate a profile without executing its cases with `--check`:

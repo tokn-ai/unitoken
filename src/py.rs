@@ -896,6 +896,7 @@ fn new_bpe<C: Clone>(
   merges_file: Option<PathBuf>,
   special_tokens: Option<Vec<String>>,
   pat_str: Option<String>,
+  split_on_vocab_bigrams: bool,
   spec: &dyn Spec<C, Idx>,
 ) -> MyResult<BpeEncoderBase>
 where
@@ -916,8 +917,9 @@ where
   } else {
     return Err(MyError::BpeBuilder("Either merges_file or merges must be provided".to_string()));
   }
-  builder= builder.set_special_tokens(special_tokens);
+  builder = builder.set_special_tokens(special_tokens);
   builder = builder.set_pat_str(pat_str);
+  builder = builder.set_split_on_vocab_bigrams(split_on_vocab_bigrams);
   let bpe = builder.build(spec)?;
   Ok(BpeEncoderBase(Arc::new(bpe)))
 }
@@ -925,11 +927,12 @@ where
 #[pymethods]
 impl BpeEncoderBase {
   #[new]
-  #[pyo3(signature = (format, unit, vocab, merges, vocab_file, merges_file, special_tokens, pat_str=None))]
+  #[pyo3(signature = (format, unit, vocab, merges, vocab_file, merges_file, special_tokens, pat_str=None, split_on_vocab_bigrams=true))]
   /// Create a Python BPE encoder.
   ///
   /// The encoder can be created from in-memory `vocab`/`merges` or from file paths.
   /// `format` and `unit` must be compatible.
+  /// Set `split_on_vocab_bigrams` to `false` to keep PAT words intact during BPE.
   pub fn new_py(
     py: Python,
     format: &str, unit: &str,
@@ -939,12 +942,13 @@ impl BpeEncoderBase {
     merges_file: Option<PathBuf>,
     special_tokens: Option<Vec<String>>,
     pat_str: Option<String>,
+    split_on_vocab_bigrams: bool,
   ) -> PyResult<Self> {
     py.detach(||
       match (format, unit) {
-        ("gpt2", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &Gpt2Spec),
-        ("unitoken", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &UnitokenSpec),
-        ("unitoken", "unicode") => new_bpe::<Character>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, &UnitokenSpec),
+        ("gpt2", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, split_on_vocab_bigrams, &Gpt2Spec),
+        ("unitoken", "byte") => new_bpe::<u8>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, split_on_vocab_bigrams, &UnitokenSpec),
+        ("unitoken", "unicode") => new_bpe::<Character>(vocab, merges, vocab_file, merges_file, special_tokens, pat_str, split_on_vocab_bigrams, &UnitokenSpec),
         _ => Err(MyError::SpecError(format!("format {format} is not compatible with unit {unit}"))),
       }
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
@@ -957,7 +961,7 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_word")]
-  /// Encode a single word into token ids.
+  /// Encode one already-pretokenized word without PAT or special-token handling.
   pub fn py_encode_word(&self, py: Python, word: &str) -> PyResult<Vec<Idx>> {
     py.detach(||
       self.0.encode_word(word).map(_arc_to_vec)
@@ -965,7 +969,7 @@ impl BpeEncoderBase {
   }
 
   #[pyo3(name = "encode_words")]
-  /// Encode multiple words into token ids.
+  /// Encode multiple already-pretokenized words.
   pub fn py_encode_words(&self, py: Python, words: Vec<String>) -> PyResult<Vec<Vec<Idx>>> {
     py.detach(|| {
       let words = words.iter().map(|i| i.as_str()).collect::<Vec<_>>();
@@ -1042,9 +1046,25 @@ impl BpeEncoderBase {
 #[ignore = "manual"]
 fn generate_py_stubs() {
   println!("test");
+  let package_dir = std::path::Path::new("./python/uni_tokenizer");
+  let mut libraries = std::fs::read_dir(package_dir)
+    .expect("Python package directory to exist")
+    .filter_map(Result::ok)
+    .map(|entry| entry.path())
+    .filter(|path| {
+      path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("_lib."))
+        && path.extension().is_some_and(|extension| {
+          matches!(extension.to_str(), Some("so" | "pyd" | "dylib" | "dll"))
+        })
+    })
+    .collect::<Vec<_>>();
+  libraries.sort();
+  let library = libraries.into_iter().next()
+    .expect("built Python extension to exist");
   let module = pyo3_introspection::introspect_cdylib(
-      "./python/uni_tokenizer/_lib.cpython-313-darwin.so",
-      "_lib",
+    library,
+    "_lib",
   )
   .expect("introspection to succeed");
   let result = pyo3_introspection::module_stub_files(&module);

@@ -10,7 +10,11 @@ use std::{
   path::Path,
 };
 
-use crate::{MyError, MyResult, bpe::Freq};
+use crate::{
+  MyError, MyResult,
+  bigram::VocabBigramIndex,
+  bpe::Freq,
+};
 
 /// Unicode bigrams retained by a frequency selection and its effective boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +104,7 @@ impl UnicodeBigramMixedBoundary {
   }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "py", pyo3::pyclass(from_py_object))]
 pub struct PreTokenizer {
@@ -108,7 +113,15 @@ pub struct PreTokenizer {
   pub end_of_text: String,
   pub unicode_bigrams: Option<AHashSet<(char, char)>>,
   pub unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
-  pub metrics: bool
+  pub metrics: bool,
+  vocab_bigram_index: VocabBigramIndex,
+}
+
+/// A borrowed output from the complete pretokenization pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreTokenPiece<'a> {
+  Special(&'a str),
+  Word(&'a str),
 }
 
 impl PreTokenizer {
@@ -141,6 +154,7 @@ impl PreTokenizer {
       unicode_bigrams: None,
       unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary::default(),
       metrics: true,
+      vocab_bigram_index: VocabBigramIndex::disabled(),
     })
   }
 
@@ -154,16 +168,103 @@ impl PreTokenizer {
     self
   }
 
+  pub(crate) fn with_vocab_bigram_index(mut self, index: VocabBigramIndex) -> Self {
+    self.vocab_bigram_index = index;
+    self
+  }
+
+  /// Visit special tokens and ordinary words in input order.
+  ///
+  /// Vocab-bigram cuts conservatively partition encoding work. Byte words
+  /// shorter than the internal profitability threshold remain PAT-sized.
+  pub(crate) fn for_each_piece<'a>(
+    &self,
+    text: &'a str,
+    mut emit: impl FnMut(PreTokenPiece<'a>) -> MyResult<()>,
+  ) -> MyResult<()> {
+    let mut split_points = Vec::new();
+    if self.re_special_tokens.as_str() == "$^" {
+      return self.for_each_word(text, &mut split_points, &mut emit);
+    }
+
+    let mut last_pos = 0;
+    for found in self.re_special_tokens.find_iter(text) {
+      let special = found?;
+      if special.start() > last_pos {
+        self.for_each_word(
+          &text[last_pos..special.start()],
+          &mut split_points,
+          &mut emit,
+        )?;
+      }
+      emit(PreTokenPiece::Special(&text[special.start()..special.end()]))?;
+      last_pos = special.end();
+    }
+    if last_pos < text.len() {
+      self.for_each_word(&text[last_pos..], &mut split_points, &mut emit)?;
+    }
+    Ok(())
+  }
+
+  fn for_each_word<'a>(
+    &self,
+    text: &'a str,
+    split_points: &mut Vec<usize>,
+    emit: &mut impl FnMut(PreTokenPiece<'a>) -> MyResult<()>,
+  ) -> MyResult<()> {
+    for_each_pretoken(
+      text,
+      &self.re_pat,
+      self.unicode_bigrams.as_ref(),
+      self.unicode_bigram_mixed_boundary,
+      |word| self.emit_vocab_bigram_segments(word, split_points, emit),
+    )
+  }
+
+  fn emit_vocab_bigram_segments<'a>(
+    &self,
+    word: &'a str,
+    split_points: &mut Vec<usize>,
+    emit: &mut impl FnMut(PreTokenPiece<'a>) -> MyResult<()>,
+  ) -> MyResult<()> {
+    debug_assert!(split_points.is_empty());
+    self.vocab_bigram_index.split_points(word, split_points);
+    if split_points.is_empty() {
+      return emit(PreTokenPiece::Word(word));
+    }
+
+    let mut start = 0;
+    for end in split_points.drain(..) {
+      emit(PreTokenPiece::Word(&word[start..end]))?;
+      start = end;
+    }
+    emit(PreTokenPiece::Word(&word[start..]))
+  }
+
   /// Pretokenize a string and return borrowed words with their frequencies.
   ///
-  /// The map keys borrow from `text`.
+  /// Special tokens are excluded. The map keys borrow from `text`.
   pub fn get_words<'a>(&self, text: &'a str) -> MyResult<BTreeMap<&'a str, Freq>> {
-    _pretokenizer_counter(text, &self.re_pat)
+    let mut words = BTreeMap::new();
+    self.for_each_piece(text, |piece| {
+      if let PreTokenPiece::Word(word) = piece {
+        *words.entry(word).or_default() += 1;
+      }
+      Ok(())
+    })?;
+    Ok(words)
   }
 
   /// Pretokenize a string and return owned words with their frequencies.
   pub fn get_words_owned(&self, text: &str) -> MyResult<BTreeMap<String, Freq>> {
-    _pretokenizer_counter_with_unicode_bigrams(text, &self.re_pat, self.unicode_bigrams.as_ref(), self.unicode_bigram_mixed_boundary)
+    let mut words = BTreeMap::new();
+    self.for_each_piece(text, |piece| {
+      if let PreTokenPiece::Word(word) = piece {
+        *words.entry(word.to_string()).or_default() += 1;
+      }
+      Ok(())
+    })?;
+    Ok(words)
   }
 
   /// Compute byte `(offset, len)` pairs that split a file into approximately `desired_num_chunks`.
@@ -198,25 +299,20 @@ impl PreTokenizer {
     let buffer = _read_file_to_buffer(&path, offset, len)?;
 
     let content = String::from_utf8_lossy(&buffer);
-    let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut words = BTreeMap::new();
-    for part in parts.iter().filter(|i| !i.is_special()) {
-      for (token, count) in _pretokenizer_counter_with_unicode_bigrams(
-        part.as_str(),
-        &self.re_pat,
-        self.unicode_bigrams.as_ref(),
-        self.unicode_bigram_mixed_boundary,
-      )? {
-        *words.entry(token).or_default() += count;
+    self.for_each_piece(&content, |piece| {
+      if let PreTokenPiece::Word(word) = piece {
+        *words.entry(word.to_string()).or_default() += 1;
       }
-    }
+      Ok(())
+    })?;
     if self.metrics {
       metrics::histogram!("get_words_from_segment.words_count").record(words.len() as f64);
       metrics::counter!("get_words_from_segment.len").increment(len as _);
     }
 
     trace!(words_len=?words.len(), "result");
-    Ok(words.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    Ok(words)
   }
 
   /// Count pre-tokenized word frequencies across an entire file.
@@ -307,11 +403,10 @@ impl PreTokenizer {
   ) -> MyResult<AHashMap<(char, char), Freq>> {
     let buffer = _read_file_to_buffer(&path, offset, len)?;
     let content = String::from_utf8_lossy(&buffer);
-    let parts = split_special_tokens(&content, &self.re_special_tokens)?;
     let mut counts = AHashMap::new();
-    for part in parts.iter().filter(|i| !i.is_special()) {
-      count_unicode_bigrams(part.as_str(), &mut counts, is_unicode_bigram_script)?;
-    }
+    for_each_regular_chunk(&content, &self.re_special_tokens, |chunk| {
+      count_unicode_bigrams(chunk, &mut counts, is_unicode_bigram_script)
+    })?;
     Ok(counts)
   }
 }
@@ -319,23 +414,12 @@ impl PreTokenizer {
 /// Pretokenize a string using `pat` and return word frequencies.
 ///
 /// The returned keys borrow from `s`.
-pub fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&'a str, Freq>> {
+fn _pretokenizer_counter<'a>(s: &'a str, pat: &Regex) -> MyResult<BTreeMap<&'a str, Freq>> {
   let mut result = BTreeMap::new();
   for i in pat.find_iter(s) {
     let token = i?.as_str();
     *result.entry(token).or_default() += 1;
   }
-  Ok(result)
-}
-
-pub fn _pretokenizer_counter_with_unicode_bigrams(
-  s: &str, pat: &Regex, unicode_bigrams: Option<&AHashSet<(char, char)>>, unicode_bigram_mixed_boundary: UnicodeBigramMixedBoundary,
-) -> MyResult<BTreeMap<String, Freq>> {
-  let mut result = BTreeMap::new();
-  for_each_pretoken(s, pat, unicode_bigrams, unicode_bigram_mixed_boundary, |word| {
-    *result.entry(word.to_string()).or_default() += 1;
-    Ok(())
-  })?;
   Ok(result)
 }
 
@@ -844,6 +928,84 @@ pub fn save_words<W: std::io::Write>(w: W, words: &ordermap::OrderMap<String, Fr
 mod tests {
   use ordermap::OrderMap;
   use super::*;
+  use crate::bigram::Bigram;
+
+  #[test]
+  fn test_piece_pipeline_applies_special_pat_unicode_and_vocab_splits() {
+    let unicode_bigrams = parse_unicode_bigrams(&["你好".to_string()]).unwrap();
+    let vocab_bigrams = [
+      Bigram::new('你', '好'),
+      Bigram::new('a', 'b'),
+      Bigram::new('b', 'c'),
+    ]
+    .into_iter()
+    .collect();
+    let pre_tokenizer = PreTokenizer::try_new(
+      &["<eot>".to_string()],
+      Some("<eot>"),
+      Some(r"\p{L}+"),
+    )
+    .unwrap()
+    .with_unicode_bigrams(unicode_bigrams)
+    .with_vocab_bigram_index(VocabBigramIndex::unicode(vocab_bigrams));
+
+    let mut pieces = Vec::new();
+    pre_tokenizer
+      .for_each_piece("你好世界<eot>abcz", |piece| {
+        pieces.push(match piece {
+          PreTokenPiece::Special(special) => ("special", special),
+          PreTokenPiece::Word(word) => ("word", word),
+        });
+        Ok(())
+      })
+      .unwrap();
+
+    assert_eq!(
+      pieces,
+      [
+        ("word", "你好"),
+        ("word", "世"),
+        ("word", "界"),
+        ("special", "<eot>"),
+        ("word", "abc"),
+        ("word", "z"),
+      ],
+    );
+    assert_eq!(
+      pre_tokenizer.get_words("你好世界<eot>abcz").unwrap(),
+      [
+        ("abc", 1),
+        ("z", 1),
+        ("世", 1),
+        ("你好", 1),
+        ("界", 1),
+      ]
+      .into_iter()
+      .collect(),
+    );
+    assert_eq!(
+      pre_tokenizer.get_words_owned("你好世界<eot>abcz").unwrap(),
+      [
+        ("abc".to_string(), 1),
+        ("z".to_string(), 1),
+        ("世".to_string(), 1),
+        ("你好".to_string(), 1),
+        ("界".to_string(), 1),
+      ]
+      .into_iter()
+      .collect(),
+    );
+
+    std::fs::create_dir_all("out/reports/smoke").ok();
+    let path = std::path::Path::new("out/reports/smoke/pretokenizer_piece_pipeline.txt");
+    let input = "你好世界<eot>abcz";
+    std::fs::write(path, input).unwrap();
+    assert_eq!(
+      pre_tokenizer.get_words_from_segment(path, 0, input.len()).unwrap(),
+      pre_tokenizer.get_words_owned(input).unwrap(),
+    );
+  }
+
   #[test]
   fn test_pretokenizer() {
     let s = "Hello, world! It's 2024.";

@@ -31,10 +31,12 @@ pub trait Train {
 pub trait Encode<I> {
   /// Return the pre-tokenizer used by this encoder.
   fn pre_tokenizer(&self) -> &PreTokenizer;
-  /// Encode a single word into token ids.
+  /// Encode one already-pretokenized word into token ids.
+  ///
+  /// This does not apply the pre-tokenizer pattern or special-token routing.
   fn encode_word(&self, word: &str) -> MyResult<Word<I>>;
 
-  /// Encode multiple words.
+  /// Encode multiple already-pretokenized words.
   ///
   /// The default implementation calls [`Self::encode_word`] for each word.
   fn encode_words(&self, words: &[&str]) -> MyResult<Vec<Word<I>>> {
