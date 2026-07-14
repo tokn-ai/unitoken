@@ -82,6 +82,15 @@ impl<C, I> Merge<C, I> {
     Arc::<[C]>::from(v.into_boxed_slice())
   }
 
+  /// Concatenate serialized bytes and canonicalize them for the unit type.
+  ///
+  /// This differs from [`Self::merged_content`] for Unicode byte-fallback
+  /// merges: completing a UTF-8 scalar produces a Unicode unit rather than a
+  /// multi-byte fallback fragment.
+  pub fn canonical_merged_content(&self) -> Word<C> where C: CharSplit {
+    C::merge_output(&self.content.0, &self.content.1)
+  }
+
   /// Set the target (new vocab id) for this merge.
   pub fn with_target(mut self, target: I) -> Self {
     self.target = Some(target);
@@ -186,6 +195,21 @@ pub trait CharToIdx<I: IdxLike> {
   /// If the character is a byte, it will be converted to an index.
   /// If the character is a unicode character, it will be converted to a `CharIdx::Char`.
   fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, I>>) -> I;
+
+  #[doc(hidden)]
+  fn supports_bbpe_fallback() -> bool {
+    false
+  }
+
+  #[doc(hidden)]
+  fn bbpe_word_to_bytes(_word: &Word<Self>) -> Option<Vec<u8>> where Self: Sized {
+    None
+  }
+
+  #[doc(hidden)]
+  fn bbpe_word_from_bytes(_bytes: &[u8]) -> Option<Word<Self>> where Self: Sized {
+    None
+  }
 }
 
 impl CharToIdx<Idx> for u8 {
@@ -223,6 +247,18 @@ impl CharToIdx<CharIdx> for Character {
       Character::Unicode(c) => c.char_to_idx(start, byte_vocab),
       Character::Byte(b) => b.char_to_idx(start, byte_vocab),
     }
+  }
+
+  fn supports_bbpe_fallback() -> bool {
+    true
+  }
+
+  fn bbpe_word_to_bytes(word: &Word<Self>) -> Option<Vec<u8>> {
+    Some(<Self as CharSplit>::to_vec_u8(word))
+  }
+
+  fn bbpe_word_from_bytes(bytes: &[u8]) -> Option<Word<Self>> {
+    Some(<Self as CharSplit>::from_vec_u8(bytes))
   }
 }
 
@@ -279,6 +315,14 @@ pub trait CharSplit: Sized {
   fn from_vec_u8(v: &[u8]) -> Word<Self>;
 
   #[doc(hidden)]
+  /// Concatenate two model words through their canonical byte representation.
+  fn merge_output(left: &Word<Self>, right: &Word<Self>) -> Word<Self> {
+    let mut bytes = Self::to_vec_u8(left);
+    bytes.extend(Self::to_vec_u8(right));
+    Self::from_vec_u8(&bytes)
+  }
+
+  #[doc(hidden)]
   /// Return whether a vocabulary entry satisfies this unit type's model invariant.
   ///
   /// Custom unit types are accepted by default.
@@ -292,6 +336,26 @@ pub trait CharSplit: Sized {
   /// Custom unit types are accepted by default.
   fn is_valid_model_merge_word(_word: &Word<Self>) -> bool {
     true
+  }
+
+  #[doc(hidden)]
+  /// Return whether a merge is valid for this unit type.
+  ///
+  /// Custom unit types retain their existing permissive behavior by default.
+  fn is_valid_model_merge(
+    _left: &Word<Self>, _right: &Word<Self>, _target: &Word<Self>,
+  ) -> bool {
+    true
+  }
+
+  #[doc(hidden)]
+  /// Return whether ordinary input must reconstruct this merge target from its operands.
+  ///
+  /// Custom unit types keep singleton merge targets directly addressable by default.
+  fn merge_target_requires_split(
+    _left: &Word<Self>, _right: &Word<Self>, _target: &Word<Self>,
+  ) -> bool {
+    false
   }
 
   #[doc(hidden)]
@@ -352,12 +416,50 @@ impl CharSplit for Character {
   }
 
   fn is_valid_model_vocab_word(word: &Word<Self>) -> bool {
-    matches!(word.as_ref(), [Character::Byte(_)])
-      || word.iter().all(|unit| matches!(unit, Character::Unicode(_)))
+    if word.iter().all(|unit| matches!(unit, Character::Unicode(_))) {
+      return true;
+    }
+    word.iter().all(|unit| matches!(unit, Character::Byte(_)))
+      && word == &Self::from_vec_u8(&Self::to_vec_u8(word))
   }
 
   fn is_valid_model_merge_word(word: &Word<Self>) -> bool {
-    word.iter().all(|unit| matches!(unit, Character::Unicode(_)))
+    Self::is_valid_model_vocab_word(word)
+  }
+
+  fn is_valid_model_merge(
+    left: &Word<Self>, right: &Word<Self>, target: &Word<Self>,
+  ) -> bool {
+    if target != &Self::merge_output(left, right) {
+      return false;
+    }
+
+    let all_unicode = |word: &Word<Self>| {
+      !word.is_empty() && word.iter().all(|unit| matches!(unit, Character::Unicode(_)))
+    };
+    let all_bytes = |word: &Word<Self>| {
+      !word.is_empty() && word.iter().all(|unit| matches!(unit, Character::Byte(_)))
+    };
+
+    if all_unicode(left) && all_unicode(right) {
+      return all_unicode(target);
+    }
+    if all_bytes(left) && all_bytes(right) {
+      return all_bytes(target)
+        || matches!(target.as_ref(), [Character::Unicode(_)]);
+    }
+    false
+  }
+
+  fn merge_target_requires_split(
+    left: &Word<Self>, right: &Word<Self>, target: &Word<Self>,
+  ) -> bool {
+    let all_bytes = |word: &Word<Self>| {
+      !word.is_empty() && word.iter().all(|unit| matches!(unit, Character::Byte(_)))
+    };
+    all_bytes(left)
+      && all_bytes(right)
+      && matches!(target.as_ref(), [Character::Unicode(_)])
   }
 
   fn build_vocab_bigram_index(

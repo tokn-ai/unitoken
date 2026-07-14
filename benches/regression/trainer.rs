@@ -767,6 +767,8 @@ mod runner {
       parallel_merge_min_occurs_in: request.case.parallel_merge_min_occurs_in,
       hot_pair_window_size: request.variant.hot_pair_window_size,
       bigram_cutoff_freq: request.case.bigram_cutoff_freq,
+      bbpe_fallback: false,
+      primary_vocab_ratio: 0.9,
     };
 
     let build_rss_sampler = rss::RssSampler::start();

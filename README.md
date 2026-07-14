@@ -63,6 +63,40 @@ model = trainer.validate_model()
 unrestricted, while validation rejects a final pair merge below the cutoff.
 Equality is valid because bigram selection retains every tie at the cutoff.
 
+Unicode BBPE fallback
+---------------------
+
+Unicode training can use part of its learned vocabulary for byte-BPE merges
+inside Unicode scalars that are omitted from the direct Unicode alphabet:
+
+```python
+trainer = BpeTrainer(
+  [],
+  unit="unicode",
+  bbpe_fallback=True,
+  primary_vocab_ratio=0.9,
+)
+trainer.add_word_counter(word_counter)
+trainer.train(vocab_size=10_000)
+```
+
+The ratio applies only to learned slots after special tokens and the mandatory
+256-byte alphabet. Training first advances the primary Unicode trainer through
+its configured share of learned slots, then freezes any still-unmaterialized
+Unicode scalars. The fallback pass may use the remaining slots for byte merges
+whose frequency reaches that primary boundary; unused fallback slots return to
+primary pair training. The primary and fallback merge streams are combined by
+frequency only after both phases finish. Fallback pseudo-words are isolated per
+Unicode scalar, so the byte pass never learns across scalar boundaries.
+
+`bbpe_fallback` is opt-in and is only valid with `unit="unicode"`. Because the
+phase boundary depends on the requested vocabulary size, use `train()` rather
+than the manual `init_training()` / `step()` lifecycle. Once the fallback pass
+has run, calls at the same or a smaller target are no-ops; a larger target needs
+a new trainer. The resulting model is still a Unicode Unitoken model; encoding
+behavior is carried by its merge rules, so no fallback option is needed when
+loading it.
+
 Streaming two-pass counting
 ---------------------------
 

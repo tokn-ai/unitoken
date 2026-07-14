@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap}, io::BufWriter, path::Path};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, io::BufWriter, path::Path};
 use std::collections::hash_map::Entry;
 
 use ahash::AHashSet;
@@ -23,23 +23,35 @@ where
   for token in vocab.values() {
     if !C::is_valid_model_vocab_word(token) {
       return Err(MyError::InvalidBpeModel(format!(
-        "Unicode vocabulary token {} contains fallback bytes; only singleton fallback byte tokens are allowed",
+        "Unicode vocabulary token {} must be canonical Unicode content or a homogeneous invalid UTF-8 byte fragment",
         token.debug_display(),
       )));
     }
   }
 
   for (rank, ((left, right), target)) in merges.iter().copied().enumerate() {
+    let mut words = Vec::with_capacity(3);
     for (side, idx) in [("left", left), ("right", right), ("target", target)] {
       let Some(word) = vocab.get(&idx) else {
-        continue;
+        return Err(MyError::InvalidBpeModel(format!(
+          "merge {rank} {side} token id {idx} is missing from the vocabulary",
+        )));
       };
       if !C::is_valid_model_merge_word(word) {
         return Err(MyError::InvalidBpeModel(format!(
-          "Unicode merge {rank} {side} token {} contains a fallback byte",
+          "Unicode merge {rank} {side} token {} is not canonical homogeneous content",
           word.debug_display(),
         )));
       }
+      words.push(word);
+    }
+    if !C::is_valid_model_merge(words[0], words[1], words[2]) {
+      return Err(MyError::InvalidBpeModel(format!(
+        "Unicode merge {rank} target {} is not the canonical byte concatenation of {} and {}",
+        words[2].debug_display(),
+        words[0].debug_display(),
+        words[1].debug_display(),
+      )));
     }
   }
   Ok(())
@@ -51,7 +63,7 @@ struct EncoderModelCapabilities {
   can_batch_encode: bool,
 }
 
-fn encoder_model_capabilities<C: Eq>(
+fn encoder_model_capabilities<C: CharSplit>(
   vocab: &BTreeMap<Idx, Word<C>>,
   merges: &[((Idx, Idx), Idx)],
 ) -> EncoderModelCapabilities {
@@ -66,9 +78,9 @@ fn encoder_model_capabilities<C: Eq>(
     ) else {
       return false;
     };
-    target.len() == left.len() + right.len()
-      && target.starts_with(left)
-      && target.ends_with(right)
+    let mut merged_bytes = C::to_vec_u8(left);
+    merged_bytes.extend(C::to_vec_u8(right));
+    merged_bytes == C::to_vec_u8(target)
   });
 
   let mut target_ranks = BTreeMap::new();
@@ -430,10 +442,23 @@ where
       .iter()
       .map(|(k, v)| (v.clone(), *k))
       .collect::<BTreeMap<_, _>>();
+    let merge_target_ids = merges
+      .iter()
+      .map(|(_, target)| *target)
+      .collect::<AHashSet<_>>();
+    let split_merge_targets = merges
+      .iter()
+      .filter_map(|((left, right), target)| {
+        let left = vocab.get(left)?;
+        let right = vocab.get(right)?;
+        let target = vocab.get(target)?;
+        C::merge_target_requires_split(left, right, target).then(|| target.clone())
+      })
+      .collect::<BTreeSet<_>>();
     let vocab_bytes = vocab
       .iter()
       .filter_map(|(k, v)| {
-        if v.len() == 1 {
+        if v.len() == 1 && !split_merge_targets.contains(v) {
           Some((v[0].clone(), *k))
         } else {
           None
@@ -448,10 +473,6 @@ where
     let special_token_ids = resolved_special_tokens
       .iter()
       .map(|(_, idx)| *idx)
-      .collect::<AHashSet<_>>();
-    let merge_target_ids = merges
-      .iter()
-      .map(|(_, target)| *target)
       .collect::<AHashSet<_>>();
     // Keep merge-target specials indexed: callers can narrow the public
     // special-token regex, making the same text an ordinary BPE word.
@@ -1277,6 +1298,7 @@ mod tests {
     assert!(bpe.can_batch_encode);
     assert_eq!(bpe.encode_word("ab").unwrap().as_ref(), [2]);
     assert_eq!(bpe.encode_words(&["ab"]).unwrap()[0].as_ref(), [2]);
+    assert_eq!(bpe.encode_word("z").unwrap().as_ref(), [2]);
   }
 
   #[test]
@@ -1307,7 +1329,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_encoder_rejects_fallback_byte_tokens_and_merges() {
+  fn test_unicode_encoder_accepts_ordered_within_scalar_fallback_merges() {
     let mixed_vocab = BTreeMap::from([
       (0, vec![Character::Byte(0x80)].to_word()),
       (1, "a".to_word()),
@@ -1317,18 +1339,107 @@ mod tests {
       Ok(_) => panic!("mixed Unicode vocab token should be rejected"),
       Err(error) => error,
     };
-    assert!(error.to_string().contains("only singleton fallback byte tokens are allowed"));
+    assert!(error.to_string().contains("canonical Unicode content or a homogeneous invalid UTF-8 byte fragment"));
 
-    let byte_merge_vocab = BTreeMap::from([
-      (0, vec![Character::Byte(0xc3)].to_word()),
-      (1, vec![Character::Byte(0xa9)].to_word()),
-      (2, "é".to_word()),
+    let noncanonical_vocab = BTreeMap::from([
+      (0, vec![Character::Byte(0xc3), Character::Byte(0xa9)].to_word()),
     ]);
-    let error = match BpeEncoder::new(byte_merge_vocab, vec![((0, 1), 2)], vec![]) {
-      Ok(_) => panic!("Unicode fallback byte merge should be rejected"),
+    let error = match BpeEncoder::new(noncanonical_vocab, vec![], vec![]) {
+      Ok(_) => panic!("complete UTF-8 bytes should use canonical Unicode content"),
       Err(error) => error,
     };
-    assert!(error.to_string().contains("merge 0 left token"));
+    assert!(error.to_string().contains("canonical Unicode content"));
+
+    let partially_canonical_vocab = BTreeMap::from([
+      (
+        0,
+        vec![
+          Character::Byte(0xc3),
+          Character::Byte(0xa9),
+          Character::Byte(0xc2),
+        ].to_word(),
+      ),
+    ]);
+    let error = match BpeEncoder::new(partially_canonical_vocab, vec![], vec![]) {
+      Ok(_) => panic!("partly decodable bytes should use their canonical representation"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("canonical Unicode content"));
+
+    let fallback_vocab = BTreeMap::from([
+      (0, vec![Character::Byte(0xe4)].to_word()),
+      (1, vec![Character::Byte(0xbd)].to_word()),
+      (2, vec![Character::Byte(0xa0)].to_word()),
+      (3, vec![Character::Byte(0xe4), Character::Byte(0xbd)].to_word()),
+      (4, "你".to_word()),
+      (5, "好".to_word()),
+    ]);
+    let bpe = BpeEncoder::new(
+      fallback_vocab,
+      vec![
+        ((0, 1), 3),
+        ((3, 2), 4),
+      ],
+      vec![],
+    ).unwrap();
+
+    assert!(bpe.can_batch_encode);
+    assert_eq!(bpe.vocab_bytes.get(&Character::Unicode('你')), None);
+    assert_eq!(bpe.vocab_bytes.get(&Character::Unicode('好')), Some(&5));
+    assert_eq!(bpe._pretoken("你".to_word(), 1).unwrap().idxs, [0, 1, 2]);
+    assert_eq!(bpe.encode_word("你").unwrap().as_ref(), [4]);
+    assert_eq!(bpe.encode_word("好你").unwrap().as_ref(), [5, 4]);
+    assert_eq!(bpe.decode(&[4]).unwrap(), "你");
+  }
+
+  #[test]
+  fn test_unicode_encoder_replays_balanced_four_byte_fallback_merges() {
+    let vocab = BTreeMap::from([
+      (0, vec![Character::Byte(0xf0)].to_word()),
+      (1, vec![Character::Byte(0x9f)].to_word()),
+      (2, vec![Character::Byte(0x98)].to_word()),
+      (3, vec![Character::Byte(0x80)].to_word()),
+      (
+        4,
+        vec![Character::Byte(0xf0), Character::Byte(0x9f)].to_word(),
+      ),
+      (
+        5,
+        vec![Character::Byte(0x98), Character::Byte(0x80)].to_word(),
+      ),
+      (6, "😀".to_word()),
+    ]);
+    let bpe = BpeEncoder::new(
+      vocab,
+      vec![
+        ((0, 1), 4),
+        ((2, 3), 5),
+        ((4, 5), 6),
+      ],
+      vec![],
+    ).unwrap();
+
+    assert_eq!(bpe.encode_word("😀").unwrap().as_ref(), [6]);
+    assert_eq!(bpe.encode_word("😀😀").unwrap().as_ref(), [6, 6]);
+    assert_eq!(bpe.encode_words(&["😀😀"]).unwrap()[0].as_ref(), [6, 6]);
+    assert_eq!(bpe.encode_string("😀😀").unwrap(), [6, 6]);
+    assert_eq!(bpe.decode(&[6, 6]).unwrap(), "😀😀");
+  }
+
+  #[test]
+  fn test_unicode_encoder_rejects_noncanonical_fallback_merge_output() {
+    let vocab = BTreeMap::from([
+      (0, vec![Character::Byte(0xc3)].to_word()),
+      (1, vec![Character::Byte(0xa9)].to_word()),
+      (2, "ê".to_word()),
+    ]);
+
+    let error = match BpeEncoder::new(vocab, vec![((0, 1), 2)], vec![]) {
+      Ok(_) => panic!("fallback merge with the wrong serialized output should be rejected"),
+      Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("canonical byte concatenation"));
   }
 
   #[test]

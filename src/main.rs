@@ -8,7 +8,7 @@ use std::{
 };
 
 use unitoken::{
-  bpe::{BpeEncoder, BpeTrainer, CharIdx, Character, Idx, encoder::BpeBuilder}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanTrain, Encode, Train}
+  bpe::{BpeEncoder, BpeTrainer, CharIdx, CharSplit, Character, Idx, encoder::BpeBuilder}, pretokenizer::{BoundaryMode, ChunkHint, ChunkOptions, PreTokenizer, save_words, sort_words}, spec::{Spec, gpt2::Gpt2Spec, unitoken::UnitokenSpec}, traits::{CanEncode, CanTrain, Encode, Train}
 };
 
 mod _metrics;
@@ -266,6 +266,7 @@ pub fn _bpe_save_train<C, I>(
   name: &str,
 ) where
   BpeTrainer<C, I>: CanTrain<C, I>,
+  C: CharSplit,
 {
   let vocab_filename = format!("vocab.{name}.json");
   let merges_filename = format!("merges.{name}.txt");
