@@ -47,6 +47,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: node --test .github/scripts/update-benchmark-comment.test.cjs
 
+      - name: Test benchmark report contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: bash .github/scripts/validate-benchmark-reports.test.sh
+
       - name: Install uv and set the Python version
         uses: astral-sh/setup-uv@v7
         with:

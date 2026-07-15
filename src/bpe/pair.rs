@@ -138,6 +138,20 @@ impl<C, I> PairStore<C, I> {
     self.is_bounded().then_some(&self.stats)
   }
 
+  pub(crate) fn accumulate_stats(&mut self, previous: HotPairWindowStats) {
+    assert!(self.is_bounded(), "cannot accumulate exact pair-store statistics");
+    self.stats.hydration_scans = self.stats.hydration_scans
+      .saturating_add(previous.hydration_scans);
+    self.stats.hydrated_word_entries = self.stats.hydrated_word_entries
+      .saturating_add(previous.hydrated_word_entries);
+    self.stats.batch_prunes = self.stats.batch_prunes
+      .saturating_add(previous.batch_prunes);
+    self.stats.prune_evictions = self.stats.prune_evictions
+      .saturating_add(previous.prune_evictions);
+    self.stats.peak_resident_pairs = self.stats.peak_resident_pairs
+      .max(previous.peak_resident_pairs);
+  }
+
   pub(crate) fn len(&self) -> usize {
     self.pairs.len()
   }

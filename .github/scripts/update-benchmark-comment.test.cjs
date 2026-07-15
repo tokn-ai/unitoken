@@ -7,21 +7,21 @@ const test = require('node:test');
 const updateBenchmarkComment = require('./update-benchmark-comment.cjs');
 const { buildComment } = updateBenchmarkComment;
 
-function writeReport(root, side, name, contract, samples) {
+function writeReport(root, side, name, contract, samples, gatesPassed = true) {
   const directory = path.join(root, side);
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, name), JSON.stringify({
     schema_version: 1,
     contract,
-    gates: { passed: true },
+    gates: { passed: gatesPassed },
     samples,
   }));
 }
 
-function trainerSample(caseName, occurrenceMode, time, rss) {
+function trainerSample(caseName, occurrenceMode, time, rss, caseOverrides = {}) {
   return {
     request: {
-      case: { name: caseName },
+      case: { name: caseName, ...caseOverrides },
       variant: {
         occurrence_mode: occurrenceMode,
         hot_pair_window_size: occurrenceMode === 'bounded' ? 4096 : null,
@@ -31,10 +31,30 @@ function trainerSample(caseName, occurrenceMode, time, rss) {
       timing: { core_training_ns: time },
       memory: { process_peak_rss_through_training_bytes: rss },
     },
+    status: 'completed',
+    error: null,
   };
 }
 
-function populateReports(root, side, multiplier) {
+function writeCodecReport(root, side, name, multiplier, gatesPassed = true) {
+  writeReport(root, side, name, 'unitoken_codec_regression_v1', [{
+    encode: {
+      timing: { encode_ns: 4_000_000 * multiplier },
+      memory: { process_peak_rss_through_phase_bytes: 4_194_304 },
+    },
+    decode: {
+      timing: { decode_ns: 5_000_000 * multiplier },
+      memory: { process_peak_rss_through_phase_bytes: 5_242_880 },
+    },
+  }], gatesPassed);
+}
+
+function populateReports(root, side, multiplier, options = {}) {
+  const {
+    extraTrainerSamples = [],
+    trainerCaseOverrides = {},
+    trainerGatesPassed = true,
+  } = options;
   const trainerSamples = [];
   for (const caseName of [
     'smoke_en_byte_v300',
@@ -42,15 +62,29 @@ function populateReports(root, side, multiplier) {
     'smoke_zh_unicode_v300',
     'smoke_zh_unicode_v1000',
   ]) {
-    trainerSamples.push(trainerSample(caseName, 'exact', 1_000_000 * multiplier, 1_048_576));
-    trainerSamples.push(trainerSample(caseName, 'bounded', 2_000_000 * multiplier, 2_097_152));
+    trainerSamples.push(trainerSample(
+      caseName,
+      'exact',
+      1_000_000 * multiplier,
+      1_048_576,
+      trainerCaseOverrides,
+    ));
+    trainerSamples.push(trainerSample(
+      caseName,
+      'bounded',
+      2_000_000 * multiplier,
+      2_097_152,
+      trainerCaseOverrides,
+    ));
   }
+  trainerSamples.push(...extraTrainerSamples);
   writeReport(
     root,
     side,
     'trainer.json',
     'unitoken_trainer_regression_v1',
     trainerSamples,
+    trainerGatesPassed,
   );
   writeReport(
     root,
@@ -69,16 +103,7 @@ function populateReports(root, side, multiplier) {
     }],
   );
   for (const name of ['codec-byte.json', 'codec-unicode.json']) {
-    writeReport(root, side, name, 'unitoken_codec_regression_v1', [{
-      encode: {
-        timing: { encode_ns: 4_000_000 * multiplier },
-        memory: { process_peak_rss_through_phase_bytes: 4_194_304 },
-      },
-      decode: {
-        timing: { decode_ns: 5_000_000 * multiplier },
-        memory: { process_peak_rss_through_phase_bytes: 5_242_880 },
-      },
-    }]);
+    writeCodecReport(root, side, name, multiplier);
   }
 }
 
@@ -91,11 +116,16 @@ function writeMetadata(root) {
   }));
 }
 
-test('buildComment renders fixed base/head comparisons', () => {
+test('buildComment renders a comparable trainer delta with legacy BBPE defaults', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
   try {
     populateReports(root, 'baseline', 1);
-    populateReports(root, 'candidate', 1.1);
+    populateReports(root, 'candidate', 1.1, {
+      trainerCaseOverrides: {
+        bbpe_fallback: false,
+        primary_vocab_ratio: 0.9,
+      },
+    });
     const comment = buildComment({
       resultsDir: root,
       conclusion: 'success',
@@ -106,8 +136,333 @@ test('buildComment renders fixed base/head comparisons', () => {
     assert.match(comment, /<!-- unitoken-benchmark-report -->/);
     assert.match(comment, /All base and PR correctness gates passed/);
     assert.match(comment, /Trainer — English byte, vocab 300 \(exact\)/);
-    assert.match(comment, /1\.00 ms \| 1\.10 ms \| \+10\.0%/);
+    assert.match(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| 1\.10 ms \| \+10\.0%/,
+    );
     assert.match(comment, /Open benchmark run/);
+    assert.doesNotMatch(comment, /Codec — Unicode BBPE/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders a candidate-only BBPE codec report as missing in base', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.25);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| 5\.00 ms \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE decode, vocab 1k \| missing \| 6\.25 ms \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| 4\.0 MiB \| n\/a/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment compares BBPE codec reports when both sides are present', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.1);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| 4\.40 ms \| \+10\.0%/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment marks BBPE codec deltas changed when workloads differ', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.1);
+    for (const [side, requestedChunks] of [['baseline', 8], ['candidate', 16]]) {
+      const reportPath = path.join(root, side, 'codec-unicode-bbpe.json');
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+      report.config = { requested_chunks: requestedChunks };
+      fs.writeFileSync(reportPath, JSON.stringify(report));
+    }
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| 4\.40 ms \| changed/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment treats a base-only BBPE codec report as a regression', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| missing \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Optional benchmark regression: `candidate\/codec-unicode-bbpe\.json` is absent/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders an invalid optional BBPE codec report as unavailable', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    fs.writeFileSync(
+      path.join(root, 'candidate', 'codec-unicode-bbpe.json'),
+      '{invalid',
+    );
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| unavailable \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Missing or invalid reports: `candidate\/codec-unicode-bbpe\.json`/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders a failed optional BBPE codec report without a delta', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.25, false);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| failed \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.0 MiB \| failed \| n\/a/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders missing for a candidate-only trainer row', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1, {
+      extraTrainerSamples: [trainerSample(
+        'smoke_zh_unicode_bbpe_r90_v1000',
+        'exact',
+        3_000_000,
+        undefined,
+        {
+          bbpe_fallback: true,
+          primary_vocab_ratio: 0.9,
+          target_vocab_size: 1000,
+          unit: 'unicode',
+        },
+      )],
+    });
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(
+      comment,
+      /Trainer — Chinese Unicode BBPE, vocab 1k \(exact\) \| missing \| 3\.00 ms \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Trainer — Chinese Unicode BBPE, vocab 1k \(exact\) \| missing \| n\/a \| n\/a/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment marks trainer deltas changed when workloads differ', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1, {
+      trainerCaseOverrides: { target_vocab_size: 1000 },
+    });
+    populateReports(root, 'candidate', 1.1, {
+      trainerCaseOverrides: { target_vocab_size: 2000 },
+    });
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| 1\.10 ms \| changed/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders failed instead of missing for a false trainer gate', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1.1, { trainerGatesPassed: false });
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| failed \| n\/a/,
+    );
+    assert.doesNotMatch(comment, /Missing or invalid reports/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders failed instead of missing for a failed trainer sample', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    const failedSample = trainerSample(
+      'smoke_en_byte_v300',
+      'exact',
+      undefined,
+      undefined,
+    );
+    failedSample.status = 'failed';
+    failedSample.measurement = null;
+    failedSample.error = { phase: 'training', message: 'boom' };
+    populateReports(root, 'candidate', 1.1, {
+      extraTrainerSamples: [failedSample],
+    });
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| failed \| n\/a/,
+    );
+    assert.doesNotMatch(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| missing/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders unavailable for a missing trainer report', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1.1);
+    fs.rmSync(path.join(root, 'candidate', 'trainer.json'));
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'failure',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/2',
+    });
+    assert.match(
+      comment,
+      /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| unavailable \| n\/a/,
+    );
+    const trainerLines = comment
+      .split('\n')
+      .filter((line) => line.startsWith('| Trainer'));
+    assert.ok(trainerLines.length > 0);
+    assert.ok(trainerLines.every((line) => !line.includes('| missing |')));
+    assert.match(comment, /Missing or invalid reports: `candidate\/trainer\.json`/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

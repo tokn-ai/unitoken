@@ -19,8 +19,9 @@ find fixtures -maxdepth 1 -type f -exec sha256sum {} + >/dev/null
 
 cargo bench --bench regression --no-run
 
-# Both revisions consume the candidate config so a config-only PR still
-# compares identical work. Inputs remain relative to each checkout.
+# Each revision consumes its own config. The report renderer treats cases that
+# exist on only one side as missing, which lets benchmark coverage evolve
+# without requiring an older revision to understand a newer schema.
 cargo bench --bench regression -- suite \
   --config "$suite_config" \
   --output-dir "$output_dir"

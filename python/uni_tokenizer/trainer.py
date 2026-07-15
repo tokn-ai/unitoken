@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping, Sequence
 from os import PathLike
 from pathlib import Path
@@ -15,6 +16,10 @@ TieBreak = Literal["smallest_pair_id", "largest_content"]
 def _validate_unit(unit: str) -> None:
   if unit not in ("byte", "unicode"):
     raise ValueError(f"Unknown unit: {unit}")
+
+def _validate_primary_vocab_ratio(primary_vocab_ratio: float) -> None:
+  if not math.isfinite(primary_vocab_ratio) or not 0.0 <= primary_vocab_ratio <= 1.0:
+    raise ValueError("primary_vocab_ratio must be finite and between 0 and 1")
 
 def _resolve_format(unit: Unit, format: FileFormat | None) -> FileFormat:
   _validate_unit(unit)
@@ -35,12 +40,12 @@ class BpeTrainer:
   special_tokens:
     Sequence of tokens reserved in the vocabulary.
   unit:
-    Atomic BPE unit: `"byte"` or `"unicode"`.
+    Primary segmentation unit. Unicode models may include UTF-8 byte fallback merges.
   hot_pair_window_size:
     If set, retain occurrence postings for an exact top-K candidate window.
     Smaller values reduce memory but may require additional inventory scans.
   bigram_cutoff_freq:
-    Inclusive minimum frequency for pair merges performed by `train()`.
+    Inclusive minimum frequency for pair merges performed by automatic training.
     Manual `step()` calls ignore it, but model validation still enforces it.
   """
   def __init__(
@@ -93,7 +98,7 @@ class BpeTrainer:
 
   @property
   def unit(self) -> Unit:
-    """Atomic BPE unit used by this trainer."""
+    """Primary segmentation unit used by this trainer."""
     return self._unit
 
   @property
@@ -129,6 +134,32 @@ class BpeTrainer:
     next pair frequency is below `bigram_cutoff_freq`.
     """
     self._trainer.train_until(vocab_size)
+
+  def train_with_bbpe_fallback(
+    self,
+    vocab_size: int,
+    *,
+    primary_vocab_ratio: float = 0.9,
+  ) -> None:
+    """Train a Unicode model with a terminal byte-BPE fallback phase.
+
+    `primary_vocab_ratio` allocates a fraction of learned slots to the initial
+    Unicode phase. The mandatory 256-byte alphabet and special tokens are
+    excluded; unused fallback slots return to primary training. A fallback pass
+    must start before ordinary vocabulary growth and finalizes the trainer, so
+    create a new trainer for further training. A ratio of `1.0` delegates to
+    ordinary training and remains extendable; a target at or below the base
+    vocabulary is a no-op. The pair-frequency cutoff may leave the final
+    vocabulary below `vocab_size`.
+    """
+    if self._unit != "unicode":
+      raise ValueError('train_with_bbpe_fallback requires unit="unicode"')
+    _validate_primary_vocab_ratio(primary_vocab_ratio)
+    assert isinstance(self._trainer, BpeTrainer_Character_CharIdx)
+    self._trainer.train_until_with_bbpe_fallback(
+      vocab_size,
+      primary_vocab_ratio=primary_vocab_ratio,
+    )
 
   def step(self) -> int:
     """Perform one training step.

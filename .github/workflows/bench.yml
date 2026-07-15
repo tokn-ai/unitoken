@@ -50,7 +50,7 @@ jobs:
           bash candidate/.github/scripts/run-benchmark-suite.sh \
             "$GITHUB_WORKSPACE/baseline" \
             "$GITHUB_WORKSPACE/benchmark-results/baseline" \
-            "$GITHUB_WORKSPACE/candidate/benches/regression/config/smoke.yml"
+            "$GITHUB_WORKSPACE/baseline/benches/regression/config/smoke.yml"
 
       - name: Run PR benchmarks
         id: candidate
@@ -81,6 +81,19 @@ jobs:
               head_sha: $head_sha
             }' > benchmark-results/metadata.json
 
+      - name: Validate benchmark report contract
+        id: report_contract
+        if: always()
+        continue-on-error: true
+        run: |
+          validator=candidate/.github/scripts/validate-benchmark-reports.sh
+          if [[ -f baseline/.github/scripts/validate-benchmark-reports.sh ]]; then
+            validator=baseline/.github/scripts/validate-benchmark-reports.sh
+          fi
+          bash "$validator" \
+            "$GITHUB_WORKSPACE/benchmark-results/baseline" \
+            "$GITHUB_WORKSPACE/benchmark-results/candidate"
+
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -95,6 +108,8 @@ jobs:
         env:
           BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
           CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          REPORT_CONTRACT_OUTCOME: ${{ steps.report_contract.outcome }}
         run: |
           test "$BASELINE_OUTCOME" = success
           test "$CANDIDATE_OUTCOME" = success
+          test "$REPORT_CONTRACT_OUTCOME" = success

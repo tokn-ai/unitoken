@@ -14,7 +14,7 @@ class BpeModel:
 
   @property
   def unit(self) -> Unit:
-    """Atomic BPE unit used by this model."""
+    """Primary segmentation unit used by this model."""
     return cast(Unit, self._model.unit)
 
   @property

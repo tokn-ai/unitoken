@@ -16,7 +16,7 @@ class BpeEncoder:
   Parameters
   ----------
   unit:
-    Atomic BPE unit: `"byte"` or `"unicode"`.
+    Primary segmentation unit. Unicode models may include UTF-8 byte fallback merges.
   special_tokens:
     Optional list of special tokens. When provided, they are treated as indivisible tokens.
   merges / vocab:
@@ -79,7 +79,7 @@ class BpeEncoder:
       Optional model name used to derive default filenames:
       `merges.{name}[{unit}].txt` and `vocab.{name}[{unit}].json`.
     unit:
-      Atomic BPE unit (`"byte"` or `"unicode"`).
+      Primary segmentation unit (`"byte"` or `"unicode"`).
     format:
       Override the format used to decode the files (`"gpt2"` or `"unitoken"`).
       If omitted, defaults to `"gpt2"` for byte units and `"unitoken"` for Unicode units.

@@ -19,3 +19,11 @@ trainer:
       bigram_cutoff_freq: 3382
       expected_input_sha256: faa93faa96f8de7e1cdf970d03ef9346608b5a656f06ef421624799cad5aa0bf
       expected_model_sha256: c3ff7dfd40821071d7639f6828da663ce8ec1417ba4b5640849c0481242c9c82
+    - name: cmn_Hani_1GiB_unicode_bigram10k_unicode_bbpe_r90_v10000
+      words: out/data/fineweb2/cmn_Hani/fineweb2_cmn_Hani_1GiB.unicode_bigram_top10k_min16/_words.json
+      unit: unicode
+      target_vocab_size: 10000
+      bigram_cutoff_freq: 3382
+      bbpe_fallback: true
+      primary_vocab_ratio: 0.9
+      expected_input_sha256: faa93faa96f8de7e1cdf970d03ef9346608b5a656f06ef421624799cad5aa0bf

@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from uni_tokenizer import BpeEncoder, BpeModel, BpeTrainer, PreTokenizer
+from uni_tokenizer._lib import BpeTrainer_Character_CharIdx
 
 
 def test_pretokenizer_uses_pat_str_and_returns_words() -> None:
@@ -63,7 +64,7 @@ def test_encode_word_is_atomic_bpe_not_exact_vocab_lookup() -> None:
 
 
 def test_unicode_encoder_rejects_mixed_fallback_byte_vocab_token() -> None:
-  with pytest.raises(RuntimeError, match="only singleton fallback byte tokens are allowed"):
+  with pytest.raises(RuntimeError, match="canonical Unicode content"):
     BpeEncoder(
       unit="unicode",
       vocab={b"\x80": 0, b"a": 1, b"\x80a": 2},
@@ -71,13 +72,15 @@ def test_unicode_encoder_rejects_mixed_fallback_byte_vocab_token() -> None:
     )
 
 
-def test_unicode_encoder_rejects_fallback_byte_merge() -> None:
-  with pytest.raises(RuntimeError, match=r"Unicode merge 0 .* contains a fallback byte"):
-    BpeEncoder(
-      unit="unicode",
-      vocab={b"\xc3": 0, b"\xa9": 1, b"\xc3\xa9": 2},
-      merges=[(b"\xc3", b"\xa9")],
-    )
+def test_unicode_encoder_accepts_canonical_fallback_byte_merge() -> None:
+  encoder = BpeEncoder(
+    unit="unicode",
+    vocab={b"\xc3": 0, b"\xa9": 1, b"\xc3\xa9": 2},
+    merges=[(b"\xc3", b"\xa9")],
+  )
+
+  assert encoder.encode_word("é") == [2]
+  assert encoder.decode([2]) == "é"
 
 
 def test_trainer_exposes_unit_and_singular_vocab() -> None:
@@ -113,6 +116,150 @@ def test_hot_pair_window_rejects_zero() -> None:
 def test_unknown_unit_is_rejected() -> None:
   with pytest.raises(ValueError, match="Unknown unit"):
     BpeTrainer([], unit="characters")  # type: ignore[arg-type]
+
+
+def test_bbpe_fallback_requires_unicode_unit() -> None:
+  trainer = BpeTrainer([], unit="byte")
+
+  with pytest.raises(ValueError, match='bbpe_fallback requires unit="unicode"'):
+    trainer.train_with_bbpe_fallback(vocab_size=258)
+
+
+def test_bbpe_fallback_is_not_a_constructor_mode() -> None:
+  with pytest.raises(TypeError, match="unexpected keyword argument 'bbpe_fallback'"):
+    BpeTrainer([], unit="unicode", bbpe_fallback=True)  # type: ignore[call-arg]
+  with pytest.raises(TypeError, match="unexpected keyword argument 'bbpe_fallback'"):
+    BpeTrainer_Character_CharIdx([], bbpe_fallback=True)  # type: ignore[call-arg]
+  with pytest.raises(TypeError, match="unexpected keyword argument 'primary_vocab_ratio'"):
+    BpeTrainer_Character_CharIdx([], primary_vocab_ratio=0.5)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+  "primary_vocab_ratio",
+  [float("nan"), float("inf"), float("-inf"), -0.01, 1.01],
+)
+def test_primary_vocab_ratio_must_be_finite_and_bounded(
+  primary_vocab_ratio: float,
+) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+
+  with pytest.raises(ValueError, match="primary_vocab_ratio must be finite and between 0 and 1"):
+    trainer.train_with_bbpe_fallback(
+      vocab_size=258,
+      primary_vocab_ratio=primary_vocab_ratio,
+    )
+
+
+@pytest.mark.parametrize("primary_vocab_ratio", [0.0, 1.0])
+def test_primary_vocab_ratio_trains_at_inclusive_endpoints(
+  primary_vocab_ratio: float,
+) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"😀😁": 10})
+
+  trainer.train_with_bbpe_fallback(
+    vocab_size=258,
+    primary_vocab_ratio=primary_vocab_ratio,
+  )
+
+  assert trainer.vocab_size == 258
+  direct_scalars = {"😀".encode(), "😁".encode()}
+  if primary_vocab_ratio == 1.0:
+    assert direct_scalars <= trainer.vocab.keys()
+    trainer.train(vocab_size=259)
+    assert trainer.vocab_size == 259
+  else:
+    assert direct_scalars.isdisjoint(trainer.vocab)
+    assert b"\xf0\x9f\x98" in trainer.vocab
+
+
+def test_native_unicode_trainer_validates_primary_vocab_ratio() -> None:
+  trainer = BpeTrainer_Character_CharIdx([])
+
+  with pytest.raises(ValueError, match="primary_vocab_ratio must be finite and between 0 and 1"):
+    trainer.train_until_with_bbpe_fallback(258, primary_vocab_ratio=float("nan"))
+
+
+def test_unicode_manual_training_lifecycle_remains_ordinary() -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"你好": 10})
+  trainer.init_training()
+
+  assert trainer.step() == 257
+
+
+def test_bbpe_fallback_must_start_before_manual_training() -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"你好": 10})
+  trainer.init_training()
+  trainer.step()
+
+  with pytest.raises(RuntimeError, match="before ordinary vocabulary growth"):
+    trainer.train_with_bbpe_fallback(vocab_size=258)
+
+
+def test_unicode_bbpe_fallback_trains_saves_and_loads(tmp_path: Path) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({
+    "你好你好你好你好": 70,
+    "仔": 50,
+    "他": 50,
+    "仗": 50,
+    "付": 50,
+    "仙": 50,
+    "们": 50,
+  })
+
+  trainer.train_with_bbpe_fallback(vocab_size=262, primary_vocab_ratio=0.5)
+  with pytest.raises(RuntimeError, match="create a new trainer"):
+    trainer.train_with_bbpe_fallback(vocab_size=262, primary_vocab_ratio=0.5)
+  model = trainer.validate_model()
+
+  assert trainer.vocab_size == 262
+  assert len(model.vocab) == 262
+  assert b"\xe4\xbb" in model.vocab
+  assert "仔".encode() not in model.vocab
+
+  vocab_file = tmp_path / "vocab.json"
+  merges_file = tmp_path / "merges.txt"
+  model.save_files(vocab_file, merges_file, format="unitoken")
+  encoder = BpeEncoder.load(
+    unit="unicode",
+    format="unitoken",
+    vocab_file=vocab_file,
+    merges_file=merges_file,
+  )
+
+  direct = encoder.encode_word("你")
+  fallback = encoder.encode_word("仔")
+  assert len(direct) == 1
+  assert len(fallback) == 2
+  assert encoder.decode(direct) == "你"
+  assert encoder.decode(fallback) == "仔"
+
+
+def test_bbpe_ratio_excludes_special_tokens_from_learned_slots() -> None:
+  words = {
+    "你好你好你好你好": 70,
+    "仔": 50,
+    "他": 50,
+    "仗": 50,
+    "付": 50,
+    "仙": 50,
+    "们": 50,
+  }
+
+  def train(special_tokens: list[str], vocab_size: int) -> set[bytes]:
+    trainer = BpeTrainer(special_tokens, unit="unicode")
+    trainer.add_words(words)
+    trainer.train_with_bbpe_fallback(vocab_size=vocab_size, primary_vocab_ratio=0.5)
+    return set(trainer.vocab)
+
+  expected = train([], 262)
+  with_special = train(["<special>"], 263)
+  with_special.remove(b"<special>")
+
+  assert with_special == expected
 
 
 def test_gpt2_format_rejects_unicode_unit_without_creating_files(tmp_path: Path) -> None:

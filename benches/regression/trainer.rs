@@ -95,7 +95,7 @@ pub(crate) mod config {
     }
   }
 
-  #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+  #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
   pub struct CaseConfig {
     pub name: String,
     pub words_path: PathBuf,
@@ -107,6 +107,8 @@ pub(crate) mod config {
     pub special_tokens: Vec<String>,
     pub bucket_size: usize,
     pub bigram_cutoff_freq: Option<i64>,
+    pub bbpe_fallback: bool,
+    pub primary_vocab_ratio: f64,
     pub expected_input_sha256: Option<String>,
     pub expected_model_sha256: Option<String>,
     pub rayon_threads: usize,
@@ -128,6 +130,20 @@ pub(crate) mod config {
       }
       if self.bigram_cutoff_freq.is_some_and(|cutoff| cutoff <= 0) {
         return Err(format!("case {} has a non-positive bigram cutoff", self.name));
+      }
+      if self.bbpe_fallback && self.unit != Unit::Unicode {
+        return Err(format!(
+          "case {} enables bbpe_fallback for a non-Unicode unit",
+          self.name,
+        ));
+      }
+      if !self.primary_vocab_ratio.is_finite()
+        || !(0.0..=1.0).contains(&self.primary_vocab_ratio)
+      {
+        return Err(format!(
+          "case {} has primary_vocab_ratio outside the finite range [0, 1]",
+          self.name,
+        ));
       }
       validate_sha256(
         &self.name,
@@ -169,7 +185,7 @@ pub(crate) mod config {
     Ok(())
   }
 
-  #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+  #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
   pub struct CaseRequest {
     pub case: CaseConfig,
     pub variant: OccurrenceVariant,
@@ -237,6 +253,7 @@ pub(crate) mod report {
     pub build_trainer_ns: u64,
     pub init_training_ns: u64,
     pub training_steps_ns: u64,
+    pub train_until_ns: Option<u64>,
     pub validate_model_ns: u64,
     pub fingerprint_ns: u64,
     pub core_training_ns: u64,
@@ -689,8 +706,21 @@ mod runner {
   fn execute_case_inner(request: &CaseRequest) -> Result<CaseMeasurement, CaseError> {
     let inventory = load_inventory(request)?;
     match request.case.unit {
-      Unit::Byte => run_training::<u8, Idx>(request, inventory),
-      Unit::Unicode => run_training::<Character, CharIdx>(request, inventory),
+      Unit::Byte => run_training::<u8, Idx, _>(request, inventory, |_, _, _| {
+        Err(CaseError::new(
+          "train_until_with_bbpe_fallback",
+          "BBPE fallback requires a Unicode trainer",
+        ))
+      }),
+      Unit::Unicode => run_training::<Character, CharIdx, _>(
+        request,
+        inventory,
+        |trainer, target_vocab_size, primary_vocab_ratio| {
+          trainer
+            .train_until_with_bbpe_fallback(target_vocab_size, primary_vocab_ratio)
+            .map_err(|error| CaseError::from_error("train_until_with_bbpe_fallback", error))
+        },
+      ),
     }
   }
 
@@ -741,12 +771,17 @@ mod runner {
     })
   }
 
-  fn run_training<C, I>(request: &CaseRequest, inventory: LoadedInventory) -> Result<CaseMeasurement, CaseError>
+  fn run_training<C, I, F>(
+    request: &CaseRequest,
+    inventory: LoadedInventory,
+    train_until_with_bbpe_fallback: F,
+  ) -> Result<CaseMeasurement, CaseError>
   where
     C: CanStrToWord + CanToWord<u8> + CanonicalUnit + CharSplit + CharToIdx<I> + Clone + Ord + Send + Sync + 'static,
     I: CanonicalId + HasChar<C> + IdxLike,
     Word<C>: WordDebugExt,
     BpeTrainer<C, I>: CanTrain<C, I>,
+    F: FnOnce(&mut BpeTrainer<C, I>, usize, f64) -> Result<(), CaseError>,
   {
     let LoadedInventory {
       words,
@@ -779,41 +814,63 @@ mod runner {
     let sampled_peak_during_trainer_build_bytes = build_rss_sampler.map(rss::RssSampler::finish);
 
     let training_rss_sampler = rss::RssSampler::start();
-    let started = Instant::now();
-    trainer.init_training();
-    let init_training_ns = duration_ns(started.elapsed());
-    let current_after_init_training_bytes = rss::current_rss_bytes();
-    let peak_after_init_training_bytes = rss::process_peak_rss_bytes();
-    if let Some(sampler) = training_rss_sampler.as_ref() {
-      sampler.observe();
-    }
-
+    let init_training_ns;
+    let current_after_init_training_bytes;
+    let peak_after_init_training_bytes;
     let mut step_count = 0usize;
     let mut training_steps_ns = 0u64;
+    let mut train_until_ns = None;
     let mut step_buckets = Vec::new();
-    while trainer.vocab_size() < request.case.target_vocab_size {
-      let start_vocab_size = trainer.vocab_size();
+
+    if request.case.bbpe_fallback {
+      init_training_ns = 0;
+      current_after_init_training_bytes = None;
+      peak_after_init_training_bytes = None;
       let started = Instant::now();
-      let mut bucket_steps = 0usize;
-      while bucket_steps < request.case.bucket_size && trainer.vocab_size() < request.case.target_vocab_size {
-        trainer
-          .step()
-          .map_err(|error| CaseError::from_error("training_steps", error))?;
-        bucket_steps += 1;
-        step_count += 1;
-      }
-      let bucket_ns = duration_ns(started.elapsed());
-      training_steps_ns = training_steps_ns.saturating_add(bucket_ns);
-      step_buckets.push(StepBucket {
-        start_vocab_size,
-        end_vocab_size: trainer.vocab_size(),
-        step_count: bucket_steps,
-        duration_ns: bucket_ns,
-        current_rss_bytes: rss::current_rss_bytes(),
-        process_peak_rss_bytes: rss::process_peak_rss_bytes(),
-      });
+      train_until_with_bbpe_fallback(
+        &mut trainer,
+        request.case.target_vocab_size,
+        request.case.primary_vocab_ratio,
+      )?;
+      train_until_ns = Some(duration_ns(started.elapsed()));
+      step_count = trainer.vocab_size().saturating_sub(initial_vocab_size);
       if let Some(sampler) = training_rss_sampler.as_ref() {
         sampler.observe();
+      }
+    } else {
+      let started = Instant::now();
+      trainer.init_training();
+      init_training_ns = duration_ns(started.elapsed());
+      current_after_init_training_bytes = rss::current_rss_bytes();
+      peak_after_init_training_bytes = rss::process_peak_rss_bytes();
+      if let Some(sampler) = training_rss_sampler.as_ref() {
+        sampler.observe();
+      }
+
+      while trainer.vocab_size() < request.case.target_vocab_size {
+        let start_vocab_size = trainer.vocab_size();
+        let started = Instant::now();
+        let mut bucket_steps = 0usize;
+        while bucket_steps < request.case.bucket_size && trainer.vocab_size() < request.case.target_vocab_size {
+          trainer
+            .step()
+            .map_err(|error| CaseError::from_error("training_steps", error))?;
+          bucket_steps += 1;
+          step_count += 1;
+        }
+        let bucket_ns = duration_ns(started.elapsed());
+        training_steps_ns = training_steps_ns.saturating_add(bucket_ns);
+        step_buckets.push(StepBucket {
+          start_vocab_size,
+          end_vocab_size: trainer.vocab_size(),
+          step_count: bucket_steps,
+          duration_ns: bucket_ns,
+          current_rss_bytes: rss::current_rss_bytes(),
+          process_peak_rss_bytes: rss::process_peak_rss_bytes(),
+        });
+        if let Some(sampler) = training_rss_sampler.as_ref() {
+          sampler.observe();
+        }
       }
     }
 
@@ -865,7 +922,8 @@ mod runner {
       .map(|cutoff| last_merge_freq.is_none_or(|frequency| frequency >= cutoff));
     let core_training_ns = build_trainer_ns
       .saturating_add(init_training_ns)
-      .saturating_add(training_steps_ns);
+      .saturating_add(training_steps_ns)
+      .saturating_add(train_until_ns.unwrap_or(0));
 
     Ok(CaseMeasurement {
       input,
@@ -877,6 +935,7 @@ mod runner {
         build_trainer_ns,
         init_training_ns,
         training_steps_ns,
+        train_until_ns,
         validate_model_ns,
         fingerprint_ns,
         core_training_ns,
@@ -958,6 +1017,12 @@ pub struct Args {
   /// Require the final pair merge frequency to be at least this value.
   #[arg(long)]
   bigram_cutoff_freq: Option<i64>,
+  /// Train omitted Unicode scalars with the byte-BPE fallback phase.
+  #[arg(long)]
+  bbpe_fallback: bool,
+  /// Share of learned vocabulary slots assigned to initial primary training.
+  #[arg(long, default_value_t = 0.9)]
+  primary_vocab_ratio: f64,
   /// Optional golden semantic model hash. Requires one vocabulary checkpoint.
   #[arg(long)]
   expected_model_sha256: Option<String>,
@@ -1010,6 +1075,8 @@ pub fn run(args: Args) -> Result<(), String> {
       special_tokens: special_tokens.clone(),
       bucket_size: args.suite.bucket_size,
       bigram_cutoff_freq: args.bigram_cutoff_freq,
+      bbpe_fallback: args.bbpe_fallback,
+      primary_vocab_ratio: args.primary_vocab_ratio,
       expected_input_sha256: args.expected_input_sha256.clone(),
       expected_model_sha256: args.expected_model_sha256.clone(),
       rayon_threads,
@@ -1173,4 +1240,93 @@ fn print_summary(path: &Path, report: &SuiteReport) {
     }
   }
   println!("correctness gates passed: {}", report.gates.passed);
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+  use std::path::PathBuf;
+
+  use super::{
+    config::{CaseConfig, CaseRequest, InitialAlphabetName, OccurrenceVariant, TieBreakName},
+    report::{CaseMeasurement, CaseOutcome},
+  };
+  use crate::common::{config::Unit, report::RunStatus};
+
+  fn bbpe_request(words_path: PathBuf, variant: OccurrenceVariant) -> CaseRequest {
+    CaseRequest {
+      case: CaseConfig {
+        name: "bbpe_runner".to_string(),
+        words_path,
+        unit: Unit::Unicode,
+        initial_alphabet: InitialAlphabetName::RawBytes,
+        tie_break: TieBreakName::SmallestPairId,
+        parallel_merge_min_occurs_in: None,
+        target_vocab_size: 262,
+        special_tokens: Vec::new(),
+        bucket_size: 2,
+        bigram_cutoff_freq: None,
+        bbpe_fallback: true,
+        primary_vocab_ratio: 0.5,
+        expected_input_sha256: None,
+        expected_model_sha256: None,
+        rayon_threads: 1,
+      },
+      variant,
+      sample_index: 0,
+    }
+  }
+
+  fn completed_measurement(outcome: &CaseOutcome) -> &CaseMeasurement {
+    assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+    outcome.measurement.as_ref().unwrap()
+  }
+
+  #[test]
+  fn bbpe_fallback_runner_matches_exact_and_bounded() {
+    use std::{collections::BTreeMap, fs};
+
+    use super::runner;
+
+    let path = std::env::temp_dir().join(format!(
+      "unitoken-bbpe-regression-runner-{}.json",
+      std::process::id(),
+    ));
+    let words = BTreeMap::from([
+      ("你好你好你好你好", 70),
+      ("仔", 50),
+      ("他", 50),
+      ("仗", 50),
+      ("付", 50),
+      ("仙", 50),
+      ("们", 50),
+    ]);
+    fs::write(&path, serde_json::to_vec(&words).unwrap()).unwrap();
+
+    let exact = runner::execute_case(bbpe_request(
+      path.clone(),
+      OccurrenceVariant::exact(),
+    ));
+    let bounded = runner::execute_case(bbpe_request(
+      path.clone(),
+      OccurrenceVariant::bounded(2),
+    ));
+    fs::remove_file(path).unwrap();
+
+    let exact = completed_measurement(&exact);
+    let bounded = completed_measurement(&bounded);
+    assert_eq!(exact.fingerprints, bounded.fingerprints);
+    assert_eq!(exact.counts, bounded.counts);
+    for measurement in [exact, bounded] {
+      assert_eq!(measurement.counts.initial_vocab_size, 256);
+      assert_eq!(measurement.counts.final_vocab_size, 262);
+      assert_eq!(measurement.counts.step_count, 6);
+      assert_eq!(measurement.timing.init_training_ns, 0);
+      assert_eq!(measurement.timing.training_steps_ns, 0);
+      assert!(measurement.timing.train_until_ns.is_some());
+      assert!(measurement.step_buckets.is_empty());
+      assert_eq!(measurement.memory.current_after_init_training_bytes, None);
+      assert_eq!(measurement.memory.peak_after_init_training_bytes, None);
+    }
+  }
 }

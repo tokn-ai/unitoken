@@ -105,6 +105,10 @@ struct TrainerConfig {
   tie_break: TieBreakName,
   parallel_merge_min_occurs_in: Option<usize>,
   bigram_cutoff_freq: Option<i64>,
+  #[serde(default)]
+  bbpe_fallback: bool,
+  #[serde(default = "default_primary_vocab_ratio")]
+  primary_vocab_ratio: f64,
   special_tokens: Option<Vec<String>>,
   expected_input_sha256: Option<String>,
   expected_model_sha256: Option<String>,
@@ -343,6 +347,8 @@ fn build_trainer_cases(
       special_tokens: case.special_tokens.clone().unwrap_or_else(|| defaults.special_tokens()),
       bucket_size: options.bucket_size,
       bigram_cutoff_freq: case.bigram_cutoff_freq,
+      bbpe_fallback: case.bbpe_fallback,
+      primary_vocab_ratio: case.primary_vocab_ratio,
       expected_input_sha256: case.expected_input_sha256.clone(),
       expected_model_sha256: case.expected_model_sha256.clone(),
       rayon_threads,
@@ -582,6 +588,10 @@ fn default_tie_break() -> TieBreakName {
   TieBreakName::SmallestPairId
 }
 
+fn default_primary_vocab_ratio() -> f64 {
+  0.9
+}
+
 fn default_chunk_size() -> u64 {
   pretokenizer::DEFAULT_CHUNK_SIZE
 }
@@ -684,6 +694,18 @@ mod tests {
     assert!(error.contains("contains an empty special token"));
 
     let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
+    config.trainer.as_mut().unwrap().cases[0].bbpe_fallback = true;
+
+    let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
+    assert!(error.contains("non-Unicode unit"));
+
+    let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
+    config.trainer.as_mut().unwrap().cases[2].primary_vocab_ratio = f64::NAN;
+
+    let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
+    assert!(error.contains("finite range [0, 1]"));
+
+    let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
     config.pretokenizer[0]
       .unicode_bigrams
       .as_mut()
@@ -778,11 +800,43 @@ mod tests {
 
     assert_eq!(trainer.output, Path::new("trainer.json"));
     assert_eq!(config.pretokenizer[0].output, Path::new("pretokenizer.json"));
+    assert_eq!(config.codec.len(), 3);
     assert_eq!(config.codec[0].output, Path::new("codec-byte.json"));
     assert_eq!(config.codec[1].output, Path::new("codec-unicode.json"));
     assert!(config.codec[0].split_on_vocab_bigrams);
     assert!(config.codec[1].split_on_vocab_bigrams);
     assert!(config.codec[1].unicode_bigrams.is_none());
+
+    let bbpe_codec = &config.codec[2];
+    assert_eq!(bbpe_codec.name, "ci_zh_bbpe_codec");
+    assert_eq!(bbpe_codec.output, Path::new("codec-unicode-bbpe.json"));
+    assert!(bbpe_codec.split_on_vocab_bigrams);
+    assert!(bbpe_codec.unicode_bigrams.is_none());
+    assert_eq!(
+      bbpe_codec.vocab,
+      Path::new("fixtures/vocab.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.json"),
+    );
+    assert_eq!(
+      bbpe_codec.merges,
+      Path::new("fixtures/merges.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.txt"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_input_sha256.as_deref(),
+      Some("c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_vocab_sha256.as_deref(),
+      Some("b6a08163475d8164460309cef310a81fe344ceff1cc534b6ab9953d2a086024f"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_merges_sha256.as_deref(),
+      Some("34ce25301c12d85beb0fca43d4381c1ddfa7e465a883fab090e9d42b671ffdce"),
+    );
+    assert_eq!(bbpe_codec.expected_token_count, Some(1_643_864));
+    assert_eq!(
+      bbpe_codec.expected_token_sha256.as_deref(),
+      Some("6fdc974538362ae0f26af15fa10a0a94eaf75751e9ad0f9f2f6e7b8edcb1874a"),
+    );
     assert_eq!(
       trainer
         .cases
@@ -794,6 +848,7 @@ mod tests {
         "smoke_en_byte_v1000",
         "smoke_zh_unicode_v300",
         "smoke_zh_unicode_v1000",
+        "smoke_zh_unicode_bbpe_r90_v1000",
       ],
     );
 
@@ -812,6 +867,7 @@ mod tests {
         300,
         "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
         "fa65e898d4cec1be5b78732ec4738b20213856a2de73bba5ca34366d347e91c0",
+        false,
       ),
       (
         "smoke_en_byte_v1000",
@@ -819,6 +875,7 @@ mod tests {
         1000,
         "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
         "197a9f7d6ec3630370b1a30e0392b0f2fbcd2de1d36ee4d05884f01f2a877be9",
+        false,
       ),
       (
         "smoke_zh_unicode_v300",
@@ -826,6 +883,7 @@ mod tests {
         300,
         "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
         "b3f2e74a4b169244774d71cd289d246847d4a56e585411436c1e4c44219e7b3a",
+        false,
       ),
       (
         "smoke_zh_unicode_v1000",
@@ -833,6 +891,15 @@ mod tests {
         1000,
         "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
         "34dcb3aeb65c2220f50158d594defb73f1d5649b296c0020220266ba70f1d9e1",
+        false,
+      ),
+      (
+        "smoke_zh_unicode_bbpe_r90_v1000",
+        Unit::Unicode,
+        1000,
+        "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
+        "7f6216c40793da7bf8e98dab3ffa90a15c8a233af990674b5ac7b3c861417639",
+        true,
       ),
     ];
     for (case, expected) in cases.iter().zip(expected) {
@@ -847,6 +914,8 @@ mod tests {
       assert_eq!(case.special_tokens, [DEFAULT_EOT]);
       assert_eq!(case.bucket_size, 701);
       assert_eq!(case.bigram_cutoff_freq, None);
+      assert_eq!(case.bbpe_fallback, expected.5);
+      assert_eq!(case.primary_vocab_ratio, 0.9);
       assert_eq!(case.rayon_threads, 3);
     }
   }
