@@ -105,6 +105,10 @@ struct TrainerConfig {
   tie_break: TieBreakName,
   parallel_merge_min_occurs_in: Option<usize>,
   bigram_cutoff_freq: Option<i64>,
+  #[serde(default)]
+  bbpe_fallback: bool,
+  #[serde(default = "default_primary_vocab_ratio")]
+  primary_vocab_ratio: f64,
   special_tokens: Option<Vec<String>>,
   expected_input_sha256: Option<String>,
   expected_model_sha256: Option<String>,
@@ -343,6 +347,8 @@ fn build_trainer_cases(
       special_tokens: case.special_tokens.clone().unwrap_or_else(|| defaults.special_tokens()),
       bucket_size: options.bucket_size,
       bigram_cutoff_freq: case.bigram_cutoff_freq,
+      bbpe_fallback: case.bbpe_fallback,
+      primary_vocab_ratio: case.primary_vocab_ratio,
       expected_input_sha256: case.expected_input_sha256.clone(),
       expected_model_sha256: case.expected_model_sha256.clone(),
       rayon_threads,
@@ -582,6 +588,10 @@ fn default_tie_break() -> TieBreakName {
   TieBreakName::SmallestPairId
 }
 
+fn default_primary_vocab_ratio() -> f64 {
+  0.9
+}
+
 fn default_chunk_size() -> u64 {
   pretokenizer::DEFAULT_CHUNK_SIZE
 }
@@ -682,6 +692,18 @@ mod tests {
 
     let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
     assert!(error.contains("contains an empty special token"));
+
+    let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
+    config.trainer.as_mut().unwrap().cases[0].bbpe_fallback = true;
+
+    let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
+    assert!(error.contains("non-Unicode unit"));
+
+    let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
+    config.trainer.as_mut().unwrap().cases[2].primary_vocab_ratio = f64::NAN;
+
+    let error = validate_config(&config, &config_path, Path::new("out"), &manifest_dir).unwrap_err();
+    assert!(error.contains("finite range [0, 1]"));
 
     let (_, mut config) = load_named_config("smoke", &manifest_dir).unwrap();
     config.pretokenizer[0]
@@ -847,6 +869,8 @@ mod tests {
       assert_eq!(case.special_tokens, [DEFAULT_EOT]);
       assert_eq!(case.bucket_size, 701);
       assert_eq!(case.bigram_cutoff_freq, None);
+      assert!(!case.bbpe_fallback);
+      assert_eq!(case.primary_vocab_ratio, 0.9);
       assert_eq!(case.rayon_threads, 3);
     }
   }

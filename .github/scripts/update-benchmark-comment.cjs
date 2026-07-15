@@ -3,6 +3,13 @@ const path = require('node:path');
 
 const MARKER = '<!-- unitoken-benchmark-report -->';
 const MAX_REPORT_BYTES = 2 * 1024 * 1024;
+const TRAINER_LABELS = new Map([
+  ['smoke_en_byte_v300', 'English byte, vocab 300'],
+  ['smoke_en_byte_v1000', 'English byte, vocab 1k'],
+  ['smoke_zh_unicode_v300', 'Chinese Unicode, vocab 300'],
+  ['smoke_zh_unicode_v1000', 'Chinese Unicode, vocab 1k'],
+  ['smoke_zh_unicode_bbpe_r90_v1000', 'Chinese Unicode BBPE, vocab 1k'],
+]);
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -35,7 +42,7 @@ function readReport(resultsDir, relativePath, contract, errors) {
       || report.schema_version !== 1
       || report.contract !== contract
       || !isRecord(report.gates)
-      || report.gates.passed !== true
+      || typeof report.gates.passed !== 'boolean'
       || !Array.isArray(report.samples)
     ) {
       throw new Error('invalid report contract');
@@ -67,40 +74,134 @@ function readMetadata(resultsDir) {
   return metadata;
 }
 
-function trainerValues(report) {
-  const values = new Map();
-  if (!report) {
-    return values;
+function variantLabel(variant) {
+  if (variant?.occurrence_mode === 'exact') {
+    return 'exact';
   }
-  const cases = [
-    'smoke_en_byte_v300',
-    'smoke_en_byte_v1000',
-    'smoke_zh_unicode_v300',
-    'smoke_zh_unicode_v1000',
-  ];
-  for (const caseName of cases) {
-    for (const variant of ['exact', 'k4096']) {
-      const matching = report.samples.filter((sample) => {
-        const request = sample?.request;
-        const occurrence = request?.variant?.occurrence_mode;
-        const label = occurrence === 'exact'
-          ? 'exact'
-          : occurrence === 'bounded' && request?.variant?.hot_pair_window_size === 4096
-            ? 'k4096'
-            : null;
-        return request?.case?.name === caseName && label === variant;
+  if (
+    variant?.occurrence_mode === 'bounded'
+    && Number.isSafeInteger(variant.hot_pair_window_size)
+    && variant.hot_pair_window_size > 0
+  ) {
+    return `k${variant.hot_pair_window_size}`;
+  }
+  return null;
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableValue);
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, stableValue(value[key])]),
+  );
+}
+
+function trainerWorkload(sample) {
+  const requestCase = isRecord(sample?.request?.case) ? sample.request.case : {};
+  const expectedInputSha256 = requestCase.expected_input_sha256;
+  const normalizedCase = {
+    ...requestCase,
+    bbpe_fallback: requestCase.bbpe_fallback ?? false,
+    primary_vocab_ratio: requestCase.primary_vocab_ratio ?? 0.9,
+  };
+
+  // Checkout-local paths differ between the base and candidate worktrees. The
+  // expected and measured input fingerprints identify the corpus instead.
+  delete normalizedCase.words_path;
+  // Golden inputs and outputs are assertions about the work, not its settings.
+  delete normalizedCase.expected_input_sha256;
+  delete normalizedCase.expected_model_sha256;
+
+  return JSON.stringify(stableValue({
+    case: normalizedCase,
+    variant: sample?.request?.variant,
+    input_sha256: sample?.measurement?.input?.sha256
+      ?? expectedInputSha256
+      ?? null,
+  }));
+}
+
+function trainerRows(report) {
+  const rows = new Map();
+  for (const sample of report?.samples ?? []) {
+    const caseName = sample?.request?.case?.name;
+    const variant = variantLabel(sample?.request?.variant);
+    if (typeof caseName !== 'string' || caseName.length === 0 || variant === null) {
+      continue;
+    }
+    const key = JSON.stringify([caseName, variant]);
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        caseName,
+        variant,
+        times: [],
+        rssValues: [],
+        workloads: new Set(),
+        failed: report.gates.passed === false,
+      };
+      rows.set(key, row);
+    }
+    row.failed ||= sample?.status === 'failed' || sample?.error != null;
+    row.times.push(sample?.measurement?.timing?.core_training_ns);
+    row.rssValues.push(
+      sample?.measurement?.memory?.process_peak_rss_through_training_bytes,
+    );
+    row.workloads.add(trainerWorkload(sample));
+  }
+  for (const row of rows.values()) {
+    row.time = average(row.times);
+    row.rss = average(row.rssValues);
+  }
+  return rows;
+}
+
+function unionTrainerRows(
+  baseline,
+  candidate,
+  baselineAvailable,
+  candidateAvailable,
+) {
+  const rows = new Map();
+  for (const [key, row] of baseline) {
+    rows.set(key, {
+      caseName: row.caseName,
+      variant: row.variant,
+      baseline: row,
+      candidate: null,
+      baselineAvailable,
+      candidateAvailable,
+    });
+  }
+  for (const [key, row] of candidate) {
+    const existing = rows.get(key);
+    if (existing) {
+      existing.candidate = row;
+    } else {
+      rows.set(key, {
+        caseName: row.caseName,
+        variant: row.variant,
+        baseline: null,
+        candidate: row,
+        baselineAvailable,
+        candidateAvailable,
       });
-      values.set(`${caseName}:${variant}:time`, average(
-        matching.map((sample) => sample?.measurement?.timing?.core_training_ns),
-      ));
-      values.set(`${caseName}:${variant}:rss`, average(
-        matching.map(
-          (sample) => sample?.measurement?.memory?.process_peak_rss_through_training_bytes,
-        ),
-      ));
     }
   }
-  return values;
+  return [...rows.values()];
+}
+
+function sameWorkloads(baseline, candidate) {
+  if (baseline.workloads.size !== candidate.workloads.size) {
+    return false;
+  }
+  return [...baseline.workloads].every((workload) => candidate.workloads.has(workload));
 }
 
 function pretokenizerValues(report) {
@@ -165,6 +266,46 @@ function tableRow(label, baseline, candidate, formatter) {
   return `| ${label} | ${formatter(baseline)} | ${formatter(candidate)} | ${formatDelta(baseline, candidate)} |`;
 }
 
+function escapeTableCell(value) {
+  return value.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
+}
+
+function trainerCellValue(row, reportAvailable, metric, formatter) {
+  if (!reportAvailable) {
+    return 'unavailable';
+  }
+  if (!row) {
+    return 'missing';
+  }
+  return row.failed ? 'failed' : formatter(row[metric]);
+}
+
+function trainerTableRow(row, metric, formatter) {
+  const baseline = row.baseline;
+  const candidate = row.candidate;
+  const baselineValue = trainerCellValue(
+    baseline,
+    row.baselineAvailable,
+    metric,
+    formatter,
+  );
+  const candidateValue = trainerCellValue(
+    candidate,
+    row.candidateAvailable,
+    metric,
+    formatter,
+  );
+  let delta = 'n/a';
+  if (baseline && candidate && !baseline.failed && !candidate.failed) {
+    delta = sameWorkloads(baseline, candidate)
+      ? formatDelta(baseline[metric], candidate[metric])
+      : 'changed';
+  }
+  const caseLabel = TRAINER_LABELS.get(row.caseName) ?? row.caseName;
+  const label = escapeTableCell(`Trainer — ${caseLabel} (${row.variant})`);
+  return `| ${label} | ${baselineValue} | ${candidateValue} | ${delta} |`;
+}
+
 function reportSet(resultsDir, side, errors) {
   const prefix = `${side}/`;
   return {
@@ -199,9 +340,19 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
   const errors = [];
   const baseline = reportSet(resultsDir, 'baseline', errors);
   const candidate = reportSet(resultsDir, 'candidate', errors);
-  const passed = conclusion === 'success' && errors.length === 0;
-  const baseTrainer = trainerValues(baseline.trainer);
-  const headTrainer = trainerValues(candidate.trainer);
+  const trainerRowsToRender = unionTrainerRows(
+    trainerRows(baseline.trainer),
+    trainerRows(candidate.trainer),
+    baseline.trainer !== null,
+    candidate.trainer !== null,
+  );
+  const reports = [...Object.values(baseline), ...Object.values(candidate)];
+  const passed = conclusion === 'success'
+    && errors.length === 0
+    && reports.every((report) => report?.gates?.passed === true)
+    && trainerRowsToRender.every(
+      (row) => !row.baseline?.failed && !row.candidate?.failed,
+    );
   const basePretokenizer = pretokenizerValues(baseline.pretokenizer);
   const headPretokenizer = pretokenizerValues(candidate.pretokenizer);
   const baseByteCodec = codecValues(baseline.byteCodec);
@@ -218,26 +369,14 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
     '',
     `Compared \`${baseSha.slice(0, 7)}\` → \`${headSha.slice(0, 7)}\` sequentially on the same runner. Timing deltas are informational.`,
     '',
+    'Trainer cells marked `missing` are absent while both reports are available; `unavailable` means the report is missing or invalid; `failed` means that revision failed its trainer report or case; `changed` means the workloads are not comparable.',
+    '',
     '| Benchmark | Base | PR | Δ |',
     '| --- | ---: | ---: | ---: |',
   ];
 
-  const trainerCases = [
-    ['English byte, vocab 300', 'smoke_en_byte_v300'],
-    ['English byte, vocab 1k', 'smoke_en_byte_v1000'],
-    ['Chinese Unicode, vocab 300', 'smoke_zh_unicode_v300'],
-    ['Chinese Unicode, vocab 1k', 'smoke_zh_unicode_v1000'],
-  ];
-  for (const [label, caseName] of trainerCases) {
-    for (const variant of ['exact', 'k4096']) {
-      const key = `${caseName}:${variant}:time`;
-      lines.push(tableRow(
-        `Trainer — ${label} (${variant})`,
-        baseTrainer.get(key) ?? null,
-        headTrainer.get(key) ?? null,
-        formatMilliseconds,
-      ));
-    }
+  for (const row of trainerRowsToRender) {
+    lines.push(trainerTableRow(row, 'time', formatMilliseconds));
   }
   for (const [label, key] of [
     ['Pretokenizer — bigram pass', 'bigram'],
@@ -268,16 +407,8 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
   lines.push('', '<details>', '<summary>Peak RSS</summary>', '');
   lines.push('| Benchmark | Base | PR | Δ |');
   lines.push('| --- | ---: | ---: | ---: |');
-  for (const [label, caseName] of trainerCases) {
-    for (const variant of ['exact', 'k4096']) {
-      const key = `${caseName}:${variant}:rss`;
-      lines.push(tableRow(
-        `Trainer — ${label} (${variant})`,
-        baseTrainer.get(key) ?? null,
-        headTrainer.get(key) ?? null,
-        formatMebibytes,
-      ));
-    }
+  for (const row of trainerRowsToRender) {
+    lines.push(trainerTableRow(row, 'rss', formatMebibytes));
   }
   lines.push(tableRow(
     'Pretokenizer',
