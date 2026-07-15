@@ -58,6 +58,8 @@ for revision in baseline candidate; do
     unitoken_codec_regression_v1 || status=1
   validate_report "$revision" "$output_dir" codec-unicode.json \
     unitoken_codec_regression_v1 || status=1
+  validate_report "$revision" "$output_dir" codec-unicode-bbpe.json \
+    unitoken_codec_regression_v1 || status=1
 done
 
 exit "$status"

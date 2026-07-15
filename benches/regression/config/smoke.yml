@@ -87,3 +87,16 @@ codec:
     expected_merges_sha256: 2c347f27fb94b61afddfb82a0d910c1142d4076f8d74175c30aa77d9b2c24297
     expected_token_count: 886572
     expected_token_sha256: 532a8595665ca19acc8e74b423258c09314d22316730498dd41348d860381180
+  - name: ci_zh_bbpe_codec
+    text: fixtures/TinyStories_all_data_zh_1M-sample.txt
+    vocab: fixtures/vocab.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.json
+    merges: fixtures/merges.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.txt
+    output: codec-unicode-bbpe.json
+    unit: unicode
+    format: unitoken
+    chunks: 8
+    expected_input_sha256: c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3
+    expected_vocab_sha256: b6a08163475d8164460309cef310a81fe344ceff1cc534b6ab9953d2a086024f
+    expected_merges_sha256: 34ce25301c12d85beb0fca43d4381c1ddfa7e465a883fab090e9d42b671ffdce
+    expected_token_count: 1643864
+    expected_token_sha256: 6fdc974538362ae0f26af15fa10a0a94eaf75751e9ad0f9f2f6e7b8edcb1874a

@@ -33,6 +33,7 @@ write_complete_report_set() {
   write_report "$output_dir" pretokenizer.json unitoken_pretokenizer_regression_v1
   write_report "$output_dir" codec-byte.json unitoken_codec_regression_v1
   write_report "$output_dir" codec-unicode.json unitoken_codec_regression_v1
+  write_report "$output_dir" codec-unicode-bbpe.json unitoken_codec_regression_v1
 }
 
 pad_report_to_size() {
@@ -79,6 +80,11 @@ mv "$candidate/trainer.json" "$candidate/trainer-renamed.json"
 expect_failure "candidate benchmark report is missing or not a regular file: trainer.json" \
   bash "$validator" "$baseline" "$candidate"
 mv "$candidate/trainer-renamed.json" "$candidate/trainer.json"
+
+mv "$candidate/codec-unicode-bbpe.json" "$candidate/codec-unicode-bbpe-renamed.json"
+expect_failure "candidate benchmark report is missing or not a regular file: codec-unicode-bbpe.json" \
+  bash "$validator" "$baseline" "$candidate"
+mv "$candidate/codec-unicode-bbpe-renamed.json" "$candidate/codec-unicode-bbpe.json"
 
 mv "$candidate/pretokenizer.json" "$candidate/pretokenizer-target.json"
 ln -s pretokenizer-target.json "$candidate/pretokenizer.json"

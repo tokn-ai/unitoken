@@ -29,7 +29,7 @@ function average(values) {
   return valid.reduce((sum, value) => sum + value, 0) / valid.length;
 }
 
-function readReport(resultsDir, relativePath, contract, errors) {
+function loadReport(resultsDir, relativePath, contract, errors, optional) {
   const reportPath = path.join(resultsDir, relativePath);
   try {
     const stat = fs.lstatSync(reportPath);
@@ -47,11 +47,22 @@ function readReport(resultsDir, relativePath, contract, errors) {
     ) {
       throw new Error('invalid report contract');
     }
-    return report;
-  } catch (_error) {
+    return { status: 'present', report };
+  } catch (error) {
+    if (optional && error?.code === 'ENOENT') {
+      return { status: 'absent', report: null };
+    }
     errors.push(relativePath);
-    return null;
+    return { status: 'invalid', report: null };
   }
+}
+
+function readReport(resultsDir, relativePath, contract, errors) {
+  return loadReport(resultsDir, relativePath, contract, errors, false).report;
+}
+
+function readOptionalReport(resultsDir, relativePath, contract, errors) {
+  return loadReport(resultsDir, relativePath, contract, errors, true);
 }
 
 function readMetadata(resultsDir) {
@@ -246,6 +257,22 @@ function codecValues(report) {
   return values;
 }
 
+function codecWorkload(report) {
+  const config = { ...(report?.config ?? {}) };
+  for (const key of Object.keys(config)) {
+    if (key === 'name' || key.endsWith('_path') || key.startsWith('expected_')) {
+      delete config[key];
+    }
+  }
+  const measurements = [...new Set(
+    (report?.samples ?? []).map((sample) => JSON.stringify(stableValue({
+      input: sample?.encode?.input ?? null,
+      model: sample?.encode?.model ?? null,
+    }))),
+  )].sort();
+  return JSON.stringify(stableValue({ config, measurements }));
+}
+
 function formatMilliseconds(value) {
   return value === null ? 'n/a' : `${(value / 1_000_000).toFixed(2)} ms`;
 }
@@ -306,6 +333,44 @@ function trainerTableRow(row, metric, formatter) {
   return `| ${label} | ${baselineValue} | ${candidateValue} | ${delta} |`;
 }
 
+function optionalReportCell(state, values, metric, formatter) {
+  if (state.status === 'invalid') {
+    return 'unavailable';
+  }
+  if (state.status === 'absent') {
+    return 'missing';
+  }
+  if (state.report.gates.passed !== true) {
+    return 'failed';
+  }
+  return formatter(values.get(metric) ?? null);
+}
+
+function optionalCodecTableRow(
+  label,
+  baseline,
+  candidate,
+  baselineValues,
+  candidateValues,
+  metric,
+  formatter,
+) {
+  const baselineValue = baselineValues.get(metric) ?? null;
+  const candidateValue = candidateValues.get(metric) ?? null;
+  let delta = 'n/a';
+  if (
+    baseline.status === 'present'
+    && baseline.report.gates.passed === true
+    && candidate.status === 'present'
+    && candidate.report.gates.passed === true
+  ) {
+    delta = codecWorkload(baseline.report) === codecWorkload(candidate.report)
+      ? formatDelta(baselineValue, candidateValue)
+      : 'changed';
+  }
+  return `| ${label} | ${optionalReportCell(baseline, baselineValues, metric, formatter)} | ${optionalReportCell(candidate, candidateValues, metric, formatter)} | ${delta} |`;
+}
+
 function reportSet(resultsDir, side, errors) {
   const prefix = `${side}/`;
   return {
@@ -333,6 +398,12 @@ function reportSet(resultsDir, side, errors) {
       'unitoken_codec_regression_v1',
       errors,
     ),
+    bbpeUnicodeCodec: readOptionalReport(
+      resultsDir,
+      `${prefix}codec-unicode-bbpe.json`,
+      'unitoken_codec_regression_v1',
+      errors,
+    ),
   };
 }
 
@@ -346,9 +417,23 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
     baseline.trainer !== null,
     candidate.trainer !== null,
   );
-  const reports = [...Object.values(baseline), ...Object.values(candidate)];
+  const reports = [
+    baseline.trainer,
+    baseline.pretokenizer,
+    baseline.byteCodec,
+    baseline.unicodeCodec,
+    baseline.bbpeUnicodeCodec.report,
+    candidate.trainer,
+    candidate.pretokenizer,
+    candidate.byteCodec,
+    candidate.unicodeCodec,
+    candidate.bbpeUnicodeCodec.report,
+  ].filter((report) => report !== null);
+  const bbpeCodecRegression = baseline.bbpeUnicodeCodec.status === 'present'
+    && candidate.bbpeUnicodeCodec.status === 'absent';
   const passed = conclusion === 'success'
     && errors.length === 0
+    && !bbpeCodecRegression
     && reports.every((report) => report?.gates?.passed === true)
     && trainerRowsToRender.every(
       (row) => !row.baseline?.failed && !row.candidate?.failed,
@@ -359,6 +444,10 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
   const headByteCodec = codecValues(candidate.byteCodec);
   const baseUnicodeCodec = codecValues(baseline.unicodeCodec);
   const headUnicodeCodec = codecValues(candidate.unicodeCodec);
+  const baseBbpeUnicodeCodec = codecValues(baseline.bbpeUnicodeCodec.report);
+  const headBbpeUnicodeCodec = codecValues(candidate.bbpeUnicodeCodec.report);
+  const renderBbpeUnicodeCodec = baseline.bbpeUnicodeCodec.status !== 'absent'
+    || candidate.bbpeUnicodeCodec.status !== 'absent';
   const lines = [
     MARKER,
     '## Benchmark report',
@@ -369,7 +458,7 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
     '',
     `Compared \`${baseSha.slice(0, 7)}\` → \`${headSha.slice(0, 7)}\` sequentially on the same runner. Timing deltas are informational.`,
     '',
-    'Trainer cells marked `missing` are absent while both reports are available; `unavailable` means the report is missing or invalid; `failed` means that revision failed its trainer report or case; `changed` means the workloads are not comparable.',
+    'Trainer and optional-codec cells marked `missing` are absent cases or reports; `unavailable` means a required report is missing or a report is invalid; `failed` means that revision failed its report or case; `changed` means the workloads are not comparable.',
     '',
     '| Benchmark | Base | PR | Δ |',
     '| --- | ---: | ---: | ---: |',
@@ -403,6 +492,22 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
       formatMilliseconds,
     ));
   }
+  if (renderBbpeUnicodeCodec) {
+    for (const [label, key] of [
+      ['Codec — Unicode BBPE encode, vocab 1k', 'encode'],
+      ['Codec — Unicode BBPE decode, vocab 1k', 'decode'],
+    ]) {
+      lines.push(optionalCodecTableRow(
+        label,
+        baseline.bbpeUnicodeCodec,
+        candidate.bbpeUnicodeCodec,
+        baseBbpeUnicodeCodec,
+        headBbpeUnicodeCodec,
+        key,
+        formatMilliseconds,
+      ));
+    }
+  }
 
   lines.push('', '<details>', '<summary>Peak RSS</summary>', '');
   lines.push('| Benchmark | Base | PR | Δ |');
@@ -429,7 +534,29 @@ function buildComment({ resultsDir, conclusion, baseSha, headSha, runUrl }) {
       formatMebibytes,
     ));
   }
+  if (renderBbpeUnicodeCodec) {
+    for (const [label, key] of [
+      ['Codec — Unicode BBPE encode, vocab 1k', 'encode_rss'],
+      ['Codec — Unicode BBPE decode, vocab 1k', 'decode_rss'],
+    ]) {
+      lines.push(optionalCodecTableRow(
+        label,
+        baseline.bbpeUnicodeCodec,
+        candidate.bbpeUnicodeCodec,
+        baseBbpeUnicodeCodec,
+        headBbpeUnicodeCodec,
+        key,
+        formatMebibytes,
+      ));
+    }
+  }
   lines.push('', '</details>', '');
+  if (bbpeCodecRegression) {
+    lines.push(
+      'Optional benchmark regression: `candidate/codec-unicode-bbpe.json` is absent while the base report is present.',
+      '',
+    );
+  }
   if (errors.length > 0) {
     lines.push(`Missing or invalid reports: ${errors.map((name) => `\`${name}\``).join(', ')}.`, '');
   }

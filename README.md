@@ -250,8 +250,9 @@ cargo bench --bench regression -- suite 64mib
 cargo bench --bench regression -- suite 1gib
 ```
 
-`smoke.yml` uses checked-in fixtures, includes a 90% primary Unicode BBPE case,
-and is the profile run for pull requests. Codec cases accept
+`smoke.yml` uses checked-in fixtures, includes a 90% primary Unicode BBPE
+trainer case plus a codec case for its pinned model, and is the profile run for
+pull requests. Codec cases accept
 `split_on_vocab_bigrams: false` for measured opt-out comparisons; reports and
 encoder fingerprints record the selected value. The `64mib.yml` and `1gib.yml`
 profiles compare ordinary and 90% primary BBPE training on the prepared

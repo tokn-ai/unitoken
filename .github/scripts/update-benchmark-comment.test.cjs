@@ -36,6 +36,19 @@ function trainerSample(caseName, occurrenceMode, time, rss, caseOverrides = {}) 
   };
 }
 
+function writeCodecReport(root, side, name, multiplier, gatesPassed = true) {
+  writeReport(root, side, name, 'unitoken_codec_regression_v1', [{
+    encode: {
+      timing: { encode_ns: 4_000_000 * multiplier },
+      memory: { process_peak_rss_through_phase_bytes: 4_194_304 },
+    },
+    decode: {
+      timing: { decode_ns: 5_000_000 * multiplier },
+      memory: { process_peak_rss_through_phase_bytes: 5_242_880 },
+    },
+  }], gatesPassed);
+}
+
 function populateReports(root, side, multiplier, options = {}) {
   const {
     extraTrainerSamples = [],
@@ -90,16 +103,7 @@ function populateReports(root, side, multiplier, options = {}) {
     }],
   );
   for (const name of ['codec-byte.json', 'codec-unicode.json']) {
-    writeReport(root, side, name, 'unitoken_codec_regression_v1', [{
-      encode: {
-        timing: { encode_ns: 4_000_000 * multiplier },
-        memory: { process_peak_rss_through_phase_bytes: 4_194_304 },
-      },
-      decode: {
-        timing: { decode_ns: 5_000_000 * multiplier },
-        memory: { process_peak_rss_through_phase_bytes: 5_242_880 },
-      },
-    }]);
+    writeCodecReport(root, side, name, multiplier);
   }
 }
 
@@ -137,6 +141,177 @@ test('buildComment renders a comparable trainer delta with legacy BBPE defaults'
       /Trainer — English byte, vocab 300 \(exact\) \| 1\.00 ms \| 1\.10 ms \| \+10\.0%/,
     );
     assert.match(comment, /Open benchmark run/);
+    assert.doesNotMatch(comment, /Codec — Unicode BBPE/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders a candidate-only BBPE codec report as missing in base', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.25);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| 5\.00 ms \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE decode, vocab 1k \| missing \| 6\.25 ms \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| 4\.0 MiB \| n\/a/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment compares BBPE codec reports when both sides are present', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.1);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| 4\.40 ms \| \+10\.0%/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment marks BBPE codec deltas changed when workloads differ', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.1);
+    for (const [side, requestedChunks] of [['baseline', 8], ['candidate', 16]]) {
+      const reportPath = path.join(root, side, 'codec-unicode-bbpe.json');
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+      report.config = { requested_chunks: requestedChunks };
+      fs.writeFileSync(reportPath, JSON.stringify(report));
+    }
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /All base and PR correctness gates passed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| 4\.40 ms \| changed/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment treats a base-only BBPE codec report as a regression', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| missing \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Optional benchmark regression: `candidate\/codec-unicode-bbpe\.json` is absent/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders an invalid optional BBPE codec report as unavailable', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    fs.writeFileSync(
+      path.join(root, 'candidate', 'codec-unicode-bbpe.json'),
+      '{invalid',
+    );
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| missing \| unavailable \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Missing or invalid reports: `candidate\/codec-unicode-bbpe\.json`/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildComment renders a failed optional BBPE codec report without a delta', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unitoken-benchmark-comment-'));
+  try {
+    populateReports(root, 'baseline', 1);
+    populateReports(root, 'candidate', 1);
+    writeCodecReport(root, 'baseline', 'codec-unicode-bbpe.json', 1);
+    writeCodecReport(root, 'candidate', 'codec-unicode-bbpe.json', 1.25, false);
+    const comment = buildComment({
+      resultsDir: root,
+      conclusion: 'success',
+      baseSha: '0123456789abcdef',
+      headSha: 'fedcba9876543210',
+      runUrl: 'https://example.test/actions/runs/1',
+    });
+    assert.match(comment, /benchmark run or at least one correctness gate failed/);
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.00 ms \| failed \| n\/a/,
+    );
+    assert.match(
+      comment,
+      /Codec — Unicode BBPE encode, vocab 1k \| 4\.0 MiB \| failed \| n\/a/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

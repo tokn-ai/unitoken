@@ -800,11 +800,43 @@ mod tests {
 
     assert_eq!(trainer.output, Path::new("trainer.json"));
     assert_eq!(config.pretokenizer[0].output, Path::new("pretokenizer.json"));
+    assert_eq!(config.codec.len(), 3);
     assert_eq!(config.codec[0].output, Path::new("codec-byte.json"));
     assert_eq!(config.codec[1].output, Path::new("codec-unicode.json"));
     assert!(config.codec[0].split_on_vocab_bigrams);
     assert!(config.codec[1].split_on_vocab_bigrams);
     assert!(config.codec[1].unicode_bigrams.is_none());
+
+    let bbpe_codec = &config.codec[2];
+    assert_eq!(bbpe_codec.name, "ci_zh_bbpe_codec");
+    assert_eq!(bbpe_codec.output, Path::new("codec-unicode-bbpe.json"));
+    assert!(bbpe_codec.split_on_vocab_bigrams);
+    assert!(bbpe_codec.unicode_bigrams.is_none());
+    assert_eq!(
+      bbpe_codec.vocab,
+      Path::new("fixtures/vocab.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.json"),
+    );
+    assert_eq!(
+      bbpe_codec.merges,
+      Path::new("fixtures/merges.TinyStories_all_data_zh_1M-sample.bbpe-r90-v1000.uni.txt"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_input_sha256.as_deref(),
+      Some("c298b1680c4378091ad9e39126ac0858d78e547f3744d1a30442c12adac8e9f3"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_vocab_sha256.as_deref(),
+      Some("b6a08163475d8164460309cef310a81fe344ceff1cc534b6ab9953d2a086024f"),
+    );
+    assert_eq!(
+      bbpe_codec.expected_merges_sha256.as_deref(),
+      Some("34ce25301c12d85beb0fca43d4381c1ddfa7e465a883fab090e9d42b671ffdce"),
+    );
+    assert_eq!(bbpe_codec.expected_token_count, Some(1_643_864));
+    assert_eq!(
+      bbpe_codec.expected_token_sha256.as_deref(),
+      Some("6fdc974538362ae0f26af15fa10a0a94eaf75751e9ad0f9f2f6e7b8edcb1874a"),
+    );
     assert_eq!(
       trainer
         .cases
