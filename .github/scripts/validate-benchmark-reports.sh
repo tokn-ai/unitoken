@@ -42,6 +42,19 @@ validate_report() {
   fi
 }
 
+validate_optional_report() {
+  local revision=$1
+  local output_dir=$2
+  local relative_path=$3
+  local expected_contract=$4
+  local report="$output_dir/$relative_path"
+
+  if [[ ! -e "$report" && ! -L "$report" ]]; then
+    return 0
+  fi
+  validate_report "$revision" "$output_dir" "$relative_path" "$expected_contract"
+}
+
 status=0
 for revision in baseline candidate; do
   if [[ "$revision" == baseline ]]; then
@@ -58,8 +71,11 @@ for revision in baseline candidate; do
     unitoken_codec_regression_v1 || status=1
   validate_report "$revision" "$output_dir" codec-unicode.json \
     unitoken_codec_regression_v1 || status=1
-  validate_report "$revision" "$output_dir" codec-unicode-bbpe.json \
-    unitoken_codec_regression_v1 || status=1
 done
+
+validate_optional_report baseline "$baseline_dir" codec-unicode-bbpe.json \
+  unitoken_codec_regression_v1 || status=1
+validate_report candidate "$candidate_dir" codec-unicode-bbpe.json \
+  unitoken_codec_regression_v1 || status=1
 
 exit "$status"

@@ -76,6 +76,14 @@ write_complete_report_set "$candidate"
 
 bash "$validator" "$baseline" "$candidate"
 
+mv "$baseline/codec-unicode-bbpe.json" "$baseline/codec-unicode-bbpe-renamed.json"
+bash "$validator" "$baseline" "$candidate"
+ln -s codec-unicode-bbpe-renamed.json "$baseline/codec-unicode-bbpe.json"
+expect_failure "baseline benchmark report is missing or not a regular file: codec-unicode-bbpe.json" \
+  bash "$validator" "$baseline" "$candidate"
+rm "$baseline/codec-unicode-bbpe.json"
+mv "$baseline/codec-unicode-bbpe-renamed.json" "$baseline/codec-unicode-bbpe.json"
+
 mv "$candidate/trainer.json" "$candidate/trainer-renamed.json"
 expect_failure "candidate benchmark report is missing or not a regular file: trainer.json" \
   bash "$validator" "$baseline" "$candidate"
