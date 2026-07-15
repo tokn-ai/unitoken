@@ -138,8 +138,6 @@ fn trainer_config(
   parallel_merge_min_occurs_in: Option<usize>,
   hot_pair_window_size: Option<usize>,
   bigram_cutoff_freq: Option<i64>,
-  bbpe_fallback: bool,
-  primary_vocab_ratio: f64,
 ) -> PyResult<BpeTrainerConfig> {
   let initial_alphabet = match initial_alphabet.unwrap_or("raw") {
     "raw" => InitialAlphabet::RawBytes,
@@ -161,20 +159,22 @@ fn trainer_config(
       "bigram_cutoff_freq must be positive",
     ));
   }
-  if !primary_vocab_ratio.is_finite() || !(0.0..=1.0).contains(&primary_vocab_ratio) {
-    return Err(pyo3::exceptions::PyValueError::new_err(
-      "primary_vocab_ratio must be finite and between 0 and 1",
-    ));
-  }
   Ok(BpeTrainerConfig {
     initial_alphabet,
     tie_break,
     parallel_merge_min_occurs_in,
     hot_pair_window_size,
     bigram_cutoff_freq,
-    bbpe_fallback,
-    primary_vocab_ratio,
   })
+}
+
+fn validate_primary_vocab_ratio(primary_vocab_ratio: f64) -> PyResult<()> {
+  if !primary_vocab_ratio.is_finite() || !(0.0..=1.0).contains(&primary_vocab_ratio) {
+    return Err(pyo3::exceptions::PyValueError::new_err(
+      "primary_vocab_ratio must be finite and between 0 and 1",
+    ));
+  }
+  Ok(())
 }
 
 fn chunk_options(chunk_size: u64, boundary: &str) -> PyResult<ChunkOptions> {
@@ -216,8 +216,6 @@ impl BpeTrainer_u8_Idx {
       parallel_merge_min_occurs_in,
       hot_pair_window_size,
       bigram_cutoff_freq,
-      false,
-      0.9,
     )?;
     Ok((
       Self {
@@ -318,7 +316,7 @@ impl BpeTrainer_Character_CharIdx {
   /// Create a new BPE trainer (character-level) for Python.
   ///
   /// Returns `(trainer, base)` where `base` enables Python-side subclassing.
-  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None, bigram_cutoff_freq=None, bbpe_fallback=false, primary_vocab_ratio=0.9))]
+  #[pyo3(signature = (special_tokens, initial_alphabet=None, tie_break=None, parallel_merge_min_occurs_in=None, hot_pair_window_size=None, bigram_cutoff_freq=None))]
   pub fn new_py(
     special_tokens: Vec<String>,
     initial_alphabet: Option<&str>,
@@ -326,8 +324,6 @@ impl BpeTrainer_Character_CharIdx {
     parallel_merge_min_occurs_in: Option<usize>,
     hot_pair_window_size: Option<usize>,
     bigram_cutoff_freq: Option<i64>,
-    bbpe_fallback: bool,
-    primary_vocab_ratio: f64,
   ) -> PyResult<(Self, BpeTrainerBase)> {
     let config = trainer_config(
       initial_alphabet,
@@ -335,8 +331,6 @@ impl BpeTrainer_Character_CharIdx {
       parallel_merge_min_occurs_in,
       hot_pair_window_size,
       bigram_cutoff_freq,
-      bbpe_fallback,
-      primary_vocab_ratio,
     )?;
     Ok((
       Self {
@@ -390,11 +384,6 @@ impl BpeTrainer_Character_CharIdx {
 
   /// Initialize internal training state.
   pub fn init_training(&mut self, py: Python) -> PyResult<()> {
-    if self.inner.config.bbpe_fallback {
-      return Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "init_training is not available when bbpe_fallback is enabled; call train_until with a target vocabulary size",
-      ));
-    }
     py.detach(|| self.inner.init_training());
     Ok(())
   }
@@ -407,15 +396,26 @@ impl BpeTrainer_Character_CharIdx {
     Ok(self.inner.vocab_size() as i64)
   }
 
+  /// Train to `vocab_size` with a terminal byte-BPE fallback phase.
+  ///
+  /// Returns the updated vocabulary size.
+  #[pyo3(signature = (vocab_size, *, primary_vocab_ratio=0.9))]
+  pub fn train_until_with_bbpe_fallback(
+    &mut self,
+    py: Python,
+    vocab_size: usize,
+    primary_vocab_ratio: f64,
+  ) -> PyResult<i64> {
+    validate_primary_vocab_ratio(primary_vocab_ratio)?;
+    py.detach(|| self.inner.train_until_with_bbpe_fallback(vocab_size, primary_vocab_ratio))
+      .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(self.inner.vocab_size() as i64)
+  }
+
   /// Perform one training step.
   ///
   /// Returns the updated vocabulary size.
   pub fn step(&mut self, py: Python) -> PyResult<i64> {
-    if self.inner.config.bbpe_fallback {
-      return Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "step is not available when bbpe_fallback is enabled; call train_until with a target vocabulary size",
-      ));
-    }
     py.detach(|| self.inner.step()).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(self.inner.vocab_size() as i64)
   }

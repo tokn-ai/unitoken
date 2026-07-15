@@ -119,8 +119,19 @@ def test_unknown_unit_is_rejected() -> None:
 
 
 def test_bbpe_fallback_requires_unicode_unit() -> None:
+  trainer = BpeTrainer([], unit="byte")
+
   with pytest.raises(ValueError, match='bbpe_fallback requires unit="unicode"'):
-    BpeTrainer([], unit="byte", bbpe_fallback=True)
+    trainer.train_with_bbpe_fallback(vocab_size=258)
+
+
+def test_bbpe_fallback_is_not_a_constructor_mode() -> None:
+  with pytest.raises(TypeError, match="unexpected keyword argument 'bbpe_fallback'"):
+    BpeTrainer([], unit="unicode", bbpe_fallback=True)  # type: ignore[call-arg]
+  with pytest.raises(TypeError, match="unexpected keyword argument 'bbpe_fallback'"):
+    BpeTrainer_Character_CharIdx([], bbpe_fallback=True)  # type: ignore[call-arg]
+  with pytest.raises(TypeError, match="unexpected keyword argument 'primary_vocab_ratio'"):
+    BpeTrainer_Character_CharIdx([], primary_vocab_ratio=0.5)  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(
@@ -130,11 +141,11 @@ def test_bbpe_fallback_requires_unicode_unit() -> None:
 def test_primary_vocab_ratio_must_be_finite_and_bounded(
   primary_vocab_ratio: float,
 ) -> None:
+  trainer = BpeTrainer([], unit="unicode")
+
   with pytest.raises(ValueError, match="primary_vocab_ratio must be finite and between 0 and 1"):
-    BpeTrainer(
-      [],
-      unit="unicode",
-      bbpe_fallback=True,
+    trainer.train_with_bbpe_fallback(
+      vocab_size=258,
       primary_vocab_ratio=primary_vocab_ratio,
     )
 
@@ -143,55 +154,52 @@ def test_primary_vocab_ratio_must_be_finite_and_bounded(
 def test_primary_vocab_ratio_trains_at_inclusive_endpoints(
   primary_vocab_ratio: float,
 ) -> None:
-  trainer = BpeTrainer(
-    [],
-    unit="unicode",
-    bbpe_fallback=True,
-    primary_vocab_ratio=primary_vocab_ratio,
-  )
+  trainer = BpeTrainer([], unit="unicode")
   trainer.add_words({"😀😁": 10})
 
-  trainer.train(vocab_size=258)
+  trainer.train_with_bbpe_fallback(
+    vocab_size=258,
+    primary_vocab_ratio=primary_vocab_ratio,
+  )
 
   assert trainer.vocab_size == 258
   direct_scalars = {"😀".encode(), "😁".encode()}
   if primary_vocab_ratio == 1.0:
     assert direct_scalars <= trainer.vocab.keys()
+    trainer.train(vocab_size=259)
+    assert trainer.vocab_size == 259
   else:
     assert direct_scalars.isdisjoint(trainer.vocab)
     assert b"\xf0\x9f\x98" in trainer.vocab
 
 
 def test_native_unicode_trainer_validates_primary_vocab_ratio() -> None:
+  trainer = BpeTrainer_Character_CharIdx([])
+
   with pytest.raises(ValueError, match="primary_vocab_ratio must be finite and between 0 and 1"):
-    BpeTrainer_Character_CharIdx([], primary_vocab_ratio=float("nan"))
+    trainer.train_until_with_bbpe_fallback(258, primary_vocab_ratio=float("nan"))
 
 
-def test_bbpe_fallback_rejects_manual_training_lifecycle() -> None:
-  trainer = BpeTrainer([], unit="unicode", bbpe_fallback=True)
+def test_unicode_manual_training_lifecycle_remains_ordinary() -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"你好": 10})
+  trainer.init_training()
 
-  with pytest.raises(RuntimeError, match=r"init_training\(\).*call train\(vocab_size\)"):
-    trainer.init_training()
-  with pytest.raises(RuntimeError, match=r"step\(\).*call train\(vocab_size\)"):
-    trainer.step()
+  assert trainer.step() == 257
 
 
-def test_native_bbpe_fallback_rejects_manual_training_lifecycle() -> None:
-  trainer = BpeTrainer_Character_CharIdx([], bbpe_fallback=True)
+def test_bbpe_fallback_must_start_before_manual_training() -> None:
+  trainer = BpeTrainer([], unit="unicode")
+  trainer.add_words({"你好": 10})
+  trainer.init_training()
+  trainer.step()
 
-  with pytest.raises(RuntimeError, match="init_training.*call train_until"):
-    trainer.init_training()
-  with pytest.raises(RuntimeError, match="step.*call train_until"):
-    trainer.step()
+  with pytest.raises(RuntimeError, match="before ordinary vocabulary growth"):
+    trainer.train_with_bbpe_fallback(vocab_size=258)
 
 
 def test_unicode_bbpe_fallback_trains_saves_and_loads(tmp_path: Path) -> None:
-  trainer = BpeTrainer(
-    [],
-    unit="unicode",
-    bbpe_fallback=True,
-    primary_vocab_ratio=0.5,
-  )
+  trainer = BpeTrainer([], unit="unicode")
   trainer.add_words({
     "你好你好你好你好": 70,
     "仔": 50,
@@ -202,11 +210,9 @@ def test_unicode_bbpe_fallback_trains_saves_and_loads(tmp_path: Path) -> None:
     "们": 50,
   })
 
-  trainer.train(vocab_size=262)
-  trainer.train(vocab_size=262)
-  trainer.train(vocab_size=261)
+  trainer.train_with_bbpe_fallback(vocab_size=262, primary_vocab_ratio=0.5)
   with pytest.raises(RuntimeError, match="create a new trainer"):
-    trainer.train(vocab_size=263)
+    trainer.train_with_bbpe_fallback(vocab_size=262, primary_vocab_ratio=0.5)
   model = trainer.validate_model()
 
   assert trainer.vocab_size == 262
@@ -244,14 +250,9 @@ def test_bbpe_ratio_excludes_special_tokens_from_learned_slots() -> None:
   }
 
   def train(special_tokens: list[str], vocab_size: int) -> set[bytes]:
-    trainer = BpeTrainer(
-      special_tokens,
-      unit="unicode",
-      bbpe_fallback=True,
-      primary_vocab_ratio=0.5,
-    )
+    trainer = BpeTrainer(special_tokens, unit="unicode")
     trainer.add_words(words)
-    trainer.train(vocab_size=vocab_size)
+    trainer.train_with_bbpe_fallback(vocab_size=vocab_size, primary_vocab_ratio=0.5)
     return set(trainer.vocab)
 
   expected = train([], 262)

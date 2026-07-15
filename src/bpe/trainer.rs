@@ -68,19 +68,9 @@ pub struct BpeTrainerConfig {
   pub hot_pair_window_size: Option<usize>,
   /// Stop automatic training before applying a merge below this frequency.
   ///
-  /// Without BBPE fallback, manual [`Train::step`] calls ignore this policy,
-  /// while model validation rejects any resulting final pair merge below the cutoff.
+  /// Manual [`Train::step`] calls ignore this policy, while model validation
+  /// rejects any resulting final pair merge below the cutoff.
   pub bigram_cutoff_freq: Option<Freq>,
-  /// Learn byte-BPE fallback merges for still-unmaterialized Unicode scalars.
-  ///
-  /// Because the phase boundary depends on the target size, [`Train::init_training`]
-  /// is ignored and [`Train::step`] returns an error; use [`BpeTrainer::train_until`].
-  pub bbpe_fallback: bool,
-  /// Fraction of learned vocabulary slots assigned to the initial primary Unicode phase.
-  ///
-  /// The remaining slots are the maximum BBPE fallback budget. Any unused
-  /// fallback slots return to primary pair training after those scalars are frozen.
-  pub primary_vocab_ratio: f64,
 }
 
 impl Default for BpeTrainerConfig {
@@ -91,8 +81,6 @@ impl Default for BpeTrainerConfig {
       parallel_merge_min_occurs_in: None,
       hot_pair_window_size: None,
       bigram_cutoff_freq: None,
-      bbpe_fallback: false,
-      primary_vocab_ratio: 0.9,
     }
   }
 }
@@ -105,10 +93,16 @@ impl BpeTrainerConfig {
       parallel_merge_min_occurs_in: None,
       hot_pair_window_size: None,
       bigram_cutoff_freq: None,
-      bbpe_fallback: false,
-      primary_vocab_ratio: 0.9,
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+enum TrainingState {
+  #[default]
+  Open,
+  BbpeFinalized { vocab_size: usize },
+  Poisoned,
 }
 
 fn byte_level_alphabet_bytes() -> Vec<u8> {
@@ -156,7 +150,7 @@ pub struct BpeTrainer<C, I> {
   pub words: Vec<PreToken<C, I>>,
   frozen_initial_units: AHashSet<I>,
   last_event_freq: Option<Freq>,
-  bbpe_fallback_target: Option<usize>,
+  training_state: TrainingState,
 }
 
 #[derive(Debug, Clone)]
@@ -516,11 +510,6 @@ where
       config.bigram_cutoff_freq.is_none_or(|cutoff| cutoff > 0),
       "bigram_cutoff_freq must be positive",
     );
-    assert!(
-      config.primary_vocab_ratio.is_finite()
-        && (0.0..=1.0).contains(&config.primary_vocab_ratio),
-      "primary_vocab_ratio must be finite and between 0 and 1",
-    );
     let mut bpe = Self::empty();
     bpe.config = config;
     bpe.pre_merges.reset(config.hot_pair_window_size);
@@ -606,6 +595,11 @@ where
     C: CharSplit + Clone + Ord,
     I: HasChar<C>,
   {
+    if self.training_state == TrainingState::Poisoned {
+      return Err(MyError::InvalidBpeModel(
+        "trainer state is incomplete after failed BBPE fallback training".to_string(),
+      ));
+    }
     let mut vocab_contents = BTreeSet::new();
     for token in self.vocab.values() {
       let normalized = C::from_vec_u8(&C::to_vec_u8(token));
@@ -793,7 +787,7 @@ impl<C, I> BpeTrainer<C, I> {
       words: Vec::new(),
       frozen_initial_units: AHashSet::new(),
       last_event_freq: None,
-      bbpe_fallback_target: None,
+      training_state: TrainingState::Open,
     }
   }
 }
@@ -1041,7 +1035,7 @@ where
   ///
   /// This is the core training step once a merge candidate has been selected.
   #[hotpath::measure]
-  pub fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
+  fn _step(&mut self, merge: Merge<C, I>) -> I where C: Clone {
     self._step_with_observer(merge, |_, _, _| {})
   }
 
@@ -1050,9 +1044,7 @@ where
     C: Clone,
     F: FnOnce(&Self, I, Option<&AHashMap<(I, I), MergeData>>),
   {
-    if self.config.bbpe_fallback {
-      self.last_event_freq = Some(merge.data.freq);
-    }
+    self.last_event_freq = Some(merge.data.freq);
     let target_idx = self._add_vocab_idx();
     // if target = Some(j), this is a single char token, no need to merge.
     // but we have to add it to vocab.
@@ -1111,31 +1103,7 @@ where
     metrics::gauge!("bpe_trainer.words_count").set(self.words.len() as f64);
   }
 
-  fn train_initialized_until(&mut self, vocab_size: usize) -> MyResult<()>
-  where
-    C: Clone,
-  {
-    while self.vocab.len() < vocab_size {
-      let Some(merge) = self._get_largest_merge() else {
-        return Err(MyError::TrainStep);
-      };
-      if merge.target.is_none()
-        && self.config.bigram_cutoff_freq.is_some_and(|cutoff| merge.data.freq < cutoff)
-      {
-        let tp = merge.tp;
-        self.pre_merges.restore_pair(merge);
-        self.push_merge_candidate(tp);
-        break;
-      }
-      self._step(merge);
-      if self.vocab.len() % 100 == 0 {
-        self._metrics();
-      }
-    }
-    Ok(())
-  }
-
-  fn freeze_unmaterialized_initial_units(&mut self) -> MyResult<Vec<(String, Freq)>>
+  fn freeze_unmaterialized_initial_units(&mut self) -> MyResult<Vec<(char, Freq)>>
   where
     C: CharToIdx<I>,
   {
@@ -1147,14 +1115,21 @@ where
       };
       let bytes = C::bbpe_word_to_bytes(&pair.content.1).ok_or_else(bbpe_unit_error)?;
       let text = std::str::from_utf8(&bytes)?;
-      if text.chars().count() != 1 {
+      let mut chars = text.chars();
+      let Some(scalar) = chars.next() else {
+        return Err(MyError::SpecError(format!(
+          "BBPE fallback initial unit must be one Unicode scalar, got {}",
+          pair.content.1.debug_display(),
+        )));
+      };
+      if chars.next().is_some() {
         return Err(MyError::SpecError(format!(
           "BBPE fallback initial unit must be one Unicode scalar, got {}",
           pair.content.1.debug_display(),
         )));
       }
       frozen.push(unit);
-      inventory.push((text.to_string(), pair.freq));
+      inventory.push((scalar, pair.freq));
     }
     frozen.sort_unstable();
     inventory.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -1163,9 +1138,16 @@ where
   }
 
   fn train_bbpe_fallback(
-    &self, inventory: &[(String, Freq)], max_merges: usize,
-    cutoff_freq: Option<Freq>,
-  ) -> Vec<Merge<u8, Idx>> {
+    &mut self, max_merges: usize, cutoff_freq: Option<Freq>,
+  ) -> MyResult<Vec<Merge<u8, Idx>>>
+  where
+    C: CharToIdx<I>,
+  {
+    let inventory = self
+      .freeze_unmaterialized_initial_units()?
+      .into_iter()
+      .map(|(scalar, freq)| (scalar.to_string(), freq))
+      .collect::<Vec<_>>();
     let config = BpeTrainerConfig {
       initial_alphabet: self.config.initial_alphabet,
       tie_break: self.config.tie_break,
@@ -1175,8 +1157,6 @@ where
       // hydration scans.
       hot_pair_window_size: None,
       bigram_cutoff_freq: None,
-      bbpe_fallback: false,
-      primary_vocab_ratio: self.config.primary_vocab_ratio,
     };
     let mut fallback = BpeTrainer::<u8, Idx>::from_words_with_config(
       inventory.iter().map(|(word, freq)| (word.as_str(), *freq)),
@@ -1193,7 +1173,7 @@ where
       }
       fallback._step(merge);
     }
-    fallback.merges
+    Ok(fallback.merges)
   }
 
   fn compose_bbpe_fallback(
@@ -1276,47 +1256,87 @@ where
     Ok(())
   }
 
-  fn train_until_with_bbpe_fallback(&mut self, vocab_size: usize) -> MyResult<()>
+  fn ensure_training_open(&self) -> MyResult<()> {
+    match self.training_state {
+      TrainingState::Open => Ok(()),
+      TrainingState::BbpeFinalized { vocab_size } => Err(MyError::SpecError(format!(
+        "BBPE fallback training is finalized at vocabulary size {vocab_size}; create a new trainer to continue training",
+      ))),
+      TrainingState::Poisoned => Err(MyError::SpecError(
+        "trainer cannot continue after failed BBPE fallback training".to_string(),
+      )),
+    }
+  }
+
+  fn train_until_with_bbpe_fallback_impl(
+    &mut self, vocab_size: usize, primary_vocab_ratio: f64,
+  ) -> MyResult<()>
   where
     C: CharToIdx<I> + Clone,
   {
+    if !primary_vocab_ratio.is_finite() || !(0.0..=1.0).contains(&primary_vocab_ratio) {
+      return Err(MyError::SpecError(
+        "primary_vocab_ratio must be finite and between 0 and 1".to_string(),
+      ));
+    }
+    self.ensure_training_open()?;
+    if primary_vocab_ratio == 1.0 {
+      return self.train_until(vocab_size);
+    }
+
     let base_vocab_size = self.special_tokens.len() + 256;
     if self.vocab.len() != base_vocab_size {
       return Err(MyError::SpecError(
-        "bbpe_fallback must start before manual training steps".to_string(),
+        "BBPE fallback training must start before ordinary vocabulary growth".to_string(),
       ));
     }
+    if vocab_size <= base_vocab_size {
+      return Ok(());
+    }
+
     let learned_slots = vocab_size.saturating_sub(base_vocab_size);
-    let primary_slots = ((learned_slots as f64) * self.config.primary_vocab_ratio).floor() as usize;
+    let primary_slots = ((learned_slots as f64) * primary_vocab_ratio).floor() as usize;
     let fallback_cap = learned_slots - primary_slots;
     let primary_target = base_vocab_size + primary_slots;
-    self.train_initialized_until(primary_target)?;
-    let fallback_cutoff_freq = match (self.last_event_freq, self.config.bigram_cutoff_freq) {
-      (Some(primary), Some(configured)) => Some(primary.max(configured)),
-      (primary, configured) => primary.or(configured),
-    };
-    let inventory = self.freeze_unmaterialized_initial_units()?;
-    let previous_hot_stats = self.pre_merges.stats().cloned();
-    self.pre_merges.reset(self.config.hot_pair_window_size);
-    self.merge_heap = BinaryHeap::new();
-    let fallback = self.train_bbpe_fallback(
-      &inventory,
-      fallback_cap,
-      fallback_cutoff_freq,
-    );
-    let fallback_merges = fallback.len();
-    drop(inventory);
+    let result = (|| {
+      self.train_until(primary_target)?;
+      if primary_slots == 0 {
+        // `train_until` is intentionally a no-op when the target is already
+        // reached, but fallback still needs the initial-unit inventory.
+        self._build_pre_merges();
+      }
+      let fallback_cutoff_freq = match (self.last_event_freq, self.config.bigram_cutoff_freq) {
+        (Some(primary), Some(configured)) => Some(primary.max(configured)),
+        (primary, configured) => primary.or(configured),
+      };
+      let fallback = self.train_bbpe_fallback(fallback_cap, fallback_cutoff_freq)?;
+      let fallback_merges = fallback.len();
+      let primary_resume_target = vocab_size.saturating_sub(fallback_merges);
 
-    // Rebuild after freezing so current, dynamically created, and hydrated
-    // pairs all observe the same hard Unicode boundaries.
-    self._build_pre_merges();
-    if let Some(previous_hot_stats) = previous_hot_stats {
-      self.pre_merges.accumulate_stats(previous_hot_stats);
+      // If fallback underfills, rebuild after freezing so current, dynamically
+      // created, and hydrated pairs all observe the same hard boundaries.
+      if primary_resume_target > self.vocab.len() {
+        let previous_hot_stats = self.pre_merges.stats().cloned();
+        self.train_until(primary_resume_target)?;
+        if let Some(previous_hot_stats) = previous_hot_stats {
+          self.pre_merges.accumulate_stats(previous_hot_stats);
+        }
+      }
+      self.compose_bbpe_fallback(fallback)
+    })();
+
+    match result {
+      Ok(()) => {
+        self.training_state = TrainingState::BbpeFinalized {
+          vocab_size: self.vocab.len(),
+        };
+        Ok(())
+      }
+      Err(error) => {
+        self.training_state = TrainingState::Poisoned;
+        Err(error)
+      }
     }
-    self.train_initialized_until(vocab_size.saturating_sub(fallback_merges))?;
-    self.compose_bbpe_fallback(fallback)?;
-    self.bbpe_fallback_target = Some(vocab_size);
-    Ok(())
   }
 
   /// Train until the vocabulary reaches `vocab_size` or the next pair merge
@@ -1326,32 +1346,51 @@ where
   where
     C: CharToIdx<I> + Clone,
   {
-    if self.config.bbpe_fallback {
-      if !C::supports_bbpe_fallback() || I::from_char('\u{80}').is_none() {
-        return Err(bbpe_unit_error());
-      }
-      if let Some(previous_target) = self.bbpe_fallback_target {
-        if vocab_size <= previous_target {
-          return Ok(());
-        }
-        return Err(MyError::SpecError(format!(
-          "bbpe_fallback training is finalized at vocabulary size {previous_target}; create a new trainer to train to {vocab_size}",
-        )));
-      }
-      if vocab_size <= self.vocab.len() {
-        return Ok(());
-      }
+    self.ensure_training_open()?;
+    if vocab_size <= self.vocab.len() {
+      return Ok(());
     }
 
     self._build_pre_merges();
     self._metrics();
-    if self.config.bbpe_fallback && self.config.primary_vocab_ratio < 1.0 {
-      self.train_until_with_bbpe_fallback(vocab_size)?;
-    } else {
-      self.train_initialized_until(vocab_size)?;
+    while self.vocab.len() < vocab_size {
+      let Some(merge) = self._get_largest_merge() else {
+        return Err(MyError::TrainStep);
+      };
+      if merge.target.is_none()
+        && self.config.bigram_cutoff_freq.is_some_and(|cutoff| merge.data.freq < cutoff)
+      {
+        let tp = merge.tp;
+        self.pre_merges.restore_pair(merge);
+        self.push_merge_candidate(tp);
+        break;
+      }
+      self._step(merge);
+      if self.vocab.len() % 100 == 0 {
+        self._metrics();
+      }
     }
     self._metrics();
     Ok(())
+  }
+}
+
+impl BpeTrainer<Character, CharIdx> {
+  /// Train a Unicode model to `vocab_size` with byte-BPE fallback for Unicode
+  /// scalars omitted at the primary allocation boundary.
+  ///
+  /// `primary_vocab_ratio` applies only to learned slots after special tokens
+  /// and the mandatory 256-byte alphabet. A ratio below `1.0` must be used
+  /// before ordinary vocabulary growth and finalizes the trainer after a
+  /// fallback pass. A ratio of `1.0` delegates to ordinary, extendable
+  /// training; a target at or below the base vocabulary is a no-op. The
+  /// configured pair-frequency cutoff may leave the final vocabulary below
+  /// `vocab_size`.
+  #[hotpath::measure]
+  pub fn train_until_with_bbpe_fallback(
+    &mut self, vocab_size: usize, primary_vocab_ratio: f64,
+  ) -> MyResult<()> {
+    self.train_until_with_bbpe_fallback_impl(vocab_size, primary_vocab_ratio)
   }
 }
 
@@ -1374,8 +1413,7 @@ where
   }
 
   fn init_training(&mut self) {
-    if self.config.bbpe_fallback {
-      // The phase boundary is unknown until `train_until` receives its target.
+    if self.ensure_training_open().is_err() {
       return;
     }
     self._build_pre_merges();
@@ -1388,11 +1426,7 @@ where
 
   #[hotpath::measure]
   fn step(&mut self) -> MyResult<()> {
-    if self.config.bbpe_fallback {
-      return Err(MyError::SpecError(
-        "manual step is not available when bbpe_fallback is enabled; call train_until with a target vocabulary size".to_string(),
-      ));
-    }
+    self.ensure_training_open()?;
     // Find the most frequent merge. Hugging Face's BPE trainer resolves equal
     // frequencies by choosing the smallest pair ids, so keep that ordering here.
     let merge = self._get_largest_merge();
@@ -2326,14 +2360,10 @@ mod tests {
         ("们", 50),
       ],
       &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        primary_vocab_ratio: 0.5,
-        ..BpeTrainerConfig::default()
-      },
+      BpeTrainerConfig::default(),
     );
 
-    bpe.train_until(262).unwrap();
+    bpe.train_until_with_bbpe_fallback(262, 0.5).unwrap();
 
     assert_eq!(bpe.vocab.len(), 262);
     assert_eq!(bpe.merges.len(), 4);
@@ -2369,14 +2399,10 @@ mod tests {
     let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
       [("aaaa", 100), ("é", 1)],
       &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        primary_vocab_ratio: 0.0,
-        ..BpeTrainerConfig::default()
-      },
+      BpeTrainerConfig::default(),
     );
 
-    bpe.train_until(259).unwrap();
+    bpe.train_until_with_bbpe_fallback(259, 0.0).unwrap();
 
     assert_eq!(bpe.vocab.len(), 259);
     assert_eq!(
@@ -2408,12 +2434,10 @@ mod tests {
         &[],
         BpeTrainerConfig {
           hot_pair_window_size,
-          bbpe_fallback: true,
-          primary_vocab_ratio: 0.5,
           ..BpeTrainerConfig::default()
         },
       );
-      bpe.train_until(262).unwrap();
+      bpe.train_until_with_bbpe_fallback(262, 0.5).unwrap();
       if hot_pair_window_size.is_some() {
         assert!(bpe.hot_pair_window_stats().unwrap().hydration_scans >= 2);
       }
@@ -2441,13 +2465,11 @@ mod tests {
       &[],
       BpeTrainerConfig {
         bigram_cutoff_freq: Some(10),
-        bbpe_fallback: true,
-        primary_vocab_ratio: 0.5,
         ..BpeTrainerConfig::default()
       },
     );
 
-    bpe.train_until(258).unwrap();
+    bpe.train_until_with_bbpe_fallback(258, 0.5).unwrap();
 
     assert_eq!(bpe.vocab.len(), 258);
     assert_eq!(bpe.merges.len(), 1);
@@ -2456,86 +2478,145 @@ mod tests {
   }
 
   #[test]
-  fn test_unicode_bbpe_fallback_is_one_shot_and_rejects_manual_step() {
-    let mut manual = BpeTrainer::<Character, CharIdx>::from_words_with_config(
-      [("你好", 1)],
-      &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        ..BpeTrainerConfig::default()
-      },
-    );
-    manual.init_training();
-    assert_eq!(manual.pre_merges.len(), 0);
-    let error = manual.step().unwrap_err();
-    assert!(error.to_string().contains("manual step"));
-
-    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+  fn test_unicode_ordinary_training_remains_incremental() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
       [("你好", 10)],
       &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        primary_vocab_ratio: 0.5,
-        ..BpeTrainerConfig::default()
-      },
     );
+
+    bpe.init_training();
+    assert_ne!(bpe.pre_merges.len(), 0);
+    bpe.step().unwrap();
     bpe.train_until(258).unwrap();
-    bpe.train_until(258).unwrap();
-    let error = bpe.train_until(259).unwrap_err();
-    assert!(error.to_string().contains("create a new trainer"));
 
-    let mut no_op = BpeTrainer::<Character, CharIdx>::from_words_with_config(
-      [("你好", 10)],
-      &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        primary_vocab_ratio: 0.5,
-        ..BpeTrainerConfig::default()
-      },
-    );
-    no_op.train_until(256).unwrap();
-    no_op.train_until(258).unwrap();
-    assert_eq!(no_op.vocab.len(), 258);
-
-    let mut primary_only = BpeTrainer::<Character, CharIdx>::from_words_with_config(
-      [("你好", 10)],
-      &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        primary_vocab_ratio: 1.0,
-        ..BpeTrainerConfig::default()
-      },
-    );
-    primary_only.train_until(257).unwrap();
-    primary_only.train_until(258).unwrap();
-    assert_eq!(primary_only.vocab.len(), 258);
+    assert_eq!(bpe.vocab.len(), 258);
   }
 
   #[test]
-  fn test_byte_trainer_rejects_bbpe_fallback() {
-    let mut bpe = BpeTrainer::<u8, Idx>::from_words_with_config(
-      [("ab", 1)],
+  fn test_unicode_bbpe_fallback_is_terminal() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 10)],
+      &[],
+    );
+
+    bpe.train_until_with_bbpe_fallback(258, 0.5).unwrap();
+    bpe.validate_model().unwrap();
+
+    for error in [
+      bpe.step().unwrap_err(),
+      bpe.train_until(259).unwrap_err(),
+      bpe.train_until_with_bbpe_fallback(258, 0.5).unwrap_err(),
+    ] {
+      assert!(error.to_string().contains("create a new trainer"));
+    }
+  }
+
+  #[test]
+  fn test_unicode_bbpe_fallback_must_precede_ordinary_vocab_growth() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 10)],
+      &[],
+    );
+
+    bpe.train_until(257).unwrap();
+    let error = bpe.train_until_with_bbpe_fallback(258, 0.5).unwrap_err();
+
+    assert!(error.to_string().contains("before ordinary vocabulary growth"));
+    bpe.train_until(258).unwrap();
+
+    let mut pair_trained = BpeTrainer::<Character, CharIdx>::from_words(
+      [("aa", 10)],
+      &[],
+    );
+    pair_trained.train_until(257).unwrap();
+    assert_eq!(pair_trained.merges.len(), 1);
+    let error = pair_trained
+      .train_until_with_bbpe_fallback(258, 0.5)
+      .unwrap_err();
+    assert!(error.to_string().contains("before ordinary vocabulary growth"));
+  }
+
+  #[test]
+  fn test_unicode_bbpe_fallback_base_target_is_a_no_op() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 10)],
+      &[],
+    );
+
+    bpe.init_training();
+    bpe.train_until_with_bbpe_fallback(256, 0.5).unwrap();
+    bpe.train_until_with_bbpe_fallback(258, 0.0).unwrap();
+
+    assert_eq!(bpe.vocab.len(), 258);
+    assert!(['你', '好'].into_iter().all(|scalar| {
+      !bpe.vocab.values().any(|token| {
+        token.as_ref() == [Character::Unicode(scalar)]
+      })
+    }));
+    assert!(bpe.vocab.values().any(|token| {
+      token.len() > 1 && token.iter().all(|unit| matches!(unit, Character::Byte(_)))
+    }));
+  }
+
+  #[test]
+  fn test_unicode_bbpe_fallback_ratio_one_delegates_to_ordinary_training() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 10)],
+      &[],
+    );
+
+    bpe.train_until_with_bbpe_fallback(257, 1.0).unwrap();
+    bpe.train_until(258).unwrap();
+
+    assert_eq!(bpe.vocab.len(), 258);
+  }
+
+  #[test]
+  fn test_unicode_bbpe_fallback_validates_ratio_without_poisoning() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      [("你好", 10)],
+      &[],
+    );
+
+    for ratio in [f64::NAN, -0.1, 1.1] {
+      let error = bpe.train_until_with_bbpe_fallback(258, ratio).unwrap_err();
+      assert!(error.to_string().contains("finite and between 0 and 1"));
+    }
+    bpe.train_until(257).unwrap();
+  }
+
+  #[test]
+  fn test_unicode_bbpe_fallback_reports_cutoff_underfill_at_actual_size() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words_with_config(
+      [("你好", 6)],
       &[],
       BpeTrainerConfig {
-        bbpe_fallback: true,
+        bigram_cutoff_freq: Some(7),
         ..BpeTrainerConfig::default()
       },
     );
 
-    let error = bpe.train_until(257).unwrap_err();
+    bpe.train_until_with_bbpe_fallback(260, 0.5).unwrap();
 
-    assert!(error.to_string().contains("requires a Unicode trainer"));
+    assert_eq!(bpe.vocab.len(), 258);
+    let error = bpe.train_until(260).unwrap_err();
+    assert!(error.to_string().contains("finalized at vocabulary size 258"));
+    bpe.validate_model().unwrap();
+  }
 
-    let mut char_indexed_bytes = BpeTrainer::<u8, CharIdx>::from_words_with_config(
-      [("ab", 1)],
+  #[test]
+  fn test_failed_unicode_bbpe_fallback_poisons_mutated_trainer() {
+    let mut bpe = BpeTrainer::<Character, CharIdx>::from_words(
+      std::iter::empty::<(&str, Freq)>(),
       &[],
-      BpeTrainerConfig {
-        bbpe_fallback: true,
-        ..BpeTrainerConfig::default()
-      },
     );
-    let error = char_indexed_bytes.train_until(257).unwrap_err();
-    assert!(error.to_string().contains("requires a Unicode trainer"));
+
+    assert!(matches!(
+      bpe.train_until_with_bbpe_fallback(258, 0.5),
+      Err(MyError::TrainStep),
+    ));
+    assert!(bpe.step().unwrap_err().to_string().contains("failed BBPE"));
+    assert!(bpe.validate_model().unwrap_err().to_string().contains("failed BBPE"));
   }
 
   fn byte_pair_trainer(freq: Freq, cutoff: Freq) -> BpeTrainer<u8, Idx> {

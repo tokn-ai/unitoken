@@ -35,6 +35,14 @@ trainer:
       target_vocab_size: 1000
       expected_input_sha256: ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a
       expected_model_sha256: 34dcb3aeb65c2220f50158d594defb73f1d5649b296c0020220266ba70f1d9e1
+    - name: smoke_zh_unicode_bbpe_r90_v1000
+      words: fixtures/_words.TinyStories_all_data_zh_1M-sample.json
+      unit: unicode
+      target_vocab_size: 1000
+      bbpe_fallback: true
+      primary_vocab_ratio: 0.9
+      expected_input_sha256: ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a
+      expected_model_sha256: 7f6216c40793da7bf8e98dab3ffa90a15c8a233af990674b5ac7b3c861417639
 
 pretokenizer:
   - name: ci_zh_pretokenizer

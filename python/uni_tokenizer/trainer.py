@@ -45,16 +45,8 @@ class BpeTrainer:
     If set, retain occurrence postings for an exact top-K candidate window.
     Smaller values reduce memory but may require additional inventory scans.
   bigram_cutoff_freq:
-    Inclusive minimum frequency for pair merges performed by `train()`.
-    Without BBPE fallback, manual `step()` calls ignore it, but model
-    validation still enforces it.
-  bbpe_fallback:
-    For Unicode training, use slots left after the initial primary allocation
-    for byte-BPE merges that reconstruct omitted Unicode scalars.
-  primary_vocab_ratio:
-    Fraction of learned vocabulary slots assigned to the initial primary Unicode
-    phase when `bbpe_fallback` is enabled. The mandatory 256-byte alphabet and
-    special tokens are excluded; unused fallback slots return to primary training.
+    Inclusive minimum frequency for pair merges performed by automatic training.
+    Manual `step()` calls ignore it, but model validation still enforces it.
   """
   def __init__(
     self,
@@ -66,15 +58,9 @@ class BpeTrainer:
     parallel_merge_min_occurs_in: int | None = None,
     hot_pair_window_size: int | None = None,
     bigram_cutoff_freq: int | None = None,
-    bbpe_fallback: bool = False,
-    primary_vocab_ratio: float = 0.9,
   ) -> None:
     _validate_unit(unit)
-    _validate_primary_vocab_ratio(primary_vocab_ratio)
-    if unit == "byte" and bbpe_fallback:
-      raise ValueError('bbpe_fallback requires unit="unicode"')
     self._unit = unit
-    self._bbpe_fallback = bbpe_fallback
     if unit == "unicode":
       self._trainer = BpeTrainer_Character_CharIdx(
         special_tokens=special_tokens,
@@ -83,8 +69,6 @@ class BpeTrainer:
         parallel_merge_min_occurs_in=parallel_merge_min_occurs_in,
         hot_pair_window_size=hot_pair_window_size,
         bigram_cutoff_freq=bigram_cutoff_freq,
-        bbpe_fallback=bbpe_fallback,
-        primary_vocab_ratio=primary_vocab_ratio,
       )
     elif unit == "byte":
       self._trainer = BpeTrainer_u8_Idx(
@@ -140,42 +124,48 @@ class BpeTrainer:
     self._trainer.add_word_counter(counter)
 
   def init_training(self) -> None:
-    """Initialize internal training state.
-
-    This manual lifecycle is unavailable when `bbpe_fallback` is enabled,
-    because both training phases require a target vocabulary size.
-    """
-    if self._bbpe_fallback:
-      raise RuntimeError(
-        "init_training() is not available when bbpe_fallback is enabled; "
-        "call train(vocab_size)"
-      )
+    """Initialize internal training state."""
     self._trainer.init_training()
 
   def train(self, vocab_size: int) -> None:
     """Train until the vocab reaches `vocab_size` entries or the pair cutoff.
 
     Training runs inside Rust and may finish below the requested size when the
-    next pair frequency is below `bigram_cutoff_freq`. Once a BBPE fallback pass
-    has run, the phase allocation is finalized for this target: repeated calls
-    at the same or a smaller target are no-ops, while a larger target requires a
-    new trainer.
+    next pair frequency is below `bigram_cutoff_freq`.
     """
     self._trainer.train_until(vocab_size)
+
+  def train_with_bbpe_fallback(
+    self,
+    vocab_size: int,
+    *,
+    primary_vocab_ratio: float = 0.9,
+  ) -> None:
+    """Train a Unicode model with a terminal byte-BPE fallback phase.
+
+    `primary_vocab_ratio` allocates a fraction of learned slots to the initial
+    Unicode phase. The mandatory 256-byte alphabet and special tokens are
+    excluded; unused fallback slots return to primary training. A fallback pass
+    must start before ordinary vocabulary growth and finalizes the trainer, so
+    create a new trainer for further training. A ratio of `1.0` delegates to
+    ordinary training and remains extendable; a target at or below the base
+    vocabulary is a no-op. The pair-frequency cutoff may leave the final
+    vocabulary below `vocab_size`.
+    """
+    if self._unit != "unicode":
+      raise ValueError('train_with_bbpe_fallback requires unit="unicode"')
+    _validate_primary_vocab_ratio(primary_vocab_ratio)
+    assert isinstance(self._trainer, BpeTrainer_Character_CharIdx)
+    self._trainer.train_until_with_bbpe_fallback(
+      vocab_size,
+      primary_vocab_ratio=primary_vocab_ratio,
+    )
 
   def step(self) -> int:
     """Perform one training step.
 
-    This manual lifecycle is unavailable when `bbpe_fallback` is enabled,
-    because both training phases require a target vocabulary size.
-
     Returns the updated vocabulary size.
     """
-    if self._bbpe_fallback:
-      raise RuntimeError(
-        "step() is not available when bbpe_fallback is enabled; "
-        "call train(vocab_size)"
-      )
     return self._trainer.step()
 
   def validate_model(self) -> "BpeModel":

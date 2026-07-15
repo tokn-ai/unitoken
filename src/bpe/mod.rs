@@ -197,11 +197,6 @@ pub trait CharToIdx<I: IdxLike> {
   fn char_to_idx(&self, start: u64, byte_vocab: Option<&HashMap<u8, I>>) -> I;
 
   #[doc(hidden)]
-  fn supports_bbpe_fallback() -> bool {
-    false
-  }
-
-  #[doc(hidden)]
   fn bbpe_word_to_bytes(_word: &Word<Self>) -> Option<Vec<u8>> where Self: Sized {
     None
   }
@@ -247,10 +242,6 @@ impl CharToIdx<CharIdx> for Character {
       Character::Unicode(c) => c.char_to_idx(start, byte_vocab),
       Character::Byte(b) => b.char_to_idx(start, byte_vocab),
     }
-  }
-
-  fn supports_bbpe_fallback() -> bool {
-    true
   }
 
   fn bbpe_word_to_bytes(word: &Word<Self>) -> Option<Vec<u8>> {

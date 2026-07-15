@@ -706,8 +706,21 @@ mod runner {
   fn execute_case_inner(request: &CaseRequest) -> Result<CaseMeasurement, CaseError> {
     let inventory = load_inventory(request)?;
     match request.case.unit {
-      Unit::Byte => run_training::<u8, Idx>(request, inventory),
-      Unit::Unicode => run_training::<Character, CharIdx>(request, inventory),
+      Unit::Byte => run_training::<u8, Idx, _>(request, inventory, |_, _, _| {
+        Err(CaseError::new(
+          "train_until_with_bbpe_fallback",
+          "BBPE fallback requires a Unicode trainer",
+        ))
+      }),
+      Unit::Unicode => run_training::<Character, CharIdx, _>(
+        request,
+        inventory,
+        |trainer, target_vocab_size, primary_vocab_ratio| {
+          trainer
+            .train_until_with_bbpe_fallback(target_vocab_size, primary_vocab_ratio)
+            .map_err(|error| CaseError::from_error("train_until_with_bbpe_fallback", error))
+        },
+      ),
     }
   }
 
@@ -758,12 +771,17 @@ mod runner {
     })
   }
 
-  fn run_training<C, I>(request: &CaseRequest, inventory: LoadedInventory) -> Result<CaseMeasurement, CaseError>
+  fn run_training<C, I, F>(
+    request: &CaseRequest,
+    inventory: LoadedInventory,
+    train_until_with_bbpe_fallback: F,
+  ) -> Result<CaseMeasurement, CaseError>
   where
     C: CanStrToWord + CanToWord<u8> + CanonicalUnit + CharSplit + CharToIdx<I> + Clone + Ord + Send + Sync + 'static,
     I: CanonicalId + HasChar<C> + IdxLike,
     Word<C>: WordDebugExt,
     BpeTrainer<C, I>: CanTrain<C, I>,
+    F: FnOnce(&mut BpeTrainer<C, I>, usize, f64) -> Result<(), CaseError>,
   {
     let LoadedInventory {
       words,
@@ -784,8 +802,6 @@ mod runner {
       parallel_merge_min_occurs_in: request.case.parallel_merge_min_occurs_in,
       hot_pair_window_size: request.variant.hot_pair_window_size,
       bigram_cutoff_freq: request.case.bigram_cutoff_freq,
-      bbpe_fallback: request.case.bbpe_fallback,
-      primary_vocab_ratio: request.case.primary_vocab_ratio,
     };
 
     let build_rss_sampler = rss::RssSampler::start();
@@ -811,9 +827,11 @@ mod runner {
       current_after_init_training_bytes = None;
       peak_after_init_training_bytes = None;
       let started = Instant::now();
-      trainer
-        .train_until(request.case.target_vocab_size)
-        .map_err(|error| CaseError::from_error("train_until", error))?;
+      train_until_with_bbpe_fallback(
+        &mut trainer,
+        request.case.target_vocab_size,
+        request.case.primary_vocab_ratio,
+      )?;
       train_until_ns = Some(duration_ns(started.elapsed()));
       step_count = trainer.vocab_size().saturating_sub(initial_vocab_size);
       if let Some(sampler) = training_rss_sampler.as_ref() {
@@ -1265,7 +1283,7 @@ mod tests {
   }
 
   #[test]
-  fn bbpe_train_until_runner_matches_exact_and_bounded() {
+  fn bbpe_fallback_runner_matches_exact_and_bounded() {
     use std::{collections::BTreeMap, fs};
 
     use super::runner;

@@ -816,6 +816,7 @@ mod tests {
         "smoke_en_byte_v1000",
         "smoke_zh_unicode_v300",
         "smoke_zh_unicode_v1000",
+        "smoke_zh_unicode_bbpe_r90_v1000",
       ],
     );
 
@@ -834,6 +835,7 @@ mod tests {
         300,
         "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
         "fa65e898d4cec1be5b78732ec4738b20213856a2de73bba5ca34366d347e91c0",
+        false,
       ),
       (
         "smoke_en_byte_v1000",
@@ -841,6 +843,7 @@ mod tests {
         1000,
         "20b257111ca6e5ce81ee0d0e78924b9987db13029d7d006e4eb981cca151c9f4",
         "197a9f7d6ec3630370b1a30e0392b0f2fbcd2de1d36ee4d05884f01f2a877be9",
+        false,
       ),
       (
         "smoke_zh_unicode_v300",
@@ -848,6 +851,7 @@ mod tests {
         300,
         "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
         "b3f2e74a4b169244774d71cd289d246847d4a56e585411436c1e4c44219e7b3a",
+        false,
       ),
       (
         "smoke_zh_unicode_v1000",
@@ -855,6 +859,15 @@ mod tests {
         1000,
         "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
         "34dcb3aeb65c2220f50158d594defb73f1d5649b296c0020220266ba70f1d9e1",
+        false,
+      ),
+      (
+        "smoke_zh_unicode_bbpe_r90_v1000",
+        Unit::Unicode,
+        1000,
+        "ffb74990eb0b04ca0986a24ead7acf63e5483df7afb68c65ad2c397497a67c6a",
+        "7f6216c40793da7bf8e98dab3ffa90a15c8a233af990674b5ac7b3c861417639",
+        true,
       ),
     ];
     for (case, expected) in cases.iter().zip(expected) {
@@ -869,7 +882,7 @@ mod tests {
       assert_eq!(case.special_tokens, [DEFAULT_EOT]);
       assert_eq!(case.bucket_size, 701);
       assert_eq!(case.bigram_cutoff_freq, None);
-      assert!(!case.bbpe_fallback);
+      assert_eq!(case.bbpe_fallback, expected.5);
       assert_eq!(case.primary_vocab_ratio, 0.9);
       assert_eq!(case.rayon_threads, 3);
     }

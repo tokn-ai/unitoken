@@ -59,9 +59,10 @@ trainer = BpeTrainer(
 model = trainer.validate_model()
 ```
 
-`train()` stops before a merge below the cutoff. Manual `step()` calls remain
-unrestricted, while validation rejects a final pair merge below the cutoff.
-Equality is valid because bigram selection retains every tie at the cutoff.
+Automatic `train()` and `train_with_bbpe_fallback()` calls stop before a merge
+below the cutoff. Manual `step()` calls remain unrestricted, while validation
+rejects a final pair merge below the cutoff. Equality is valid because bigram
+selection retains every tie at the cutoff.
 
 Unicode BBPE fallback
 ---------------------
@@ -73,11 +74,12 @@ inside Unicode scalars that are omitted from the direct Unicode alphabet:
 trainer = BpeTrainer(
   [],
   unit="unicode",
-  bbpe_fallback=True,
-  primary_vocab_ratio=0.9,
 )
 trainer.add_word_counter(word_counter)
-trainer.train(vocab_size=10_000)
+trainer.train_with_bbpe_fallback(
+  vocab_size=10_000,
+  primary_vocab_ratio=0.9,
+)
 ```
 
 The ratio applies only to learned slots after special tokens and the mandatory
@@ -89,11 +91,14 @@ primary pair training. The primary and fallback merge streams are combined by
 frequency only after both phases finish. Fallback pseudo-words are isolated per
 Unicode scalar, so the byte pass never learns across scalar boundaries.
 
-`bbpe_fallback` is opt-in and is only valid with `unit="unicode"`. Because the
-phase boundary depends on the requested vocabulary size, use `train()` rather
-than the manual `init_training()` / `step()` lifecycle. Once the fallback pass
-has run, calls at the same or a smaller target are no-ops; a larger target needs
-a new trainer. The resulting model is still a Unicode Unitoken model; encoding
+`train_with_bbpe_fallback()` is only valid with `unit="unicode"`. Ordinary
+`train()`, `init_training()`, and `step()` always perform normal Unicode BPE;
+fallback is a separate, target-aware operation. A call that reserves fallback
+slots must start before ordinary vocabulary growth because its phase boundary
+depends on the requested vocabulary size. Once the fallback pass has run, the
+trainer is finalized; create a new trainer for further training. A ratio of
+`1.0` reserves no fallback slots, delegates to ordinary training, and remains
+extendable. The resulting model is still a Unicode Unitoken model; encoding
 behavior is carried by its merge rules, so no fallback option is needed when
 loading it.
 
@@ -245,12 +250,14 @@ cargo bench --bench regression -- suite 64mib
 cargo bench --bench regression -- suite 1gib
 ```
 
-`smoke.yml` uses checked-in fixtures and is the profile run for pull requests.
-Codec cases accept `split_on_vocab_bigrams: false` for measured opt-out
-comparisons; reports and encoder fingerprints record the selected value.
-The `64mib.yml` and `1gib.yml` profiles use the prepared FineWeb2 Chinese word
-inventories under `out/data/`, so those local inputs must exist before running
-them. Validate a profile without executing its cases with `--check`:
+`smoke.yml` uses checked-in fixtures, includes a 90% primary Unicode BBPE case,
+and is the profile run for pull requests. Codec cases accept
+`split_on_vocab_bigrams: false` for measured opt-out comparisons; reports and
+encoder fingerprints record the selected value. The `64mib.yml` and `1gib.yml`
+profiles compare ordinary and 90% primary BBPE training on the prepared
+FineWeb2 Chinese word inventories under `out/data/`, so those local inputs must
+exist before running them. Validate a profile without executing its cases with
+`--check`:
 
 ```bash
 cargo bench --bench regression -- suite 64mib --check
