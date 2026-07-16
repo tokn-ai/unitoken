@@ -18,6 +18,7 @@ from tokenizers import trainers
 from uni_tokenizer import BpeTrainer
 from uni_tokenizer import BoundaryMode
 from uni_tokenizer import PreTokenizer
+from uni_tokenizer import WordCounter
 
 from common import DEFAULT_CHUNK_SIZE
 from common import REPO_ROOT
@@ -33,6 +34,7 @@ from common import write_report
 
 
 DEFAULT_WORDS = REPO_ROOT / "fixtures" / "_words.tinystories_sample_5M.json"
+DEFAULT_HOT_PAIR_WINDOW_SIZE = 4096
 SCRIPT_NAME = "compare_hf_training"
 
 
@@ -65,10 +67,16 @@ def expanded_words(words: Sequence[tuple[str, int]]) -> Iterable[str]:
       yield word
 
 
-def train_unitoken(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[str, Any]:
-  trainer = BpeTrainer(SPECIAL_TOKENS, unit="byte", initial_alphabet="byte_level")
-  trainer.add_words(words)
-  trainer.train(vocab_size)
+def new_unitoken_trainer(hot_pair_window_size: int) -> BpeTrainer:
+  return BpeTrainer(
+    SPECIAL_TOKENS,
+    unit="byte",
+    initial_alphabet="byte_level",
+    hot_pair_window_size=hot_pair_window_size,
+  )
+
+
+def unitoken_result(trainer: BpeTrainer) -> dict[str, Any]:
   vocab = {
     to_byte_level_token(token): rank
     for token, rank in trainer.vocab.items()
@@ -77,7 +85,30 @@ def train_unitoken(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[st
     "vocab": vocab,
     "vocab_size": trainer.vocab_size,
     "final_merge_freq": trainer.last_merge_freq,
+    "hot_pair_window_stats": trainer.hot_pair_window_stats,
   }
+
+
+def train_unitoken(
+  words: Sequence[tuple[str, int]],
+  vocab_size: int,
+  hot_pair_window_size: int,
+) -> dict[str, Any]:
+  trainer = new_unitoken_trainer(hot_pair_window_size)
+  trainer.add_words(words)
+  trainer.train(vocab_size)
+  return unitoken_result(trainer)
+
+
+def train_unitoken_from_counter(
+  counter: WordCounter,
+  vocab_size: int,
+  hot_pair_window_size: int,
+) -> dict[str, Any]:
+  trainer = new_unitoken_trainer(hot_pair_window_size)
+  trainer.add_word_counter(counter)
+  trainer.train(vocab_size)
+  return unitoken_result(trainer)
 
 
 def train_hugging_face(words: Sequence[tuple[str, int]], vocab_size: int) -> dict[str, Any]:
@@ -133,20 +164,29 @@ def iter_text_chunks(path: Path, chunk_bytes: int) -> Iterable[str]:
       yield pending.decode("utf-8")
 
 
-def train_unitoken_from_text(path: Path, vocab_size: int, chunk_size: int, boundary: BoundaryMode) -> dict[str, Any]:
+def train_unitoken_from_text(
+  path: Path,
+  vocab_size: int,
+  chunk_size: int,
+  boundary: BoundaryMode,
+  hot_pair_window_size: int,
+) -> dict[str, Any]:
   started = time.perf_counter()
   pretokenizer = PreTokenizer(SPECIAL_TOKENS, SPECIAL_TOKENS[0])
-  words = pretokenizer.get_words_from_file(path, chunk_size=chunk_size, boundary=boundary)
+  segments = pretokenizer.find_chunk_boundaries(path, chunk_size=chunk_size, boundary=boundary)
+  counter = pretokenizer.word_counter()
+  counter.add_source(iter_text_segments(path, segments))
   pretokenize_s = time.perf_counter() - started
+  unique_words = counter.len
 
   started = time.perf_counter()
-  train_result = train_unitoken(list(words.items()), vocab_size)
+  train_result = train_unitoken_from_counter(counter, vocab_size, hot_pair_window_size)
   train_s = time.perf_counter() - started
   train_result.update({
     "pretokenize_s": pretokenize_s,
     "train_s": train_s,
-    "unique_words": len(words),
-    "occurrences": sum(words.values()),
+    "unique_words": unique_words,
+    "occurrences": None,
   })
   return train_result
 
@@ -198,8 +238,7 @@ def time_call(label: str, fn: Callable[[], dict[str, Any]], repeats: int) -> dic
   for key, value in result.items():
     if key in timed or key == "vocab":
       continue
-    if isinstance(value, (int, float, str, bool, type(None))):
-      timed[key] = value
+    timed[key] = value
   return timed
 
 
@@ -214,7 +253,7 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
 
   unitoken = time_call(
     "unitoken.train",
-    lambda: train_unitoken(words, args.vocab_size),
+    lambda: train_unitoken(words, args.vocab_size, args.hot_pair_window_size),
     args.repeats,
   )
   guard = (
@@ -244,6 +283,7 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
       experiment_name=args.experiment_name,
       notes=[
         "Unitoken receives compressed (word, frequency) pairs.",
+        "Unitoken bounds persistent pair occurrence postings with the configured hot-pair window.",
         "Hugging Face receives an expanded iterator of repeated words because the Python tokenizers API does not accept compressed counts.",
         "Use raw_text_unitoken_vs_hf for end-to-end implementation comparison.",
       ],
@@ -263,6 +303,7 @@ def run_words(args: argparse.Namespace) -> dict[str, Any]:
       "word_inventory_manifest": manifest,
     },
     "target_vocab_size": args.vocab_size,
+    "hot_pair_window_size": args.hot_pair_window_size,
     "same_vocab": same_vocab,
     "speedup_hf_over_unitoken_median": speedup,
     "benchmarks": [
@@ -306,7 +347,13 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
 
   unitoken = time_call(
     "unitoken.raw_train",
-    lambda: train_unitoken_from_text(args.text, args.vocab_size, args.chunk_size, boundary),
+    lambda: train_unitoken_from_text(
+      args.text,
+      args.vocab_size,
+      args.chunk_size,
+      boundary,
+      args.hot_pair_window_size,
+    ),
     args.repeats,
   )
   hf = time_call(
@@ -336,7 +383,9 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
       experiment_name=args.experiment_name,
       notes=[
         "Raw-text mode compares end-to-end training contracts.",
-        "Unitoken timing includes unitoken pretokenization plus training.",
+        "Unitoken timing includes native WordCounter pretokenization plus bounded-window training.",
+        "The native WordCounter is consumed directly without materializing the full inventory in Python.",
+        "Raw unitoken occurrence count is null because computing it through the current Python API would copy the full inventory.",
         "By default Hugging Face receives unitoken chunk boundaries so vocab parity reflects tokenizer/trainer behavior instead of iterator boundary differences.",
       ],
     ),
@@ -347,9 +396,11 @@ def run_text(args: argparse.Namespace) -> dict[str, Any]:
       "boundary": boundary,
       "chunk_size": args.chunk_size,
       "huggingface_chunking": hf_chunking,
+      "unitoken_input_kind": "native_word_counter",
     },
     "huggingface_chunking": hf_chunking,
     "target_vocab_size": args.vocab_size,
+    "hot_pair_window_size": args.hot_pair_window_size,
     "same_vocab": same_vocab,
     "speedup_hf_over_unitoken_median": speedup,
     "speedup_hf_over_unitoken_train_phase": train_phase_speedup,
@@ -368,6 +419,12 @@ def main(argv: Sequence[str] | None = None) -> int:
   input_group.add_argument("--text", type=Path, help="Raw UTF-8 text file for end-to-end training.")
   parser.add_argument("--vocab-size", type=int, default=2000)
   parser.add_argument("--repeats", type=int, default=3)
+  parser.add_argument(
+    "--hot-pair-window-size",
+    type=int,
+    default=DEFAULT_HOT_PAIR_WINDOW_SIZE,
+    help="Retain occurrence postings for only the exact top-K unitoken pair window.",
+  )
   parser.add_argument("--max-occurrences", type=int, help="Truncate the weighted corpus for a faster smoke benchmark.")
   parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Target unitoken pretokenizer chunk size in bytes for --text mode.")
   parser.add_argument("--boundary", choices=["auto", "eot", "line", "utf8"], default="auto", help="Boundary strategy for unitoken chunking in --text mode.")
@@ -379,6 +436,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.words = DEFAULT_WORDS
   if args.repeats < 1:
     parser.error("--repeats must be at least 1")
+  if args.hot_pair_window_size < 1:
+    parser.error("--hot-pair-window-size must be at least 1")
   if args.chunk_size < 1:
     parser.error("--chunk-size must be at least 1")
   if args.hf_chunk_bytes is not None and args.hf_chunk_bytes < 1:
