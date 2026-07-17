@@ -8,7 +8,7 @@ pub mod model;
 pub mod encoder;
 pub mod utils;
 
-pub use trainer::{BpeTrainer, BpeTrainerConfig, InitialAlphabet, TieBreak};
+pub use trainer::{BpeTrainer, BpeTrainerConfig, InitialAlphabet, TieBreak, TrainerMemoryUsage};
 pub use model::BpeModel;
 pub use encoder::BpeEncoder;
 use utils::*;

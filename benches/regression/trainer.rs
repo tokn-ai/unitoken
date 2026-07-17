@@ -274,6 +274,27 @@ pub(crate) mod report {
     pub sampled_peak_during_training_bytes: Option<u64>,
     pub rss_sample_interval_ms: Option<u64>,
     pub process_peak_rss_through_training_bytes: Option<u64>,
+    /// Persistent trainer allocations grouped by owner. Unlike RSS, these
+    /// exclude allocator retention and temporary parallel work.
+    pub structural_after_trainer_build: StructuralMemoryReport,
+    pub structural_after_init_training: Option<StructuralMemoryReport>,
+    pub structural_after_training: StructuralMemoryReport,
+  }
+
+  #[derive(Clone, Debug, Deserialize, Serialize)]
+  pub struct StructuralMemoryReport {
+    pub estimated_persistent_bytes: usize,
+    pub word_storage_bytes: usize,
+    pub pair_table_bytes: usize,
+    pub occurrence_set_header_bytes: usize,
+    pub occurrence_capacity_bytes: usize,
+    pub merge_heap_entries: usize,
+    pub merge_heap_capacity: usize,
+    pub merge_heap_bytes: usize,
+    pub merge_storage_bytes: usize,
+    pub vocab_token_bytes: usize,
+    pub pair_entries: usize,
+    pub occurrence_capacity_entries: usize,
   }
 
   #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -651,8 +672,8 @@ mod runner {
   use super::{
     config::{CaseRequest, InitialAlphabetName, TieBreakName},
     report::{
-      CaseMeasurement, CaseOutcome, HotPairWindowReport, InputReport, MemoryReport, StepBucket, TimingReport,
-      TrainingCounts,
+      CaseMeasurement, CaseOutcome, HotPairWindowReport, InputReport, MemoryReport, StepBucket,
+      StructuralMemoryReport, TimingReport, TrainingCounts,
     },
   };
 
@@ -668,6 +689,24 @@ mod runner {
   struct CaseError {
     phase: &'static str,
     message: String,
+  }
+
+  fn structural_memory<C, I>(trainer: &BpeTrainer<C, I>) -> StructuralMemoryReport {
+    let usage = trainer.memory_usage();
+    StructuralMemoryReport {
+      estimated_persistent_bytes: usage.estimated_persistent_bytes,
+      word_storage_bytes: usage.word_storage_bytes,
+      pair_table_bytes: usage.pair_table_bytes,
+      occurrence_set_header_bytes: usage.occurrence_set_header_bytes,
+      occurrence_capacity_bytes: usage.occurrence_capacity_bytes,
+      merge_heap_entries: usage.merge_heap_entries,
+      merge_heap_capacity: usage.merge_heap_capacity,
+      merge_heap_bytes: usage.merge_heap_bytes,
+      merge_storage_bytes: usage.merge_storage_bytes,
+      vocab_token_bytes: usage.vocab_token_bytes,
+      pair_entries: usage.pair_entries,
+      occurrence_capacity_entries: usage.occurrence_capacity_entries,
+    }
   }
 
   impl CaseError {
@@ -809,6 +848,7 @@ mod runner {
     let mut trainer = BpeTrainer::<C, I>::from_words_with_config(words, &request.case.special_tokens, config);
     let build_trainer_ns = duration_ns(started.elapsed());
     let initial_vocab_size = trainer.vocab_size();
+    let structural_after_trainer_build = structural_memory(&trainer);
     let current_after_trainer_build_bytes = rss::current_rss_bytes();
     let peak_after_trainer_build_bytes = rss::process_peak_rss_bytes();
     let sampled_peak_during_trainer_build_bytes = build_rss_sampler.map(rss::RssSampler::finish);
@@ -817,6 +857,7 @@ mod runner {
     let init_training_ns;
     let current_after_init_training_bytes;
     let peak_after_init_training_bytes;
+    let structural_after_init_training;
     let mut step_count = 0usize;
     let mut training_steps_ns = 0u64;
     let mut train_until_ns = None;
@@ -826,6 +867,7 @@ mod runner {
       init_training_ns = 0;
       current_after_init_training_bytes = None;
       peak_after_init_training_bytes = None;
+      structural_after_init_training = None;
       let started = Instant::now();
       train_until_with_bbpe_fallback(
         &mut trainer,
@@ -843,6 +885,7 @@ mod runner {
       init_training_ns = duration_ns(started.elapsed());
       current_after_init_training_bytes = rss::current_rss_bytes();
       peak_after_init_training_bytes = rss::process_peak_rss_bytes();
+      structural_after_init_training = Some(structural_memory(&trainer));
       if let Some(sampler) = training_rss_sampler.as_ref() {
         sampler.observe();
       }
@@ -885,6 +928,7 @@ mod runner {
       ));
     }
     let current_after_training_bytes = rss::current_rss_bytes();
+    let structural_after_training = structural_memory(&trainer);
     let process_peak_rss_through_training_bytes = rss::process_peak_rss_bytes();
     let sampled_peak_during_training_bytes = training_rss_sampler.map(rss::RssSampler::finish);
     let rss_sample_interval_ms = (sampled_peak_during_trainer_build_bytes.is_some()
@@ -954,6 +998,9 @@ mod runner {
         sampled_peak_during_training_bytes,
         rss_sample_interval_ms,
         process_peak_rss_through_training_bytes,
+        structural_after_trainer_build,
+        structural_after_init_training,
+        structural_after_training,
       },
       step_buckets,
       model_valid: true,

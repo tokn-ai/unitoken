@@ -177,6 +177,24 @@ fn validate_primary_vocab_ratio(primary_vocab_ratio: f64) -> PyResult<()> {
   Ok(())
 }
 
+fn trainer_memory_usage<C, I>(trainer: &BpeTrainer<C, I>) -> BTreeMap<&'static str, u64> {
+  let usage = trainer.memory_usage();
+  BTreeMap::from([
+    ("estimated_persistent_bytes", usage.estimated_persistent_bytes as u64),
+    ("word_entries", usage.word_entries as u64),
+    ("word_storage_bytes", usage.word_storage_bytes as u64),
+    ("pair_entries", usage.pair_entries as u64),
+    ("pair_table_bytes", usage.pair_table_bytes as u64),
+    ("occurrence_set_header_bytes", usage.occurrence_set_header_bytes as u64),
+    ("occurrence_capacity_entries", usage.occurrence_capacity_entries as u64),
+    ("occurrence_capacity_bytes", usage.occurrence_capacity_bytes as u64),
+    ("merge_heap_bytes", usage.merge_heap_bytes as u64),
+    ("merge_storage_bytes", usage.merge_storage_bytes as u64),
+    ("vocab_entries", usage.vocab_entries as u64),
+    ("vocab_token_bytes", usage.vocab_token_bytes as u64),
+  ])
+}
+
 fn chunk_options(chunk_size: u64, boundary: &str) -> PyResult<ChunkOptions> {
   let boundary = BoundaryMode::parse(boundary)
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -265,6 +283,15 @@ impl BpeTrainer_u8_Idx {
       ("resident_pairs", self.inner.hot_resident_pairs() as u64),
       ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
     ]))
+  }
+
+  #[getter]
+  /// Capacity-backed breakdown of persistent trainer storage.
+  ///
+  /// This attributes trainer-owned allocations and is not process RSS; use it
+  /// to identify why bounded occurrence postings do or do not dominate.
+  pub fn memory_usage(&self) -> BTreeMap<&'static str, u64> {
+    trainer_memory_usage(&self.inner)
   }
 
   /// Initialize internal training state.
@@ -380,6 +407,15 @@ impl BpeTrainer_Character_CharIdx {
       ("resident_pairs", self.inner.hot_resident_pairs() as u64),
       ("occurrence_capacity", self.inner.hot_occurrence_capacity() as u64),
     ]))
+  }
+
+  #[getter]
+  /// Capacity-backed breakdown of persistent trainer storage.
+  ///
+  /// This attributes trainer-owned allocations and is not process RSS; use it
+  /// to identify why bounded occurrence postings do or do not dominate.
+  pub fn memory_usage(&self) -> BTreeMap<&'static str, u64> {
+    trainer_memory_usage(&self.inner)
   }
 
   /// Initialize internal training state.

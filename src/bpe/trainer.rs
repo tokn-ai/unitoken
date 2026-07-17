@@ -1,4 +1,4 @@
-use std::{cmp::{Ordering, Reverse}, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap}, hash::Hash, ops::Range, sync::atomic::AtomicU64};
+use std::{cmp::{Ordering, Reverse}, collections::{BinaryHeap, BTreeMap, BTreeSet, HashMap, HashSet}, hash::Hash, mem::size_of, ops::Range, sync::atomic::AtomicU64};
 
 use ahash::{AHashMap, AHashSet};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -8,6 +8,36 @@ use crate::{MyError, MyResult, traits::{CanStrToWord, CanToWord, CanTrain, Train
 use super::*;
 use super::pair::{PairState, PairStore};
 pub use super::pair::HotPairWindowStats;
+
+/// Capacity-backed storage owned by a BPE trainer.
+///
+/// This is intentionally not an RSS measurement. It attributes persistent
+/// trainer allocations to their owning data structure, while process RSS also
+/// contains allocator retention, thread stacks, code, and transient work.
+/// `estimated_persistent_bytes` is therefore best used to compare modes and
+/// identify the dominant persistent category, not as a replacement for RSS.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrainerMemoryUsage {
+  pub word_entries: usize,
+  pub word_entry_capacity: usize,
+  pub word_storage_bytes: usize,
+  pub pair_entries: usize,
+  pub pair_table_capacity: usize,
+  pub pair_table_bytes: usize,
+  pub occurrence_set_slots: usize,
+  pub occurrence_set_slot_capacity: usize,
+  pub occurrence_set_header_bytes: usize,
+  pub occurrence_capacity_entries: usize,
+  pub occurrence_capacity_bytes: usize,
+  pub merge_heap_entries: usize,
+  pub merge_heap_capacity: usize,
+  pub merge_heap_bytes: usize,
+  pub merge_entries: usize,
+  pub merge_storage_bytes: usize,
+  pub vocab_entries: usize,
+  pub vocab_token_bytes: usize,
+  pub estimated_persistent_bytes: usize,
+}
 
 fn bbpe_unit_error() -> MyError {
   MyError::SpecError("bbpe_fallback requires a Unicode trainer".to_string())
@@ -64,7 +94,9 @@ pub struct BpeTrainerConfig {
   /// Keep occurrence postings for only a resident top-K pair window.
   ///
   /// `None` preserves the full exact occurrence map. A positive value enables
-  /// K-to-2K hysteresis with cold-winner hydration scans.
+  /// K-to-2K occurrence hysteresis with cold-winner hydration scans. It also
+  /// bounds the merge-candidate heap to a top-K frontier rebuilt from the
+  /// authoritative pair table when that frontier is exhausted.
   pub hot_pair_window_size: Option<usize>,
   /// Stop automatic training before applying a merge below this frequency.
   ///
@@ -147,6 +179,7 @@ pub struct BpeTrainer<C, I> {
   pub merges: Vec<Merge<C, I>>,
   pub(crate) pre_merges: PairStore<C, I>,
   merge_heap: BinaryHeap<MergeCandidate<C, I>>,
+  merge_heap_cutoff: Option<MergeCandidate<C, I>>,
   pub words: Vec<PreToken<C, I>>,
   frozen_initial_units: AHashSet<I>,
   last_event_freq: Option<Freq>,
@@ -772,6 +805,51 @@ impl<C, I> BpeTrainer<C, I> {
     self.pre_merges.resident_occurrence_capacity()
   }
 
+  /// Return a capacity-backed breakdown of persistent trainer storage.
+  ///
+  /// The occurrence category is the part constrained by
+  /// [`BpeTrainerConfig::hot_pair_window_size`]. Word inventory and pair-table
+  /// storage remain intentionally global so bounded mode can preserve exact
+  /// frequencies and winner selection.
+  pub fn memory_usage(&self) -> TrainerMemoryUsage {
+    let pair_usage = self.pre_merges.memory_usage();
+    let word_storage_bytes = self.words.capacity() * size_of::<PreToken<C, I>>()
+      + self.words.iter().map(|word| word.idxs.capacity() * size_of::<I>()).sum::<usize>()
+      + unique_word_payload_bytes(self.words.iter().map(|word| &word.src));
+    let vocab_token_bytes = unique_word_payload_bytes(self.vocab.values());
+    let merge_storage_bytes = self.merges.capacity() * size_of::<Merge<C, I>>();
+    let merge_heap_bytes = self.merge_heap.capacity() * size_of::<MergeCandidate<C, I>>();
+    let estimated_persistent_bytes = word_storage_bytes
+      .saturating_add(pair_usage.pair_table_bytes)
+      .saturating_add(pair_usage.occurrence_set_header_bytes)
+      .saturating_add(pair_usage.occurrence_capacity_bytes)
+      .saturating_add(merge_storage_bytes)
+      .saturating_add(merge_heap_bytes)
+      .saturating_add(vocab_token_bytes);
+
+    TrainerMemoryUsage {
+      word_entries: self.words.len(),
+      word_entry_capacity: self.words.capacity(),
+      word_storage_bytes,
+      pair_entries: pair_usage.pair_entries,
+      pair_table_capacity: pair_usage.pair_table_capacity,
+      pair_table_bytes: pair_usage.pair_table_bytes,
+      occurrence_set_slots: pair_usage.occurrence_set_slots,
+      occurrence_set_slot_capacity: pair_usage.occurrence_set_slot_capacity,
+      occurrence_set_header_bytes: pair_usage.occurrence_set_header_bytes,
+      occurrence_capacity_entries: pair_usage.occurrence_capacity_entries,
+      occurrence_capacity_bytes: pair_usage.occurrence_capacity_bytes,
+      merge_heap_entries: self.merge_heap.len(),
+      merge_heap_capacity: self.merge_heap.capacity(),
+      merge_heap_bytes,
+      merge_entries: self.merges.len(),
+      merge_storage_bytes,
+      vocab_entries: self.vocab.len(),
+      vocab_token_bytes,
+      estimated_persistent_bytes,
+    }
+  }
+
   /// Construct an empty trainer with no vocab, merges, or words.
   pub fn empty() -> Self {
     Self {
@@ -783,6 +861,7 @@ impl<C, I> BpeTrainer<C, I> {
       merges: Vec::new(),
       pre_merges: PairStore::new(None),
       merge_heap: BinaryHeap::new(),
+      merge_heap_cutoff: None,
       special_tokens: Vec::new(),
       words: Vec::new(),
       frozen_initial_units: AHashSet::new(),
@@ -790,6 +869,15 @@ impl<C, I> BpeTrainer<C, I> {
       training_state: TrainingState::Open,
     }
   }
+}
+
+fn unique_word_payload_bytes<'a, C: 'a>(words: impl IntoIterator<Item = &'a Word<C>>) -> usize {
+  let mut seen = HashSet::new();
+  words
+    .into_iter()
+    .filter(|word| seen.insert(Arc::as_ptr(*word) as *const C as usize))
+    .map(|word| word.len() * size_of::<C>())
+    .sum()
 }
 
 impl<C, I: IdxLike> BpeTrainer<C, I>
@@ -809,6 +897,7 @@ where
   fn _build_pre_merges_with_options(&mut self, parallel: bool, chunk_units: usize) {
     debug!("Initializing BPE training with {} words", self.words.len());
     self.merge_heap.clear();
+    self.merge_heap_cutoff = None;
     self.pre_merges.reset(self.config.hot_pair_window_size);
     let collect_occurrences = !self.pre_merges.is_bounded();
     self._build_pre_merges_batched(parallel, chunk_units, collect_occurrences);
@@ -891,16 +980,45 @@ where
     if pair.freq <= 0 {
       return;
     }
-    self.merge_heap.push(MergeCandidate::from_pair(tp, pair, self.config.tie_break));
+    let candidate = MergeCandidate::from_pair(tp, pair, self.config.tie_break);
+    if self.pre_merges.is_bounded()
+      && self.merge_heap_cutoff.as_ref().is_some_and(|cutoff| candidate < *cutoff)
+    {
+      return;
+    }
+    self.merge_heap.push(candidate);
   }
 
   fn rebuild_merge_heap(&mut self) {
-    self.merge_heap = self
-      .pre_merges
-      .iter()
-      .filter(|(_, pair)| pair.freq > 0)
-      .map(|(tp, pair)| MergeCandidate::from_pair(*tp, pair, self.config.tie_break))
-      .collect();
+    if !self.pre_merges.is_bounded() {
+      self.merge_heap = self
+        .pre_merges
+        .iter()
+        .filter(|(_, pair)| pair.freq > 0)
+        .map(|(tp, pair)| MergeCandidate::from_pair(*tp, pair, self.config.tie_break))
+        .collect();
+      self.merge_heap_cutoff = None;
+      return;
+    }
+
+    let candidates = self.ranked_top_merge_candidates();
+    self.merge_heap_cutoff = (candidates.len() == self.pre_merges.window_size())
+      .then(|| candidates.last().expect("non-empty top-K candidate frontier").clone());
+    self.merge_heap = candidates.into_iter().collect();
+  }
+
+  fn ranked_top_merge_candidates(&self) -> Vec<MergeCandidate<C, I>> {
+    let limit = self.pre_merges.window_size();
+    let mut top = BinaryHeap::<Reverse<MergeCandidate<C, I>>>::with_capacity(limit.saturating_add(1));
+    for (tp, pair) in self.pre_merges.iter().filter(|(_, pair)| pair.freq > 0) {
+      top.push(Reverse(MergeCandidate::from_pair(*tp, pair, self.config.tie_break)));
+      if top.len() > limit {
+        top.pop();
+      }
+    }
+    let mut candidates = top.into_iter().map(|Reverse(candidate)| candidate).collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| right.cmp(left));
+    candidates
   }
 
   fn ranked_top_pairs(&self) -> Vec<MergeCandidate<C, I>> {
@@ -999,36 +1117,45 @@ where
   }
 
   fn _get_largest_merge(&mut self) -> Option<Merge<C, I>> {
-    while let Some(candidate) = self.merge_heap.pop() {
-      if candidate.freq <= 0 {
-        continue;
-      }
-      if !self.frozen_initial_units.is_empty()
-        && (self.frozen_initial_units.contains(&candidate.tp.0)
-          || self.frozen_initial_units.contains(&candidate.tp.1))
-      {
-        continue;
-      }
-      let Some(pair) = self.pre_merges.get(&candidate.tp) else {
-        continue;
-      };
-      if pair.freq != candidate.freq {
-        continue;
-      }
-      if candidate.content.as_ref().is_some_and(|content| pair.content != *content) {
-        continue;
-      }
-      let is_pair = pair.target.is_none();
-      if self.pre_merges.is_bounded()
-        && is_pair
-        && !self.pre_merges.is_resident(&candidate.tp)
-      {
-        self.refill_hot_occurrences(Some(candidate.tp));
+    loop {
+      while let Some(candidate) = self.merge_heap.pop() {
+        if candidate.freq <= 0 {
+          continue;
+        }
+        if !self.frozen_initial_units.is_empty()
+          && (self.frozen_initial_units.contains(&candidate.tp.0)
+            || self.frozen_initial_units.contains(&candidate.tp.1))
+        {
+          continue;
+        }
+        let Some(pair) = self.pre_merges.get(&candidate.tp) else {
+          continue;
+        };
+        if pair.freq != candidate.freq {
+          continue;
+        }
+        if candidate.content.as_ref().is_some_and(|content| pair.content != *content) {
+          continue;
+        }
+        let is_pair = pair.target.is_none();
+        if self.pre_merges.is_bounded()
+          && is_pair
+          && !self.pre_merges.is_resident(&candidate.tp)
+        {
+          self.refill_hot_occurrences(Some(candidate.tp));
+        }
+
+        return self.pre_merges.take_merge(&candidate.tp);
       }
 
-      return self.pre_merges.take_merge(&candidate.tp);
+      if !self.pre_merges.is_bounded() || self.merge_heap_cutoff.is_none() {
+        return None;
+      }
+      self.rebuild_merge_heap();
+      if self.merge_heap.is_empty() {
+        return None;
+      }
     }
-    None
   }
 
   /// Apply one merge operation and return the newly assigned vocab index.
@@ -1946,6 +2073,30 @@ mod tests {
     assert!(stats.hydration_scans > 1, "fixture must exercise a cold winner refill");
     assert_eq!(stats.peak_resident_pairs, 1);
     trainer.validate_model().unwrap();
+  }
+
+  #[test]
+  fn test_memory_usage_attributes_hot_window_to_occurrence_postings() {
+    let words = [("ab", 10), ("bc", 10), ("cd", 10), ("de", 10)];
+    let mut exact = BpeTrainer::<u8, Idx>::from_words(words, &[]);
+    let mut bounded = BpeTrainer::<u8, Idx>::from_words_with_config(
+      words,
+      &[],
+      BpeTrainerConfig {
+        hot_pair_window_size: Some(1),
+        ..BpeTrainerConfig::default()
+      },
+    );
+    exact.init_training();
+    bounded.init_training();
+
+    let exact_usage = exact.memory_usage();
+    let bounded_usage = bounded.memory_usage();
+    assert_eq!(exact_usage.word_storage_bytes, bounded_usage.word_storage_bytes);
+    assert_eq!(exact_usage.pair_entries, bounded_usage.pair_entries);
+    assert_eq!(exact_usage.pair_table_bytes, bounded_usage.pair_table_bytes);
+    assert!(exact_usage.occurrence_capacity_bytes > bounded_usage.occurrence_capacity_bytes);
+    assert!(exact_usage.estimated_persistent_bytes > bounded_usage.estimated_persistent_bytes);
   }
 
   #[test]
