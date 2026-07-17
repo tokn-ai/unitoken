@@ -140,8 +140,8 @@ Bounded-memory BPE training
 
 By default, the trainer retains occurrence sets for every discovered pair.
 For large word inventories, `hot_pair_window_size` bounds persistent occurrence
-sets while preserving exact global pair frequencies, winner selection, and
-tie-breaking:
+sets and the merge-candidate heap frontier while preserving exact global pair
+frequencies, winner selection, and tie-breaking:
 
 ```python
 trainer = BpeTrainer(
@@ -173,6 +173,19 @@ Both modes produced the same final merge frequency and model. Inspect
 occurrence-capacity diagnostics. Corpus shape and target vocabulary size affect
 the best K, so benchmark representative inventories before changing the
 default for a deployment.
+
+The hot window is intentionally not a complete memory bound. It retains the
+full word inventory and one compact pair-table entry for every discovered pair
+so global frequencies and exact winner selection remain available. It bounds
+the per-pair occurrence postings and keeps only a top-K merge-candidate
+frontier, rebuilding it from the pair table when exhausted. Inspect
+`trainer.memory_usage` to separate capacity-backed persistent storage into
+`word_storage_bytes`, `pair_table_bytes`, `occurrence_capacity_bytes`,
+`merge_heap_bytes`, and model storage. The reported
+`estimated_persistent_bytes` excludes RSS that cannot be attributed to those
+structures, such as allocator-retained pages, stacks, and temporary parallel
+work. In the regression-suite JSON, the same breakdown is recorded after
+construction, initialization, and training.
 
 Tiktoken-compatible API
 -----------------------

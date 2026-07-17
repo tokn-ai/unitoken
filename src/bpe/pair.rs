@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, num::NonZeroUsize};
+use std::{collections::HashMap, hash::Hash, mem::size_of, num::NonZeroUsize};
 
 use ahash::{AHashMap, AHashSet};
 use slab::Slab;
@@ -14,6 +14,24 @@ pub struct HotPairWindowStats {
   pub batch_prunes: u64,
   pub prune_evictions: u64,
   pub peak_resident_pairs: usize,
+}
+
+/// Capacity-backed storage owned by the pair candidate table.
+///
+/// These values deliberately describe Rust containers rather than process RSS:
+/// allocator arenas, stacks, code, and temporary work are not attributable to
+/// one trainer field. They are useful for comparing exact and bounded modes,
+/// because the latter only changes occurrence posting ownership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PairStoreMemoryUsage {
+  pub pair_entries: usize,
+  pub pair_table_capacity: usize,
+  pub pair_table_bytes: usize,
+  pub occurrence_set_slots: usize,
+  pub occurrence_set_slot_capacity: usize,
+  pub occurrence_set_header_bytes: usize,
+  pub occurrence_capacity_entries: usize,
+  pub occurrence_capacity_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +187,21 @@ impl<C, I> PairStore<C, I> {
       self.occurs_in.capacity()
     } else {
       0
+    }
+  }
+
+  pub(crate) fn memory_usage(&self) -> PairStoreMemoryUsage {
+    PairStoreMemoryUsage {
+      pair_entries: self.pairs.len(),
+      pair_table_capacity: self.pairs.capacity(),
+      // Hash table control bytes and allocator rounding are excluded. This is
+      // the capacity reserved for key/value payloads, not an RSS estimate.
+      pair_table_bytes: self.pairs.capacity() * size_of::<(Pair<I>, PairState<C, I>)>(),
+      occurrence_set_slots: self.occurs_in.sets.len(),
+      occurrence_set_slot_capacity: self.occurs_in.sets.capacity(),
+      occurrence_set_header_bytes: self.occurs_in.sets.capacity() * size_of::<AHashSet<u64>>(),
+      occurrence_capacity_entries: self.occurs_in.capacity(),
+      occurrence_capacity_bytes: self.occurs_in.capacity() * size_of::<u64>(),
     }
   }
 }
